@@ -53,7 +53,7 @@ jobs:
           mkdir -p staging/ncv
           cp "target/${{ matrix.target }}/release/ncv.exe" staging/ncv/ncv.exe
           7z a "${{ matrix.archive }}" staging/ncv/ncv.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.archive }}
