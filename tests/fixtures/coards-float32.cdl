@@ -1,0 +1,63 @@
+netcdf coards_float32 {
+dimensions:
+        date = 3 ;
+        lat = 4 ;
+        lon = 5 ;
+variables:
+        float lon(lon) ;
+                lon:long_name = "Longitude" ;
+                lon:standard_name = "longitude" ;
+                lon:units = "degrees_east" ;
+        float lat(lat) ;
+                lat:long_name = "Latitude" ;
+                lat:standard_name = "latitude" ;
+                lat:units = "degrees_north" ;
+        int date(date) ;
+                date:long_name = "Time" ;
+                date:standard_name = "time" ;
+        date:units = "days since 2000-01-01" ;
+        date:calendar = "gregorian" ;
+        float Pixel_area(date, lat, lon) ;
+                Pixel_area:long_name = "pixel area" ;
+                Pixel_area:units = "kilometer2" ;
+        float MACCity(date, lat, lon) ;
+                MACCity:long_name = "synthetic COARDS float32 field" ;
+                MACCity:standard_name = "surface_test_field" ;
+                MACCity:units = "kg m-2 s-1" ;
+                MACCity:_FillValue = 9.96921e36f ;
+                MACCity:_ChunkSizes = 1, 4, 5 ;
+                MACCity:_DeflateLevel = 1 ;
+                MACCity:_DeflateShuffle = 1 ;
+                MACCity:_Endianness = "little" ;
+// A COARDS/CF-style global convention and compact, known values.
+:Conventions = "CF-1.0" ;
+:title = "Synthetic COARDS float32 dataset" ;
+data:
+        lon = -180, -90, 0, 90, 180 ;
+        lat = -90, -30, 30, 90 ;
+        date = 0, 31, 60 ;
+        Pixel_area = 101, 102, 103, 104, 105,
+                     106, 107, 108, 109, 110,
+                     111, 112, 113, 114, 115,
+                     116, 117, 118, 119, 120,
+                     121, 122, 123, 124, 125,
+                     126, 127, 128, 129, 130,
+                     131, 132, 133, 134, 135,
+                     136, 137, 138, 139, 140,
+                     141, 142, 143, 144, 145,
+                     146, 147, 148, 149, 150,
+                     151, 152, 153, 154, 155,
+                     156, 157, 158, 159, 160 ;
+        MACCity = 1, 2, 3, 4, 5,
+                  6, 7, 8, 9, 10,
+                  11, 12, 13, 14, 15,
+                  16, 17, 18, 19, 20,
+                  21, 22, 23, 24, 25,
+                  26, 27, 28, 29, 30,
+                  31, 32, 33, 34, 35,
+                  36, 37, 38, 39, 40,
+                  41, 42, 43, 44, 45,
+                  46, 47, 48, 49, 50,
+                  51, 52, 53, 54, 55,
+                  56, 57, 58, 59, 60 ;
+}

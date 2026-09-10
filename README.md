@@ -1,0 +1,170 @@
+# ncview-rs
+
+`ncv` is a terminal-native, read-only scientific viewer for local NetCDF-4 files stored in HDF5.
+It is designed for SSH sessions on HPC systems and is distributed as a single Rust binary with no
+native NetCDF/HDF5 runtime dependency.
+
+The project focuses on fast inspection rather than data editing: slice a variable, inspect exact
+values, compare time/depth frames, and export a publication-ready view without leaving the
+terminal.
+
+## Quick start
+
+Download a platform archive from the repository's GitHub Releases page, unpack it, and put `ncv`
+on your `PATH`:
+
+```bash
+tar -xzf ncv-linux-x86_64.tar.gz
+install -m 755 ncv/ncv ~/.local/bin/ncv
+ncv path/to/data.nc
+```
+
+Or build from source with Rust 1.90 or newer:
+
+```bash
+git clone https://github.com/bbakernoaa/ncview-rs.git
+cd ncview-rs
+cargo install --path . --locked
+ncv path/to/data.nc
+```
+
+The release workflow publishes Linux x86_64, macOS arm64, and Windows x86_64 archives for tags
+named `v*`. Each release includes a `SHA256SUMS` file.
+
+## Usage
+
+```bash
+cargo run --release -- path/to/data.nc
+# or, after installation:
+ncv path/to/data.nc
+# multiple files (shell globs are expanded by your shell):
+ncv files_to_open_*.nc
+```
+
+The dashboard provides variable and dimension navigation, `c` palette cycling, `v` palette
+reversal, `a` automatic
+limits, `l` limits, `f` data masking, `s` linear/log color scaling, `r` zoom reset, `x` axis selection, Space play/pause, Enter time-series inspection, and `g`
+logical/projected grid selection. Press `Ctrl-P` or `:` for a searchable command palette; `?`
+opens the keyboard/mouse help. In the limits dialog, type directly to replace the selected
+minimum or maximum, use Tab to switch fields, and press Enter to apply (Esc cancels). `q` exits
+and restores the terminal. When multiple files are open, `{` and `}` switch the active dataset.
+
+The sidebar also exposes clickable buttons for palette cycling, automatic limits, limits editing,
+filtering, axis selection, and zoom reset. Drag across the map to zoom to a region; use
+Shift+arrow keys to pan and `r` to return to the full map. The timeline has a visible Play/Pause
+button, a progress gauge, and a speed control.
+
+Move the mouse over the map to see its latitude, longitude, and current-slice value in the status
+bar. Click a map cell to pin it (shown with a marker), then press Enter to load its full time
+series. Coordinate variables are read from NetCDF metadata, including 2-D curvilinear latitude
+and longitude fields; when a file has no coordinate variable, the status falls back to source
+indices.
+NetCDF-4 subgroup variables are shown with qualified names such as `physics/temperature` and can
+be sliced directly; grouped coordinate fields currently fall back to source indices while
+retaining the group variable's data and metadata.
+
+The data mask keeps only values between the chosen bounds; NetCDF `_FillValue` and missing values
+remain masked automatically by the data loader.
+
+The coastline overlay is backed by vendored 110m, 50m, and 10m Natural Earth land topologies from
+[world-atlas](https://github.com/topojson/world-atlas) (distributed through jsDelivr). It is a
+presentation aid only; it never changes data values or replaces a dataset-provided land/sea mask.
+The overlay is disabled at startup so the first map render does not load or index any polygons;
+press `b` (or use the command palette) to enable it. Once enabled, the fast 110m overlay is used
+by default. Set `NCVIEW_LAND_DETAIL=auto` to select 50m for regional views and 10m for local zooms,
+or force a level with `NCVIEW_LAND_DETAIL=50m`/`10m`. The 110m geometry is decoded at build time;
+the larger regional assets are parsed once on first use and cached for the session.
+
+### Scientific colour maps
+
+The single-binary catalog includes Viridis, Plasma, Turbo, Inferno, Magma, Cividis, Cool, Warm,
+Cubehelix, and Spectral. `ncv` can also load additional `.ncmap` files from the
+[ncview-scientific-colour-maps](https://github.com/samhatfield/ncview-scientific-colour-maps)
+distribution (the maps originate from Fabio Crameri's scientific colour-map collection). Place
+the files in the working directory, or point `NCVIEW_COLORMAPS` at a directory containing them.
+`NCVIEW_LIB_DIR` and `NCVIEWBASE` are also searched, including their conventional
+`share/ncview/colormaps` locations. Press `c` to cycle through every valid map discovered at
+startup; malformed files are ignored.
+
+The interface uses a Catppuccin-inspired RGB theme, rounded ratatui panels, popup shadows, and
+Nerd Font icons with Unicode fallbacks. A terminal without Nerd Font glyphs will still retain the
+layout and color treatment.
+
+NetCDF-4/HDF5 is the only supported file format in v0.1. NetCDF-3 and arbitrary HDF5 files are
+rejected before terminal entry with an actionable diagnostic. Source files are never modified.
+
+## Configuration
+
+The most useful runtime settings are environment variables:
+
+| Variable | Values | Purpose |
+| --- | --- | --- |
+| `NCVIEW_IMAGE_PROTOCOL` | `kitty`, `sixel`, `iterm2`, `cells` | Override graphics capability detection |
+| `NCVIEW_SCIENTIFIC_RENDERING` | `1`/`0` | Keep scientific nearest-neighbor rendering enabled or allow interpolation |
+| `NCVIEW_IMAGE_FILTER` | `nearest`, `lanczos3`, `catmull-rom`, `triangle`, `gaussian` | Select the unlocked image filter |
+| `NCVIEW_LAND_DETAIL` | `110m`/`50m`/`10m`/`auto` | Select coastline resolution after enabling `b` |
+| `NCVIEW_COLORMAPS` | directory | Add `.ncmap` files to the palette catalog |
+| `NCVIEW_EXPORT_DIR` | directory | Choose where `e` writes exports |
+| `NCVIEW_EXPORT_BACKGROUND` | `transparent`/`white` | Select export background |
+
+For example, a conservative SSH launch is:
+
+```bash
+NCVIEW_IMAGE_PROTOCOL=cells ncv data.nc
+```
+
+## Terminals and SSH
+
+Kitty, Sixel, and iTerm2 protocols are used when detected after entering the terminal session. The map is
+encoded as a true-color image and nearest-neighbor-upsampled by default so zoomed scientific cells stay
+crisp; set `NCVIEW_IMAGE_FILTER=lanczos3`, `catmull-rom`, `triangle`, or `gaussian` if interpolation is
+preferred after setting `NCVIEW_SCIENTIFIC_RENDERING=0` (scientific/cell-preserving mode is locked by
+default). Press `i` to cycle filters when unlocked. Hover values are shown in the status bar and pinned
+points are rendered on the image. The header reports the active renderer (`Kitty truecolor`, `Sixel
+truecolor`, `iTerm2 truecolor`, or `cell fallback`). iTerm2 itself uses the iTerm2 image
+protocol rather than Kitty/Sixel. If a multiplexer blocks capability probing, set
+`NCVIEW_IMAGE_PROTOCOL=kitty`, `NCVIEW_IMAGE_PROTOCOL=sixel`, or `NCVIEW_IMAGE_PROTOCOL=iterm2`
+to request a protocol explicitly.
+Half-block Unicode rendering remains available as the portable fallback, including over OpenSSH
+and tmux.
+No X11 forwarding, native NetCDF/HDF5 runtime, or Chafa installation is required.
+
+Graphics rendering uses a viewport-bounded aggregation pass when a source slice is larger than the
+terminal canvas, reducing source cells into display bins before color mapping. This keeps large and
+zoomed views bounded by the terminal resolution rather than blurring a full-size source image.
+
+Press `e` to export the current variable/time/depth slice as a presentation-ready PNG, a
+self-contained SVG, and a machine-readable JSON sidecar. The PNG contains the map, colorbar, and
+tick marks for direct insertion into Google Slides, PowerPoint, reports, and notebooks; the SVG
+retains editable text and full metadata, while JSON preserves CF/COARDS names, units, limits, and
+slice coordinates. All use a 16:9 canvas where applicable, with a transparent background by
+default and dark text/borders for readability. Set `NCVIEW_EXPORT_TEXT=light` when compositing on
+a dark slide background, `NCVIEW_EXPORT_BACKGROUND=white` for an opaque white canvas, and use
+`NCVIEW_EXPORT_DIR` to choose the output directory.
+SVG font selection can be customized with `NCVIEW_EXPORT_FONT`, for example
+`NCVIEW_EXPORT_FONT="Iosevka Nerd Font, Symbols Nerd Font, sans-serif"`. PNG exports keep using
+the embedded font so they remain deterministic on machines without that font installed.
+
+Curvilinear projected mode uses nearest-coordinate lookup and discloses that the presentation is
+an approximation; status values retain original source indices. See the
+[feature quickstart](specs/001-terminal-data-viewer/quickstart.md) for compatibility, cleanup,
+performance, and moderated-usability procedures.
+
+## Development
+
+Run the same checks used by GitHub Actions before opening a pull request:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
+cargo build --locked --release
+```
+
+The repository keeps the NetCDF/HDF5 parser patch under `vendor/` and embeds the selected
+scientific colour maps and world-atlas coastline assets at build time. Large local datasets and
+generated exports are ignored by Git; they should not be committed to the repository.
+
+## License
+
+`ncview-rs` is released under the [MIT License](LICENSE).

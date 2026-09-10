@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked --release
+
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: macOS arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: Windows x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Verify binary is self-contained on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/ncv"
+          file "$binary"
+          if command -v ldd >/dev/null; then ldd "$binary"; fi
+          if command -v otool >/dev/null; then otool -L "$binary"; fi
+          ! (file "$binary" | grep -E 'netcdf|hdf5|chafa')
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

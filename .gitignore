@@ -1,0 +1,32 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Local datasets and generated presentation exports
+*.nc
+*.nc4
+*_t[0-9]*_z[0-9]*.png
+*_t[0-9]*_z[0-9]*.svg
+*_t[0-9]*_z[0-9]*.json
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment and tooling state
+.env
+.env.*
+.cargo/config.toml
+
+# Coverage/profiling output
+coverage/
+*.profraw
+*.profdata
+
+.agents/
+specs/
+.specify/
