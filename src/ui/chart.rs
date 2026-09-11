@@ -84,8 +84,8 @@ fn make_plot_image(
     histogram_values: &[f64],
     area: Rect,
 ) -> Option<DynamicImage> {
-    let width = u32::from(area.width).saturating_mul(12).clamp(320, 1800);
-    let height = u32::from(area.height).saturating_mul(24).clamp(240, 1100);
+    let width = u32::from(area.width).saturating_mul(14).clamp(480, 2200);
+    let height = u32::from(area.height).saturating_mul(28).clamp(300, 1300);
     let mut buffer = vec![0_u8; width as usize * height as usize * 3];
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
@@ -183,10 +183,10 @@ fn draw_series_image(
     let text = RGBColor(205, 214, 230);
     let grid = RGBColor(57, 63, 78);
     let mut chart = PlotChartBuilder::on(root)
-        .margin(16)
-        .caption(title, ("sans-serif", 20).into_font().color(&text))
-        .x_label_area_size(42)
-        .y_label_area_size(62)
+        .margin(24)
+        .caption(title, ("sans-serif", 32).into_font().color(&text))
+        .x_label_area_size(72)
+        .y_label_area_size(104)
         .build_cartesian_2d(
             x_min..x_max,
             if kind == PlotKind::VerticalProfile {
@@ -205,6 +205,8 @@ fn draw_series_image(
         .y_desc(y_title)
         .x_labels(5)
         .y_labels(5)
+        .label_style(("sans-serif", 22).into_font().color(&text))
+        .axis_desc_style(("sans-serif", 25).into_font().color(&text))
         .axis_style(text)
         .bold_line_style(grid)
         .light_line_style(RGBColor(35, 39, 51));
@@ -237,7 +239,7 @@ fn draw_series_image(
                 .draw_series(
                     data.iter()
                         .copied()
-                        .map(|point| Circle::new(point, 3, color.filled())),
+                        .map(|point| Circle::new(point, 5, color.filled())),
                 )
                 .ok()?
                 .label(*label)
@@ -246,11 +248,11 @@ fn draw_series_image(
                 });
         } else {
             chart
-                .draw_series(LineSeries::new(data.iter().copied(), color.stroke_width(3)))
+                .draw_series(LineSeries::new(data.iter().copied(), color.stroke_width(4)))
                 .ok()?
                 .label(*label)
                 .legend(move |(x, y)| {
-                    PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(3))
+                    PathElement::new(vec![(x, y), (x + 24, y)], color.stroke_width(4))
                 });
         }
     }
@@ -259,7 +261,7 @@ fn draw_series_image(
             .configure_series_labels()
             .background_style(RGBColor(28, 28, 40))
             .border_style(RGBColor(90, 98, 120))
-            .label_font(("sans-serif", 13).into_font().color(&text))
+            .label_font(("sans-serif", 22).into_font().color(&text))
             .draw()
             .ok()?;
     }
@@ -325,13 +327,13 @@ fn draw_histogram_image(
     };
     let text = RGBColor(205, 214, 230);
     let mut chart = PlotChartBuilder::on(root)
-        .margin(16)
+        .margin(24)
         .caption(
             format!("Histogram · value bins · {y_name} · n={}", finite.len()),
-            ("sans-serif", 20).into_font().color(&text),
+            ("sans-serif", 32).into_font().color(&text),
         )
-        .x_label_area_size(42)
-        .y_label_area_size(62)
+        .x_label_area_size(72)
+        .y_label_area_size(104)
         .build_cartesian_2d(x_min..x_max, 0.0..y_max * 1.05)
         .ok()?;
     chart
@@ -340,6 +342,8 @@ fn draw_histogram_image(
         .y_desc(y_name)
         .x_labels(bin_count.min(8))
         .y_labels(5)
+        .label_style(("sans-serif", 22).into_font().color(&text))
+        .axis_desc_style(("sans-serif", 25).into_font().color(&text))
         .axis_style(text)
         .bold_line_style(RGBColor(57, 63, 78))
         .light_line_style(RGBColor(35, 39, 51))
@@ -388,13 +392,13 @@ fn draw_cdf_image(
     let (x_min, x_max) = padded_bounds(finite.first().copied()?, finite.last().copied()?, 0.05);
     let text = RGBColor(205, 214, 230);
     let mut chart = PlotChartBuilder::on(root)
-        .margin(16)
+        .margin(24)
         .caption(
             format!("Cumulative distribution · n={}", finite.len()),
-            ("sans-serif", 20).into_font().color(&text),
+            ("sans-serif", 32).into_font().color(&text),
         )
-        .x_label_area_size(42)
-        .y_label_area_size(62)
+        .x_label_area_size(72)
+        .y_label_area_size(104)
         .build_cartesian_2d(x_min..x_max, 0.0..100.0)
         .ok()?;
     chart
@@ -403,6 +407,8 @@ fn draw_cdf_image(
         .y_desc("cumulative (%)")
         .x_labels(6)
         .y_labels(5)
+        .label_style(("sans-serif", 22).into_font().color(&text))
+        .axis_desc_style(("sans-serif", 25).into_font().color(&text))
         .axis_style(text)
         .bold_line_style(RGBColor(57, 63, 78))
         .light_line_style(RGBColor(35, 39, 51))
@@ -417,7 +423,7 @@ fn draw_cdf_image(
                 .iter()
                 .enumerate()
                 .map(|(index, value)| (*value, (index + 1) as f64 * 100.0 / count)),
-            RGBColor(99, 110, 250).stroke_width(3),
+            RGBColor(99, 110, 250).stroke_width(4),
         ))
         .ok()?;
     Some(())

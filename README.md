@@ -199,6 +199,16 @@ performance, and moderated-usability procedures.
 
 ## Development
 
+Install the repository's pre-commit checks with:
+
+```sh
+pip install pre-commit
+pre-commit install
+```
+
+The hooks reject raw GRIB/IDX datasets and large files, then run `cargo fmt`,
+Clippy, and the full test suite before each commit. CI remains the final check.
+
 Run the same checks used by GitHub Actions before opening a pull request:
 
 ```bash

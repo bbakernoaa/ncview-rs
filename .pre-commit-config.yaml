@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: reject-dataset-files
+        name: Reject GRIB and large dataset files
+        entry: python3 tools/pre_commit_check.py
+        language: system
+        pass_filenames: true
+        types: [file]
+
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --locked --all-targets --all-features -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --locked --all-targets
+        language: system
+        pass_filenames: false
+        always_run: true
