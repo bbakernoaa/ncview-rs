@@ -54,6 +54,24 @@ impl GraphicsRenderer {
         }
     }
 
+    /// Create an independent image slot that shares the terminal capability
+    /// query with the primary renderer. The dashboard uses one slot for the
+    /// map and one for popup charts so resizing or re-encoding one image does
+    /// not invalidate the other.
+    pub fn secondary(&self) -> Self {
+        Self {
+            state: ProtocolState {
+                picker: self.state.picker.clone(),
+                protocol: self.state.protocol,
+            },
+            image: None,
+            image_hash: None,
+            resize_filter: self.resize_filter,
+            scientific_mode: self.scientific_mode,
+            disabled: self.disabled,
+        }
+    }
+
     pub fn supports_graphics(&self) -> bool {
         !self.disabled
             && matches!(

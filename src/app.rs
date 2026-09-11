@@ -71,6 +71,11 @@ pub enum Command {
     OpenAxisOverlay,
     CycleAxis(isize),
     ActivatePoint,
+    OpenPlot,
+    SetPlotKind(PlotKind),
+    CyclePlotAxis(isize),
+    FocusPlotAxis(PlotAxisField),
+    TogglePointSelection,
     Pointer {
         x: u16,
         y: u16,
@@ -131,6 +136,7 @@ pub struct ViewModel {
     pub time_index: usize,
     pub time_length: usize,
     pub time_label: Option<String>,
+    pub timeline: Vec<TimelinePoint>,
     pub level_label: Option<String>,
     pub playing: bool,
     pub playback_speed: f32,
@@ -154,9 +160,12 @@ pub struct ViewModel {
     pub cursor: Option<(u16, u16)>,
     pub hover_point: Option<MapPoint>,
     pub selected_point: Option<(usize, usize)>,
+    pub selected_points: Vec<(usize, usize)>,
     pub selected_coordinates: PointCoordinates,
     pub time_series: Vec<(f64, f64)>,
     pub time_series_labels: Vec<String>,
+    pub plot_series: Vec<PlotSeries>,
+    pub plot_draft: PlotDraft,
     pub variable_search_active: bool,
     pub variable_browser_index: usize,
     pub x_axis: Option<String>,
@@ -166,6 +175,13 @@ pub struct ViewModel {
     pub show_land_borders: bool,
     pub scale_mode: ScaleMode,
     pub color_scale_scope: ColorScaleScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelinePoint {
+    pub source_index: usize,
+    pub local_index: usize,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,7 +201,67 @@ pub enum Overlay {
     Filter,
     Axis,
     TimeSeries,
+    Plot,
     CommandPalette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotKind {
+    TimeSeries,
+    Scatter,
+    Histogram,
+    Cdf,
+    VerticalProfile,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlotSeries {
+    pub point: (usize, usize),
+    pub label: String,
+    pub data: Vec<(f64, f64)>,
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotAxisField {
+    X,
+    Y,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotXAxis {
+    ValidTime,
+    SampleIndex,
+    Longitude,
+    Latitude,
+    Dimension(usize),
+    Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotYAxis {
+    Value,
+    Frequency,
+    Density,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlotDraft {
+    pub kind: PlotKind,
+    pub x_axis: PlotXAxis,
+    pub y_axis: PlotYAxis,
+    pub active: PlotAxisField,
+}
+
+impl Default for PlotDraft {
+    fn default() -> Self {
+        Self {
+            kind: PlotKind::TimeSeries,
+            x_axis: PlotXAxis::ValidTime,
+            y_axis: PlotYAxis::Value,
+            active: PlotAxisField::X,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +324,7 @@ impl Default for ViewModel {
             time_index: 0,
             time_length: 1,
             time_label: None,
+            timeline: Vec::new(),
             level_label: None,
             playing: false,
             playback_speed: 1.0,
@@ -271,9 +348,12 @@ impl Default for ViewModel {
             cursor: None,
             hover_point: None,
             selected_point: None,
+            selected_points: Vec::new(),
             selected_coordinates: PointCoordinates::default(),
             time_series: Vec::new(),
             time_series_labels: Vec::new(),
+            plot_series: Vec::new(),
+            plot_draft: PlotDraft::default(),
             variable_search_active: false,
             variable_browser_index: 0,
             x_axis: None,
@@ -352,6 +432,9 @@ impl AppState {
                 if matches!(self.view.overlay, Some(Overlay::Axis)) {
                     return self.reduce(Command::CycleAxis(if index == 0 { -1 } else { 1 }));
                 }
+                if matches!(self.view.overlay, Some(Overlay::Plot)) {
+                    return self.reduce(Command::CyclePlotAxis(if index == 0 { -1 } else { 1 }));
+                }
                 let visible =
                     crate::ui::sidebar::filter_variables(&self.variables, &self.variable_query);
                 let target = if let Some(selected) = self.view.selected_variable.as_deref() {
@@ -380,6 +463,9 @@ impl AppState {
             Command::MoveTime(delta) => {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     return self.reduce(Command::PaletteMove(delta));
+                }
+                if matches!(self.view.overlay, Some(Overlay::Plot)) {
+                    return self.reduce(Command::CyclePlotAxis(delta));
                 }
                 self.view.time_index =
                     bounded_index(self.view.time_index, delta, self.view.time_length);
@@ -523,6 +609,104 @@ impl AppState {
                 self.view.overlay = Some(Overlay::CommandPalette);
                 None
             }
+            Command::OpenPlot => {
+                if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
+                    if self.view.palette_query.len() < 64 {
+                        self.view.palette_query.push('p');
+                        self.view.palette_index = 0;
+                    }
+                    return None;
+                }
+                self.view.help_visible = false;
+                if self.view.selected_point.is_none()
+                    && let Some(point) = self.view.hover_point.as_ref()
+                {
+                    self.view.selected_point = Some((point.row, point.col));
+                    self.view.selected_points = vec![(point.row, point.col)];
+                    self.view.selected_coordinates = PointCoordinates {
+                        latitude: point.latitude,
+                        longitude: point.longitude,
+                    };
+                }
+                self.view.plot_draft = PlotDraft::default();
+                self.view.overlay = Some(Overlay::Plot);
+                None
+            }
+            Command::SetPlotKind(kind) => {
+                if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
+                    let character = match kind {
+                        PlotKind::TimeSeries => 't',
+                        PlotKind::Scatter => 'd',
+                        PlotKind::Histogram => 'h',
+                        PlotKind::Cdf => 'k',
+                        PlotKind::VerticalProfile => 'u',
+                    };
+                    if self.view.palette_query.len() < 64 {
+                        self.view.palette_query.push(character);
+                        self.view.palette_index = 0;
+                    }
+                    return None;
+                }
+                self.view.plot_draft.kind = kind;
+                self.view.plot_draft.x_axis = match kind {
+                    PlotKind::TimeSeries | PlotKind::Scatter => PlotXAxis::ValidTime,
+                    PlotKind::Histogram | PlotKind::Cdf => PlotXAxis::Value,
+                    PlotKind::VerticalProfile => self
+                        .view
+                        .axis_options
+                        .iter()
+                        .enumerate()
+                        .find(|(_, name)| is_vertical_dimension(name))
+                        .map_or(PlotXAxis::ValidTime, |(index, _)| {
+                            PlotXAxis::Dimension(index)
+                        }),
+                };
+                self.view.plot_draft.y_axis = match kind {
+                    PlotKind::TimeSeries | PlotKind::Scatter => PlotYAxis::Value,
+                    PlotKind::Histogram => PlotYAxis::Frequency,
+                    PlotKind::Cdf => PlotYAxis::Density,
+                    PlotKind::VerticalProfile => PlotYAxis::Value,
+                };
+                None
+            }
+            Command::CyclePlotAxis(delta) => {
+                let draft = &mut self.view.plot_draft;
+                match (draft.kind, draft.active) {
+                    (
+                        PlotKind::TimeSeries | PlotKind::Scatter | PlotKind::VerticalProfile,
+                        PlotAxisField::X,
+                    ) => {
+                        let has_point = !self.view.selected_points.is_empty()
+                            || self.view.selected_point.is_some();
+                        let axes = plot_axis_options(&self.view.axis_options, has_point);
+                        let current = axes
+                            .iter()
+                            .position(|axis| *axis == draft.x_axis)
+                            .unwrap_or(0);
+                        let next = (current as isize + delta.signum())
+                            .rem_euclid(axes.len() as isize)
+                            as usize;
+                        draft.x_axis = axes[next];
+                    }
+                    (PlotKind::Histogram, PlotAxisField::Y) => {
+                        draft.y_axis = match (draft.y_axis, delta.signum()) {
+                            (PlotYAxis::Frequency, 1) => PlotYAxis::Density,
+                            (PlotYAxis::Density, -1) => PlotYAxis::Frequency,
+                            (PlotYAxis::Density, 1) => PlotYAxis::Frequency,
+                            (PlotYAxis::Frequency, -1) => PlotYAxis::Density,
+                            (current, _) => current,
+                        };
+                    }
+                    _ => {}
+                }
+                None
+            }
+            Command::FocusPlotAxis(field) => {
+                if matches!(self.view.overlay, Some(Overlay::Plot)) {
+                    self.view.plot_draft.active = field;
+                }
+                None
+            }
             Command::OpenVariableSearch => {
                 self.view.help_visible = false;
                 self.view.variable_search_active = true;
@@ -654,6 +838,13 @@ impl AppState {
                         AxisField::Y => AxisField::X,
                     };
                     draft.replace_active = true;
+                    return None;
+                }
+                if matches!(self.view.overlay, Some(Overlay::Plot)) {
+                    self.view.plot_draft.active = match self.view.plot_draft.active {
+                        PlotAxisField::X => PlotAxisField::Y,
+                        PlotAxisField::Y => PlotAxisField::X,
+                    };
                     return None;
                 }
                 if let Some(draft) = self.view.limit_draft.as_mut()
@@ -795,6 +986,9 @@ impl AppState {
                         y: draft.y,
                     });
                 }
+                if matches!(self.view.overlay, Some(Overlay::Plot)) {
+                    return None;
+                }
                 if let Some(draft) = self.view.limit_draft.as_ref()
                     && matches!(self.view.overlay, Some(Overlay::Limits | Overlay::Filter))
                 {
@@ -812,12 +1006,14 @@ impl AppState {
                         && let Some(point) = self.view.hover_point.as_ref()
                     {
                         self.view.selected_point = Some((point.row, point.col));
+                        self.view.selected_points = vec![(point.row, point.col)];
                         self.view.selected_coordinates = PointCoordinates {
                             latitude: point.latitude,
                             longitude: point.longitude,
                         };
                     }
-                    self.view.overlay = Some(Overlay::TimeSeries);
+                    self.view.plot_draft = PlotDraft::default();
+                    self.view.overlay = Some(Overlay::Plot);
                 }
                 None
             }
@@ -851,11 +1047,51 @@ impl AppState {
             Command::SelectPoint { row, col } => {
                 self.view.drag = None;
                 self.view.selected_point = Some((row, col));
+                self.view.selected_points = vec![(row, col)];
                 self.view.selected_coordinates = PointCoordinates::default();
                 self.view.time_series.clear();
                 self.view.time_series_labels.clear();
+                self.view.plot_series.clear();
                 self.view.status =
-                    format!("point selected: row {row}  col {col}  press Enter for time series");
+                    format!("point selected: row {row}  col {col}  press Enter for plot choices");
+                None
+            }
+            Command::TogglePointSelection => {
+                let Some(point) = self
+                    .view
+                    .hover_point
+                    .as_ref()
+                    .map(|point| (point.row, point.col))
+                else {
+                    self.view.status = "hover a map point before toggling its selection".into();
+                    return None;
+                };
+                if let Some(index) = self
+                    .view
+                    .selected_points
+                    .iter()
+                    .position(|item| *item == point)
+                {
+                    self.view.selected_points.remove(index);
+                } else {
+                    self.view.selected_points.push(point);
+                }
+                self.view.selected_point = self.view.selected_points.last().copied();
+                if self.view.selected_points.is_empty() {
+                    self.view.plot_draft.x_axis = PlotXAxis::ValidTime;
+                }
+                self.view.selected_coordinates = PointCoordinates::default();
+                self.view.time_series.clear();
+                self.view.time_series_labels.clear();
+                self.view.plot_series.clear();
+                self.view.status = if self.view.selected_points.is_empty() {
+                    "no points selected; hover a point and press m to add one".into()
+                } else {
+                    format!(
+                        "{} point(s) selected; press Enter for plot choices",
+                        self.view.selected_points.len()
+                    )
+                };
                 None
             }
             Command::MouseClick { .. } => None,
@@ -901,9 +1137,11 @@ impl AppState {
                     self.view.overlay = None;
                     self.view.hover_point = None;
                     self.view.selected_point = None;
+                    self.view.selected_points.clear();
                     self.view.selected_coordinates = PointCoordinates::default();
                     self.view.time_series.clear();
                     self.view.time_series_labels.clear();
+                    self.view.plot_series.clear();
                     self.view.zoom_bounds = None;
                     self.view.full_bounds = None;
                     if swap && let Some(slice) = self.view.slice.take() {
@@ -965,14 +1203,18 @@ impl AppState {
         self.view.x_axis = None;
         self.view.y_axis = None;
         self.view.selected_point = None;
+        self.view.selected_points.clear();
         self.view.selected_coordinates = PointCoordinates::default();
         self.view.hover_point = None;
         self.view.zoom_bounds = None;
         self.view.full_bounds = None;
+        self.view.limits = None;
         self.view.global_limits = None;
+        self.view.limits_manual = false;
         self.view.drag = None;
         self.view.time_series.clear();
         self.view.time_series_labels.clear();
+        self.view.plot_series.clear();
         let generation = self.next_generation();
         self.view.loading = LoadingState::Loading;
         let effect = Effect::ReadSlice {
@@ -1010,6 +1252,44 @@ fn bounded_index(index: usize, delta: isize, length: usize) -> usize {
         return 0;
     }
     index.saturating_add_signed(delta).min(length - 1)
+}
+
+fn plot_axis_options(dimensions: &[String], has_point: bool) -> Vec<PlotXAxis> {
+    let mut axes = vec![PlotXAxis::ValidTime, PlotXAxis::SampleIndex];
+    if !has_point {
+        return axes;
+    }
+    if dimensions.is_empty() {
+        axes.extend([PlotXAxis::Longitude, PlotXAxis::Latitude]);
+        return axes;
+    }
+    for (index, dimension) in dimensions.iter().enumerate() {
+        let lower = dimension.to_ascii_lowercase();
+        let axis = if lower.contains("lon") || lower == "x" {
+            PlotXAxis::Longitude
+        } else if lower.contains("lat") || lower == "y" {
+            PlotXAxis::Latitude
+        } else if lower.contains("time") || lower == "date" {
+            continue;
+        } else {
+            PlotXAxis::Dimension(index)
+        };
+        if !axes.contains(&axis) {
+            axes.push(axis);
+        }
+    }
+    axes
+}
+
+fn is_vertical_dimension(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("depth")
+        || lower.contains("level")
+        || lower.contains("lev")
+        || lower.contains("pressure")
+        || lower.contains("isobaric")
+        || lower.contains("height")
+        || lower.contains("hybrid")
 }
 
 fn default_axes(options: &[String]) -> (String, String) {

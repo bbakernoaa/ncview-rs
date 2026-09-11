@@ -1,15 +1,23 @@
 use super::chart;
-use crate::app::{AxisField, COMMAND_PALETTE, LimitField, Overlay, ViewModel, palette_matches};
+use crate::app::{
+    AxisField, COMMAND_PALETTE, LimitField, Overlay, PlotAxisField, PlotKind, PlotXAxis, PlotYAxis,
+    ViewModel, palette_matches,
+};
 use crate::data::{DatasetMetadata, Variable};
+use crate::render::protocol::GraphicsRenderer;
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
 };
 
 use super::{sidebar, theme};
+
+fn popup_panel<'a>(title: &'a str, accent: ratatui::style::Color) -> Block<'a> {
+    theme::panel(title, accent).title_top(theme::close_button())
+}
 
 pub fn render(
     frame: &mut Frame,
@@ -17,6 +25,7 @@ pub fn render(
     view: &ViewModel,
     metadata: &DatasetMetadata,
     variable_query: &str,
+    chart_graphics: Option<&mut GraphicsRenderer>,
 ) {
     if view.variable_search_active {
         render_variable_browser(frame, area, view, metadata, variable_query);
@@ -28,6 +37,7 @@ pub fn render(
         Overlay::Filter => "Data filter",
         Overlay::Axis => "Axes",
         Overlay::TimeSeries => "Time series",
+        Overlay::Plot => "Plot",
         Overlay::CommandPalette => "Command Palette",
     };
     let message = match overlay {
@@ -35,14 +45,15 @@ pub fn render(
         Overlay::Filter => "Values outside the range are masked",
         Overlay::Axis => "Choose distinct X and Y dimensions",
         Overlay::TimeSeries => "Values across the time dimension",
+        Overlay::Plot => "Choose a plot and its axes",
         Overlay::CommandPalette => "Type to filter commands; Enter runs the selected action",
     };
-    let width = if matches!(overlay, Overlay::CommandPalette) {
+    let width = if matches!(overlay, Overlay::CommandPalette | Overlay::Plot) {
         area.width.saturating_mul(3) / 4
     } else {
         area.width.saturating_mul(3) / 5
     };
-    let height = if matches!(overlay, Overlay::CommandPalette) {
+    let height = if matches!(overlay, Overlay::CommandPalette | Overlay::Plot) {
         area.height.saturating_mul(3) / 5
     } else {
         area.height.saturating_mul(2) / 5
@@ -84,7 +95,7 @@ pub fn render(
         lines.push(String::new());
         lines.push("↑↓ select   Enter run   Esc close".into());
         frame.render_widget(
-            Paragraph::new(lines.join("\n")).block(theme::panel(title, theme::MAUVE)),
+            Paragraph::new(lines.join("\n")).block(popup_panel(title, theme::MAUVE)),
             popup,
         );
     } else if matches!(overlay, Overlay::Limits | Overlay::Filter) {
@@ -118,7 +129,7 @@ pub fn render(
             max
         );
         frame.render_widget(
-            Paragraph::new(text).block(theme::panel(title, theme::PEACH)),
+            Paragraph::new(text).block(popup_panel(title, theme::PEACH)),
             popup,
         );
     } else if matches!(overlay, Overlay::Axis) {
@@ -152,16 +163,148 @@ pub fn render(
             y
         );
         frame.render_widget(
-            Paragraph::new(text).block(theme::panel(title, theme::BLUE)),
+            Paragraph::new(text).block(popup_panel(title, theme::BLUE)),
             popup,
         );
+    } else if matches!(overlay, Overlay::Plot) {
+        render_plot(frame, popup, view, chart_graphics);
     } else if matches!(overlay, Overlay::TimeSeries) {
-        chart::render(frame, popup, &view.time_series, &view.time_series_labels);
+        let series = plot_series_for_view(view);
+        chart::render_plot(
+            frame,
+            popup,
+            PlotKind::TimeSeries,
+            PlotXAxis::ValidTime,
+            PlotYAxis::Value,
+            None,
+            &series,
+            &[],
+            chart_graphics,
+        );
     } else {
         frame.render_widget(
             Paragraph::new(message).block(theme::panel(title, theme::MAUVE)),
             popup,
         );
+    }
+}
+
+fn render_plot(
+    frame: &mut Frame,
+    popup: Rect,
+    view: &ViewModel,
+    chart_graphics: Option<&mut GraphicsRenderer>,
+) {
+    let block = popup_panel("Plot", theme::MAUVE);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(5)])
+        .split(inner);
+    let draft = view.plot_draft;
+    let x_label = match draft.x_axis {
+        PlotXAxis::ValidTime => "valid time",
+        PlotXAxis::SampleIndex => "sample index",
+        PlotXAxis::Longitude => "longitude",
+        PlotXAxis::Latitude => "latitude",
+        PlotXAxis::Dimension(_index) if draft.kind == PlotKind::VerticalProfile => "value",
+        PlotXAxis::Dimension(index) => view
+            .axis_options
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or("dimension"),
+        PlotXAxis::Value => "value",
+    };
+    let y_label = match draft.y_axis {
+        PlotYAxis::Value if draft.kind == PlotKind::VerticalProfile => view
+            .axis_options
+            .get(match draft.x_axis {
+                PlotXAxis::Dimension(index) => index,
+                _ => usize::MAX,
+            })
+            .map(String::as_str)
+            .unwrap_or("level"),
+        PlotYAxis::Value => "value",
+        PlotYAxis::Frequency => "frequency",
+        PlotYAxis::Density => "density (%)",
+    };
+    let kind_label = match draft.kind {
+        PlotKind::TimeSeries => "time series",
+        PlotKind::Scatter => "scatter",
+        PlotKind::Histogram => "histogram",
+        PlotKind::Cdf => "CDF",
+        PlotKind::VerticalProfile => "vertical profile",
+    };
+    let x_marker = if draft.active == PlotAxisField::X {
+        ">"
+    } else {
+        " "
+    };
+    let y_marker = if draft.active == PlotAxisField::Y {
+        ">"
+    } else {
+        " "
+    };
+    let selected_count = view
+        .selected_points
+        .len()
+        .max(usize::from(view.selected_point.is_some()));
+    let target_label = if selected_count == 0 {
+        "view domain summary"
+    } else {
+        "selected points"
+    };
+    let controls = format!(
+        "type: [t] time series  [d] scatter  [h] histogram  [k] CDF  [u] profile   (current: {kind_label})\n\
+target: {target_label}   {selected_count} point(s)\n\
+{x_marker} X axis: {x_label}\n\
+{y_marker} Y axis: {y_label}\n\
+Tab switches axes  •  ↑↓/←→ changes the selected axis  •  m adds/removes points",
+    );
+    frame.render_widget(
+        Paragraph::new(controls).block(theme::panel("Plot controls", theme::BLUE)),
+        rows[0],
+    );
+    let series = plot_series_for_view(view);
+    let histogram_values =
+        if !view.selected_points.is_empty() && series.iter().any(|item| item.data.len() > 1) {
+            series
+                .iter()
+                .flat_map(|item| item.data.iter().map(|(_, value)| *value))
+                .collect::<Vec<_>>()
+        } else {
+            view.slice
+                .as_ref()
+                .map(|slice| slice.values.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+    chart::render_plot(
+        frame,
+        rows[1],
+        draft.kind,
+        draft.x_axis,
+        draft.y_axis,
+        match draft.x_axis {
+            PlotXAxis::Dimension(index) => view.axis_options.get(index).map(String::as_str),
+            _ => None,
+        },
+        &series,
+        &histogram_values,
+        chart_graphics,
+    );
+}
+
+fn plot_series_for_view(view: &ViewModel) -> Vec<crate::app::PlotSeries> {
+    if view.plot_series.is_empty() {
+        vec![crate::app::PlotSeries {
+            point: view.selected_point.unwrap_or((0, 0)),
+            label: "selected point".into(),
+            data: view.time_series.clone(),
+            labels: view.time_series_labels.clone(),
+        }]
+    } else {
+        view.plot_series.clone()
     }
 }
 
@@ -192,7 +335,7 @@ fn render_variable_browser(
         shadow,
     );
 
-    let block = theme::panel("Variables", theme::MAUVE);
+    let block = popup_panel("Variables", theme::MAUVE);
     let inner = block.inner(popup);
     let plottable = metadata
         .variables

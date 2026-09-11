@@ -46,10 +46,16 @@ pub fn render(frame: &mut Frame, area: Rect) {
   r             reset zoom\n\
   g             logical/projected grid\n\
   b             toggle filled land/ocean map backdrop\n\
-  Enter         open pinned point time series\n\
+  Enter         open pinned point plot menu\n\
+  p             open point plot chooser\n\
+  t / d / h     choose time series / scatter / histogram in plot chooser\n\
+  k / u         choose CDF / vertical profile in plot chooser\n\
+  m             add/remove the hovered point from the plot selection\n\
+  Tab           switch plot axis; arrows change the selected axis\n\
 Mouse\n\
   move over map  hover row/col/value readout\n\
-  click map      pin point (◆), then Enter for time series\n\
+  click map      pin point (◆), then Enter or p for plot choices\n\
+  hover + m      accumulate multiple points for multi-trace plots\n\
   click a variable, palette, limits, grid, or timeline\n\
   right-click or ? closes this help\n\
 Command palette\n\
@@ -70,7 +76,8 @@ Limits dialog: type numbers, Tab switches fields, Enter applies, Esc cancels";
             "  click a sidebar button, variable, timeline play/pause, or speed control",
         );
     frame.render_widget(
-        Paragraph::new(text).block(theme::panel("󰋖  Help", theme::TEAL)),
+        Paragraph::new(text)
+            .block(theme::panel("󰋖  Help", theme::TEAL).title_top(theme::close_button())),
         popup,
     );
 }

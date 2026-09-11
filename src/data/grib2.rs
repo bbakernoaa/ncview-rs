@@ -652,6 +652,12 @@ impl DataSource for Grib2Source {
             .map(|message| message.time_label.clone())
     }
 
+    fn time_label_for_variable(&self, variable: &str, _index: usize) -> Option<String> {
+        self.message(variable)
+            .ok()
+            .map(|message| message.time_label.clone())
+    }
+
     fn point_coordinates(&self, variable: &str, row: usize, col: usize) -> PointCoordinates {
         let Ok(descriptor) = self.message(variable) else {
             return PointCoordinates::default();

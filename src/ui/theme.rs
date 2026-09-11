@@ -1,6 +1,7 @@
 use ratatui::{
     style::{Color, Modifier, Style},
     symbols::border,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders},
 };
 
@@ -37,6 +38,10 @@ pub fn panel<'a>(title: &'a str, accent: Color) -> Block<'a> {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .style(Style::default().bg(SURFACE).fg(TEXT))
+}
+
+pub fn close_button() -> Line<'static> {
+    Line::from(Span::styled(" × close ", title_style(RED))).right_aligned()
 }
 
 pub fn title_style(accent: Color) -> Style {

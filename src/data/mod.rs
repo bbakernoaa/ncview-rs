@@ -90,7 +90,15 @@ pub trait DataSource: Send + Sync {
         None
     }
 
+    fn time_label_for_variable(&self, _variable: &str, index: usize) -> Option<String> {
+        self.time_label(index)
+    }
+
     fn vertical_label(&self, _variable: &str, _index: usize) -> Option<String> {
+        None
+    }
+
+    fn dimension_values(&self, _variable: &str, _dimension: &str) -> Option<Vec<f64>> {
         None
     }
 

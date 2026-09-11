@@ -336,6 +336,10 @@ impl DataSource for NetCdf4Source {
         NetCdf4Source::vertical_label(self, variable, index)
     }
 
+    fn dimension_values(&self, variable: &str, dimension: &str) -> Option<Vec<f64>> {
+        NetCdf4Source::dimension_values(self, variable, dimension)
+    }
+
     fn point_coordinates(&self, variable: &str, row: usize, col: usize) -> PointCoordinates {
         NetCdf4Source::point_coordinates(self, variable, row, col)
     }
@@ -633,6 +637,45 @@ impl NetCdf4Source {
             "{level_text} (index {index} of {})",
             length.saturating_sub(1)
         ))
+    }
+
+    fn dimension_values(&self, variable_name: &str, dimension_name: &str) -> Option<Vec<f64>> {
+        let variable = self.root.variable(variable_name)?;
+        let declared = self.root.coordinates_of(variable_name).unwrap_or_default();
+        let coordinate = declared
+            .iter()
+            .filter_map(|name| self.root.variable(name))
+            .find(|candidate| {
+                candidate.shape.len() == 1
+                    && (candidate.name.eq_ignore_ascii_case(dimension_name)
+                        || candidate
+                            .dim_names()
+                            .first()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(dimension_name)))
+            })
+            .or_else(|| {
+                self.root.variables.iter().find(|candidate| {
+                    candidate.shape.len() == 1
+                        && candidate.name.eq_ignore_ascii_case(dimension_name)
+                })
+            })
+            .or_else(|| {
+                variable.dim_names().iter().find_map(|name| {
+                    self.root.variables.iter().find(|candidate| {
+                        candidate.shape.len() == 1
+                            && candidate.name.eq_ignore_ascii_case(name)
+                            && name.eq_ignore_ascii_case(dimension_name)
+                    })
+                })
+            })?;
+        let length = usize::try_from(*coordinate.shape.first()?).ok()?;
+        let range = 0..length;
+        let dataset = self
+            .file
+            .h5()
+            .dataset_slice(&coordinate.h5_path, std::slice::from_ref(&range))
+            .ok()?;
+        decode_coordinate_values(&dataset, coordinate).ok()
     }
 
     fn point_coordinates(&self, variable_name: &str, row: usize, col: usize) -> PointCoordinates {

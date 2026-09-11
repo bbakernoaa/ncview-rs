@@ -14,9 +14,12 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use ncview_rs::{
     analysis::mapping::screen_to_source,
-    app::{AppState, AxisField, ColorScaleScope, Command, LimitField, Overlay},
+    app::{
+        AppState, AxisField, ColorScaleScope, Command, LimitField, Overlay, PlotSeries,
+        TimelinePoint,
+    },
     data::{
-        self, AxisRole, DatasetMetadata, Variable,
+        self, AxisRole, DatasetFormat, DatasetMetadata, Variable,
         grib2_manifest::{self, ManifestFormat},
         slice::{Bounds, SliceRequest},
     },
@@ -119,9 +122,11 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut graphics = GraphicsRenderer::probe();
+    let mut chart_graphics = graphics.secondary();
     let mut state = state_for_source(initial_source);
     select_initial_variable(&mut state, initial_source.metadata());
-    load_selected(&mut state, initial_source, initial_source.metadata());
+    configure_timeline(&mut state, &sources, active_file);
+    load_selected(&mut state, &sources, active_file);
     if state.view.slice.is_none() {
         state.view.status = format!(
             "opened {} variable(s); no plottable data",
@@ -136,7 +141,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 >= Duration::from_secs_f32(1.0 / state.view.playback_speed)
         {
             state.reduce(Command::TickPlayback);
-            load_selected(&mut state, source, source.metadata());
+            load_selected(&mut state, &sources, active_file);
             last_playback_tick = Instant::now();
         }
         terminal.draw(|frame| {
@@ -149,6 +154,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 &state.variable_query,
                 state.view.variable_search_active,
                 Some(&mut graphics),
+                Some(&mut chart_graphics),
             )
         })?;
         if event::poll(std::time::Duration::from_millis(100))?
@@ -182,7 +188,8 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 let source = sources[active_file].as_ref();
                 state = state_for_source(source);
                 select_initial_variable(&mut state, source.metadata());
-                load_selected(&mut state, source, source.metadata());
+                configure_timeline(&mut state, &sources, active_file);
+                load_selected(&mut state, &sources, active_file);
                 state.view.status = format!(
                     "opened file {}/{}: {}",
                     active_file + 1,
@@ -197,9 +204,15 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let cycle_image_filter = matches!(command, Command::CycleImageFilter);
             let export_current = matches!(command, Command::ExportCurrent);
             let refresh_time_series = activate_point
+                || matches!(command, Command::OpenPlot)
                 || matches!(
                     command,
-                    Command::MoveDepth(_)
+                    Command::MoveTime(_)
+                        | Command::SetTime(_)
+                        | Command::MoveDepth(_)
+                        | Command::CyclePlotAxis(_)
+                        | Command::SetPlotKind(_)
+                        | Command::TogglePointSelection
                         | Command::SelectVariable(_)
                         | Command::SelectVariableAt(_)
                         | Command::SubmitVariableSearch
@@ -226,10 +239,23 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             );
             let axis_submit = matches!(command, Command::ActivatePoint)
                 && state.view.overlay == Some(Overlay::Axis);
+            let reconfigure_timeline = matches!(
+                command,
+                Command::SelectVariable(_)
+                    | Command::SelectVariableAt(_)
+                    | Command::SubmitVariableSearch
+                    | Command::ExecuteCommandPalette
+                    | Command::SetAxes { .. }
+            ) || axis_submit;
             let point_target = match &command {
                 Command::HoverPoint { row, col, .. } | Command::SelectPoint { row, col } => {
                     Some((*row, *col))
                 }
+                Command::TogglePointSelection => state
+                    .view
+                    .hover_point
+                    .as_ref()
+                    .map(|point| (point.row, point.col)),
                 Command::ActivatePoint => state.view.selected_point,
                 _ => None,
             };
@@ -264,10 +290,21 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if reload || axis_submit {
-                load_selected(&mut state, source, source.metadata());
+                if reconfigure_timeline {
+                    configure_timeline(&mut state, &sources, active_file);
+                }
+                load_selected(&mut state, &sources, active_file);
             }
-            if refresh_time_series && state.view.overlay == Some(Overlay::TimeSeries) {
-                load_time_series(&mut state, source, source.metadata());
+            if refresh_time_series
+                && matches!(
+                    state.view.overlay,
+                    Some(Overlay::TimeSeries | Overlay::Plot)
+                )
+            {
+                load_time_series(&mut state, &sources, active_file);
+            }
+            if let Some(point) = state.view.timeline.get(state.view.time_index) {
+                active_file = point.source_index;
             }
         }
     }
@@ -493,7 +530,21 @@ fn translate_mouse(
         return Command::ToggleHelp;
     }
     if view.variable_search_active {
+        if close_button_hit(variable_browser_rect(area), x, y) {
+            return Command::Quit;
+        }
         return Command::Pointer { x, y };
+    }
+    if view.help_visible {
+        if close_button_hit(help_rect(area), x, y) {
+            return Command::ToggleHelp;
+        }
+        return Command::Pointer { x, y };
+    }
+    if let Some(overlay) = view.overlay
+        && close_button_hit(overlay_rect(area, overlay), x, y)
+    {
+        return Command::Quit;
     }
     if matches!(view.overlay, Some(Overlay::Limits | Overlay::Filter)) {
         let width = area.width.saturating_mul(3) / 5;
@@ -518,6 +569,35 @@ fn translate_mouse(
         }
         if x >= popup_x && x < popup_x.saturating_add(width) && y == popup_y.saturating_add(2) {
             return Command::FocusAxisField(AxisField::Y);
+        }
+        return Command::Pointer { x, y };
+    }
+    if matches!(view.overlay, Some(Overlay::Plot)) {
+        let popup = overlay_rect(area, Overlay::Plot);
+        let content_x = popup.x.saturating_add(2);
+        let type_y = popup.y.saturating_add(2);
+        if y == type_y && x >= content_x && x < popup.right().saturating_sub(1) {
+            let relative = x.saturating_sub(content_x);
+            let fifth = (popup.width.saturating_sub(4) / 5).max(1);
+            return if relative < fifth {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::TimeSeries)
+            } else if relative < fifth.saturating_mul(2) {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::Scatter)
+            } else if relative < fifth.saturating_mul(3) {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::Histogram)
+            } else if relative < fifth.saturating_mul(4) {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::Cdf)
+            } else {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::VerticalProfile)
+            };
+        }
+        if x >= popup.x && x < popup.right() {
+            if y == popup.y.saturating_add(4) {
+                return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::X);
+            }
+            if y == popup.y.saturating_add(5) {
+                return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::Y);
+            }
         }
         return Command::Pointer { x, y };
     }
@@ -648,6 +728,55 @@ fn translate_mouse(
     }
 }
 
+fn close_button_hit(popup: Rect, x: u16, y: u16) -> bool {
+    popup.width >= 4
+        && y == popup.y
+        && x >= popup.x.saturating_add(popup.width.saturating_sub(10))
+        && x < popup.x.saturating_add(popup.width)
+}
+
+fn variable_browser_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(4).saturating_div(5).max(1);
+    let height = area.height.saturating_mul(4).saturating_div(5).max(1);
+    Rect {
+        x: area.x + area.width.saturating_sub(width.min(area.width)) / 2,
+        y: area.y + area.height.saturating_sub(height.min(area.height)) / 2,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+fn help_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(3) / 4;
+    let height = area.height.saturating_mul(3) / 5;
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn overlay_rect(area: Rect, overlay: Overlay) -> Rect {
+    let large = matches!(overlay, Overlay::CommandPalette | Overlay::Plot);
+    let width = if large {
+        area.width.saturating_mul(3) / 4
+    } else {
+        area.width.saturating_mul(3) / 5
+    };
+    let height = if large {
+        area.height.saturating_mul(3) / 5
+    } else {
+        area.height.saturating_mul(2) / 5
+    };
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 fn map_point_at(
     x: u16,
     y: u16,
@@ -727,10 +856,84 @@ fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
     }
 }
 
-fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: &DatasetMetadata) {
+fn configure_timeline(
+    state: &mut AppState,
+    sources: &[Box<dyn data::DataSource>],
+    active_file: usize,
+) {
+    state.view.timeline.clear();
+    let Some(variable_name) = state.view.selected_variable.as_deref() else {
+        state.view.time_length = 1;
+        state.view.time_index = 0;
+        state.view.time_label = None;
+        return;
+    };
+    for (source_index, source) in sources.iter().enumerate() {
+        let Some(variable) = source
+            .metadata()
+            .variables
+            .iter()
+            .find(|variable| variable.name == variable_name)
+        else {
+            continue;
+        };
+        let (time_length, _) = leading_lengths(source.metadata(), variable);
+        for local_index in 0..time_length.max(1) {
+            let global_index = state.view.timeline.len();
+            let label = source
+                .time_label_for_variable(variable_name, local_index)
+                .unwrap_or_else(|| format!("t={global_index}"));
+            state.view.timeline.push(TimelinePoint {
+                source_index,
+                local_index,
+                label,
+            });
+        }
+    }
+    if state.view.timeline.is_empty()
+        && let Some(source) = sources.get(active_file)
+        && source
+            .metadata()
+            .variables
+            .iter()
+            .any(|variable| variable.name == variable_name)
+    {
+        state.view.timeline.push(TimelinePoint {
+            source_index: active_file,
+            local_index: 0,
+            label: "coordinate index".into(),
+        });
+    }
+    state.view.time_length = state.view.timeline.len().max(1);
+    state.view.time_index = state
+        .view
+        .time_index
+        .min(state.view.time_length.saturating_sub(1));
+    state.view.time_label = state
+        .view
+        .timeline
+        .get(state.view.time_index)
+        .map(|point| point.label.clone());
+}
+
+fn load_selected(state: &mut AppState, sources: &[Box<dyn data::DataSource>], active_file: usize) {
     let Some(variable_name) = state.view.selected_variable.clone() else {
         return;
     };
+    let timeline_point = state
+        .view
+        .timeline
+        .get(state.view.time_index)
+        .cloned()
+        .unwrap_or(TimelinePoint {
+            source_index: active_file,
+            local_index: 0,
+            label: "coordinate index".into(),
+        });
+    let Some(source) = sources.get(timeline_point.source_index) else {
+        return;
+    };
+    let metadata = source.metadata();
     let Some(variable) = metadata
         .variables
         .iter()
@@ -738,7 +941,7 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
     else {
         return;
     };
-    let Some((full_bounds, time_length, depth_length)) = plane_bounds(
+    let Some((full_bounds, _time_length, depth_length)) = plane_bounds(
         metadata,
         variable,
         state.view.x_axis.as_deref(),
@@ -747,11 +950,10 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
         state.view.status = format!("{variable_name}: needs at least two dimensions");
         return;
     };
-    state.view.time_length = time_length;
+    state.view.time_length = state.view.timeline.len().max(1);
     state.view.depth_length = depth_length;
-    state.view.time_index = state.view.time_index.min(time_length.saturating_sub(1));
     state.view.depth_index = state.view.depth_index.min(depth_length.saturating_sub(1));
-    state.view.time_label = source.time_label(state.view.time_index);
+    state.view.time_label = Some(timeline_point.label.clone());
     state.view.level_label = source.vertical_label(&variable_name, state.view.depth_index);
     state.view.full_bounds = Some(full_bounds);
     let bounds = state.view.zoom_bounds.unwrap_or(full_bounds);
@@ -760,12 +962,12 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
         variable,
         state.view.x_axis.as_deref(),
         state.view.y_axis.as_deref(),
-        state.view.time_index,
+        timeline_point.local_index,
         state.view.depth_index,
     );
     let request = SliceRequest {
         variable: variable_name.clone(),
-        time: state.view.time_index,
+        time: timeline_point.local_index,
         depth: state.view.depth_index,
         bounds,
     };
@@ -782,7 +984,7 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
             } else if state.view.color_scale_scope == ColorScaleScope::GlobalView {
                 let full_request = SliceRequest {
                     variable: variable_name.clone(),
-                    time: state.view.time_index,
+                    time: timeline_point.local_index,
                     depth: state.view.depth_index,
                     bounds: full_bounds,
                 };
@@ -858,57 +1060,538 @@ fn slice_limits(
 
 fn load_time_series(
     state: &mut AppState,
-    source: &dyn data::DataSource,
-    metadata: &DatasetMetadata,
+    sources: &[Box<dyn data::DataSource>],
+    active_file: usize,
 ) {
     state.view.time_series.clear();
     state.view.time_series_labels.clear();
-    let Some((row, col)) = state.view.selected_point else {
-        return;
+    state.view.plot_series.clear();
+    let selected_points = if state.view.selected_points.is_empty() {
+        state.view.selected_point.into_iter().collect::<Vec<_>>()
+    } else {
+        state.view.selected_points.clone()
     };
+    if selected_points.is_empty() {
+        load_domain_summary(state, sources);
+        return;
+    }
+    if matches!(
+        state.view.plot_draft.x_axis,
+        ncview_rs::app::PlotXAxis::Longitude
+            | ncview_rs::app::PlotXAxis::Latitude
+            | ncview_rs::app::PlotXAxis::Dimension(_)
+    ) {
+        load_cross_section(state, sources, &selected_points);
+        return;
+    }
     let Some(variable_name) = state.view.selected_variable.clone() else {
         return;
     };
-    let Some(variable) = metadata
+    let Some(active_source) = sources.get(active_file) else {
+        return;
+    };
+    let timeline = state.view.timeline.clone();
+    let depth_index = state.view.depth_index;
+    let mut used_labels = Vec::new();
+    let mut total_finite = 0;
+
+    for (point_number, (row, col)) in selected_points.iter().copied().enumerate() {
+        let mut data = Vec::with_capacity(timeline.len());
+        let mut labels = Vec::with_capacity(timeline.len());
+        let mut finite_samples = 0;
+        for (time_index, point) in timeline.iter().enumerate() {
+            let Some(source) = sources.get(point.source_index) else {
+                data.push((time_index as f64, f64::NAN));
+                labels.push(point.label.clone());
+                continue;
+            };
+            let Some(variable) = source
+                .metadata()
+                .variables
+                .iter()
+                .find(|variable| variable.name == variable_name)
+            else {
+                data.push((time_index as f64, f64::NAN));
+                labels.push(point.label.clone());
+                continue;
+            };
+            let Some((source_bounds, _, depth_length)) =
+                spatial_bounds(source.metadata(), variable)
+            else {
+                data.push((time_index as f64, f64::NAN));
+                labels.push(point.label.clone());
+                continue;
+            };
+            if row < source_bounds.row_start
+                || row >= source_bounds.row_end
+                || col < source_bounds.col_start
+                || col >= source_bounds.col_end
+            {
+                data.push((time_index as f64, f64::NAN));
+                labels.push(point.label.clone());
+                continue;
+            }
+            let request = SliceRequest {
+                variable: variable_name.clone(),
+                time: point.local_index,
+                depth: depth_index.min(depth_length.saturating_sub(1)),
+                bounds: Bounds::new(row, row + 1, col, col + 1)
+                    .expect("point bounds are non-empty"),
+            };
+            let value = source
+                .read_slice_on_axes(&request, None, None, &[])
+                .ok()
+                .and_then(|slice| slice.value_at_source(row, col))
+                .unwrap_or(f64::NAN);
+            finite_samples += usize::from(value.is_finite());
+            data.push((time_index as f64, value));
+            labels.push(point.label.clone());
+        }
+        total_finite += finite_samples;
+        let base_label = point_label(active_source.as_ref(), &variable_name, row, col);
+        let label = if used_labels.contains(&base_label) {
+            format!("{base_label} #{}", point_number + 1)
+        } else {
+            base_label
+        };
+        used_labels.push(label.clone());
+        state.view.plot_series.push(PlotSeries {
+            point: (row, col),
+            label,
+            data,
+            labels,
+        });
+    }
+
+    if let Some(first) = state.view.plot_series.first() {
+        state.view.time_series = first.data.clone();
+        state.view.time_series_labels = first.labels.clone();
+    }
+    let sample_count = state
+        .view
+        .plot_series
+        .first()
+        .map_or(0, |series| series.data.len());
+    state.view.status = format!(
+        "{} point(s): {total_finite}/{} finite timeline samples",
+        selected_points.len(),
+        sample_count.saturating_mul(selected_points.len())
+    );
+}
+
+fn load_cross_section(
+    state: &mut AppState,
+    sources: &[Box<dyn data::DataSource>],
+    selected_points: &[(usize, usize)],
+) {
+    let Some(variable_name) = state.view.selected_variable.clone() else {
+        return;
+    };
+    let x_axis = state.view.plot_draft.x_axis;
+    let Some(time_point) = state.view.timeline.get(state.view.time_index) else {
+        return;
+    };
+    let Some(source) = sources.get(time_point.source_index) else {
+        return;
+    };
+    let Some(variable) = source
+        .metadata()
         .variables
         .iter()
         .find(|variable| variable.name == variable_name)
     else {
         return;
     };
-    let Some((bounds, time_length, _)) = spatial_bounds(metadata, variable) else {
+    let Some((source_bounds, _, depth_length)) = spatial_bounds(source.metadata(), variable) else {
         return;
     };
-    if row < bounds.row_start
-        || row >= bounds.row_end
-        || col < bounds.col_start
-        || col >= bounds.col_end
-    {
-        state.view.status = format!("point row {row} col {col} is outside the selected variable");
+    let depth = state.view.depth_index.min(depth_length.saturating_sub(1));
+    let Some(x_dimension) = plot_dimension_name(source.metadata(), variable, x_axis) else {
+        state.view.status = "the selected plot dimension is unavailable for this field".into();
         return;
-    }
-    let mut finite_samples = 0;
-    for time in 0..time_length {
+    };
+    let Some(x_length) = dimension_length(source.metadata(), &x_dimension) else {
+        return;
+    };
+    let dimension_coordinates = source.dimension_values(&variable_name, &x_dimension);
+    let fixed_dimension = variable
+        .dimensions
+        .iter()
+        .find(|name| {
+            !name.eq_ignore_ascii_case(&x_dimension)
+                && (state.view.x_axis.as_deref() == Some(name.as_str())
+                    || state.view.y_axis.as_deref() == Some(name.as_str()))
+        })
+        .or_else(|| {
+            variable
+                .dimensions
+                .iter()
+                .find(|name| !name.eq_ignore_ascii_case(&x_dimension))
+        })
+        .cloned();
+    let Some(fixed_dimension) = fixed_dimension else {
+        state.view.status = "a cross-section needs at least two dimensions".into();
+        return;
+    };
+    let mut series = Vec::new();
+    let mut used_labels = Vec::new();
+    let level_label = state
+        .view
+        .level_label
+        .clone()
+        .unwrap_or_else(|| format!("depth={depth}"));
+
+    for (point_number, &(row, col)) in selected_points.iter().enumerate() {
+        let x_is_grib = source.metadata().format == DatasetFormat::Grib2;
+        let latitude_dimension = plot_dimension_name(
+            source.metadata(),
+            variable,
+            ncview_rs::app::PlotXAxis::Latitude,
+        )
+        .unwrap_or_else(|| "latitude".into());
+        let longitude_dimension = plot_dimension_name(
+            source.metadata(),
+            variable,
+            ncview_rs::app::PlotXAxis::Longitude,
+        )
+        .unwrap_or_else(|| "longitude".into());
+        let x_on_row = !x_is_grib || x_dimension.eq_ignore_ascii_case(&latitude_dimension);
+        let fixed_index = dimension_index_for_plot(
+            source.metadata(),
+            &fixed_dimension,
+            row,
+            col,
+            time_point.local_index,
+            depth,
+        );
+        let bounds = if x_is_grib {
+            if x_on_row {
+                Bounds::new(source_bounds.row_start, source_bounds.row_end, col, col + 1)
+            } else {
+                Bounds::new(row, row + 1, source_bounds.col_start, source_bounds.col_end)
+            }
+        } else if x_on_row {
+            Bounds::new(0, x_length, fixed_index, fixed_index + 1)
+        } else {
+            Bounds::new(fixed_index, fixed_index + 1, 0, x_length)
+        };
+        let Ok(bounds) = bounds else {
+            continue;
+        };
+        if row < source_bounds.row_start
+            || row >= source_bounds.row_end
+            || col < source_bounds.col_start
+            || col >= source_bounds.col_end
+        {
+            continue;
+        }
         let request = SliceRequest {
             variable: variable_name.clone(),
-            time,
-            depth: state.view.depth_index,
-            bounds: Bounds::new(row, row + 1, col, col + 1).expect("point bounds are non-empty"),
+            time: time_point.local_index,
+            depth,
+            bounds,
         };
-        let value = source
+        let fixed_axes = variable
+            .dimensions
+            .iter()
+            .filter(|name| {
+                !name.eq_ignore_ascii_case(&x_dimension)
+                    && !name.eq_ignore_ascii_case(&fixed_dimension)
+            })
+            .map(|name| {
+                (
+                    name.clone(),
+                    dimension_index_for_plot(
+                        source.metadata(),
+                        name,
+                        row,
+                        col,
+                        time_point.local_index,
+                        depth,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let row_axis = if x_is_grib {
+            Some(latitude_dimension.as_str())
+        } else if x_on_row {
+            Some(x_dimension.as_str())
+        } else {
+            Some(fixed_dimension.as_str())
+        };
+        let col_axis = if x_is_grib {
+            Some(longitude_dimension.as_str())
+        } else if x_on_row {
+            Some(fixed_dimension.as_str())
+        } else {
+            Some(x_dimension.as_str())
+        };
+        let Ok(slice) = source.read_slice_on_axes(&request, row_axis, col_axis, &fixed_axes) else {
+            continue;
+        };
+        let count = if x_is_grib {
+            if x_on_row {
+                source_bounds.row_end - source_bounds.row_start
+            } else {
+                source_bounds.col_end - source_bounds.col_start
+            }
+        } else {
+            x_length
+        };
+        let mut data = Vec::with_capacity(count);
+        for offset in 0..count {
+            let (sample_row, sample_col) = if x_is_grib {
+                if x_on_row {
+                    (source_bounds.row_start + offset, col)
+                } else {
+                    (row, source_bounds.col_start + offset)
+                }
+            } else if x_on_row {
+                (offset, fixed_index)
+            } else {
+                (fixed_index, offset)
+            };
+            let coordinate = source.point_coordinates(
+                &variable_name,
+                if x_dimension.eq_ignore_ascii_case(&latitude_dimension) {
+                    if x_on_row { offset } else { row }
+                } else {
+                    row
+                },
+                if x_dimension.eq_ignore_ascii_case(&longitude_dimension) {
+                    if x_on_row { offset } else { col }
+                } else {
+                    col
+                },
+            );
+            let x = if x_dimension.eq_ignore_ascii_case(&longitude_dimension) {
+                coordinate
+                    .longitude
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(offset as f64)
+            } else if x_dimension.eq_ignore_ascii_case(&latitude_dimension) {
+                coordinate
+                    .latitude
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(offset as f64)
+            } else {
+                dimension_coordinates
+                    .as_ref()
+                    .and_then(|values| values.get(offset).copied())
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(offset as f64)
+            };
+            let y = slice
+                .value_at_source(sample_row, sample_col)
+                .unwrap_or(f64::NAN);
+            data.push((x, y));
+        }
+        // Latitude/longitude coordinates can be stored north-to-south or
+        // east-to-west. Sort the horizontal section so its x axis is always
+        // monotonic before it reaches the chart renderer.
+        data.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let base = format!(
+            "{} @ {level_label}",
+            point_label(source.as_ref(), &variable_name, row, col)
+        );
+        let label = if used_labels.contains(&base) {
+            format!("{base} #{}", point_number + 1)
+        } else {
+            base
+        };
+        used_labels.push(label.clone());
+        series.push(PlotSeries {
+            point: (row, col),
+            label,
+            data,
+            labels: Vec::new(),
+        });
+    }
+    if let Some(first) = series.first() {
+        state.view.time_series = first.data.clone();
+        state.view.time_series_labels.clear();
+    }
+    state.view.plot_series = series;
+    state.view.status = format!(
+        "{x_dimension} cross-section at time {} and {level_label}",
+        time_point.label
+    );
+}
+
+fn plot_dimension_name(
+    metadata: &DatasetMetadata,
+    variable: &Variable,
+    x_axis: ncview_rs::app::PlotXAxis,
+) -> Option<String> {
+    match x_axis {
+        ncview_rs::app::PlotXAxis::Longitude => variable
+            .dimensions
+            .iter()
+            .find(|name| {
+                metadata
+                    .dimensions
+                    .iter()
+                    .find(|dimension| dimension.name.eq_ignore_ascii_case(name))
+                    .is_some_and(|dimension| dimension.role == AxisRole::Longitude)
+                    || name.to_ascii_lowercase().contains("lon")
+            })
+            .cloned(),
+        ncview_rs::app::PlotXAxis::Latitude => variable
+            .dimensions
+            .iter()
+            .find(|name| {
+                metadata
+                    .dimensions
+                    .iter()
+                    .find(|dimension| dimension.name.eq_ignore_ascii_case(name))
+                    .is_some_and(|dimension| dimension.role == AxisRole::Latitude)
+                    || name.to_ascii_lowercase().contains("lat")
+            })
+            .cloned(),
+        ncview_rs::app::PlotXAxis::Dimension(index) => variable.dimensions.get(index).cloned(),
+        _ => None,
+    }
+}
+
+fn dimension_index_for_plot(
+    metadata: &DatasetMetadata,
+    dimension_name: &str,
+    row: usize,
+    col: usize,
+    time: usize,
+    depth: usize,
+) -> usize {
+    let dimension = metadata
+        .dimensions
+        .iter()
+        .find(|dimension| dimension.name.eq_ignore_ascii_case(dimension_name));
+    let index = match dimension.map(|dimension| dimension.role) {
+        Some(AxisRole::Latitude) => row,
+        Some(AxisRole::Longitude) => col,
+        Some(AxisRole::Time) => time,
+        Some(AxisRole::Depth) => depth,
+        _ => 0,
+    };
+    dimension
+        .map(|dimension| index.min(dimension.length.saturating_sub(1)))
+        .unwrap_or(index)
+}
+
+fn point_label(
+    source: &dyn data::DataSource,
+    variable_name: &str,
+    row: usize,
+    col: usize,
+) -> String {
+    let coordinates = source.point_coordinates(variable_name, row, col);
+    match (coordinates.latitude, coordinates.longitude) {
+        (Some(latitude), Some(longitude)) => format!("lat={latitude:.2}, lon={longitude:.2}"),
+        _ => format!("row={row}, col={col}"),
+    }
+}
+
+fn load_domain_summary(state: &mut AppState, sources: &[Box<dyn data::DataSource>]) {
+    let Some(variable_name) = state.view.selected_variable.clone() else {
+        return;
+    };
+    let timeline = state.view.timeline.clone();
+    let depth_index = state.view.depth_index;
+    let view_bounds = state.view.zoom_bounds;
+    let mut mean = Vec::with_capacity(timeline.len());
+    let mut minimum = Vec::with_capacity(timeline.len());
+    let mut maximum = Vec::with_capacity(timeline.len());
+    let mut labels = Vec::with_capacity(timeline.len());
+    let mut finite_samples = 0;
+
+    for point in &timeline {
+        let Some(source) = sources.get(point.source_index) else {
+            continue;
+        };
+        let Some(variable) = source
+            .metadata()
+            .variables
+            .iter()
+            .find(|variable| variable.name == variable_name)
+        else {
+            continue;
+        };
+        let Some((source_bounds, _, depth_length)) = spatial_bounds(source.metadata(), variable)
+        else {
+            continue;
+        };
+        let Some(bounds) = clamp_domain_bounds(source_bounds, view_bounds) else {
+            continue;
+        };
+        let request = SliceRequest {
+            variable: variable_name.clone(),
+            time: point.local_index,
+            depth: depth_index.min(depth_length.saturating_sub(1)),
+            bounds,
+        };
+        let statistics = source
             .read_slice_on_axes(&request, None, None, &[])
             .ok()
-            .and_then(|slice| slice.value_at_source(row, col))
-            .unwrap_or(f64::NAN);
-        finite_samples += usize::from(value.is_finite());
-        state.view.time_series.push((time as f64, value));
-        state.view.time_series_labels.push(
-            source
-                .time_label(time)
-                .unwrap_or_else(|| format!("t={time}")),
-        );
+            .and_then(|slice| slice.statistics);
+        if let Some(statistics) = statistics {
+            finite_samples += statistics.finite_count;
+            mean.push((mean.len() as f64, statistics.mean));
+            minimum.push((minimum.len() as f64, statistics.min));
+            maximum.push((maximum.len() as f64, statistics.max));
+        } else {
+            let index = mean.len() as f64;
+            mean.push((index, f64::NAN));
+            minimum.push((index, f64::NAN));
+            maximum.push((index, f64::NAN));
+        }
+        labels.push(point.label.clone());
     }
-    state.view.status = format!("point row {row} col {col}: {finite_samples} finite time samples");
+
+    state.view.plot_series = vec![
+        PlotSeries {
+            point: (0, 0),
+            label: "mean".into(),
+            data: mean.clone(),
+            labels: labels.clone(),
+        },
+        PlotSeries {
+            point: (0, 0),
+            label: "minimum".into(),
+            data: minimum,
+            labels: labels.clone(),
+        },
+        PlotSeries {
+            point: (0, 0),
+            label: "maximum".into(),
+            data: maximum,
+            labels: labels.clone(),
+        },
+    ];
+    state.view.time_series = mean;
+    state.view.time_series_labels = labels;
+    let domain_label = if view_bounds.is_some() {
+        "view window"
+    } else {
+        "full field"
+    };
+    state.view.status = format!(
+        "domain summary ({domain_label}): {finite_samples} finite values across {} timeline samples",
+        state.view.time_series.len()
+    );
+}
+
+fn clamp_domain_bounds(source_bounds: Bounds, requested: Option<Bounds>) -> Option<Bounds> {
+    let requested = requested.unwrap_or(source_bounds);
+    let row_start = requested
+        .row_start
+        .max(source_bounds.row_start)
+        .min(source_bounds.row_end.saturating_sub(1));
+    let row_end = requested.row_end.min(source_bounds.row_end);
+    let col_start = requested
+        .col_start
+        .max(source_bounds.col_start)
+        .min(source_bounds.col_end.saturating_sub(1));
+    let col_end = requested.col_end.min(source_bounds.col_end);
+    Bounds::new(row_start, row_end, col_start, col_end).ok()
 }
 
 fn leading_lengths(metadata: &DatasetMetadata, variable: &Variable) -> (usize, usize) {

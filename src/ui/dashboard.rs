@@ -52,6 +52,7 @@ pub fn render_with_search(
         variable_query,
         variable_search_active,
         None,
+        None,
     );
 }
 
@@ -65,6 +66,7 @@ pub fn render_with_search_and_image(
     variable_query: &str,
     variable_search_active: bool,
     graphics: Option<&mut GraphicsRenderer>,
+    chart_graphics: Option<&mut GraphicsRenderer>,
 ) {
     let graphics_label = graphics
         .as_ref()
@@ -166,7 +168,7 @@ pub fn render_with_search_and_image(
         view.playback_speed,
     );
     let status = if view.help_visible {
-        "Keys: arrows navigate  [/] depth  click map to select  Enter: time series  ? help"
+        "Keys: arrows navigate  [/] depth  click map to select  Enter: plots  m: add point  ? help"
             .to_string()
     } else if let Some(drag) = view.drag {
         if view.zoom_bounds.is_some() && !drag.zoom {
@@ -218,13 +220,13 @@ pub fn render_with_search_and_image(
             .map_or_else(|| "masked".to_string(), format_point_value);
         let statistics = slice_statistics(view);
         format!(
-            "point  {latitude}  {longitude}  value {value:>14}  |  {statistics}  (Enter for time series)"
+            "point  {latitude}  {longitude}  value {value:>14}  |  {statistics}  (Enter for plots, m adds points)"
         )
     } else {
         view.status.clone()
     };
     status::render(frame, areas.status, &status);
-    popup::render(frame, area, view, metadata, variable_query);
+    popup::render(frame, area, view, metadata, variable_query, chart_graphics);
     if view.help_visible {
         help::render(frame, area);
     }

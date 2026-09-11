@@ -1,7 +1,127 @@
 use ncview_rs::data::slice::{Bounds, Slice2D, Validity};
 use ncview_rs::data::slice::{PackedAttributes, classify_packed};
 use ndarray::Array2;
+use oxinetcdf::{NcFileWriter, NcType, VarOrGroup};
 use std::io::Write;
+
+fn regular_fixture() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("regular.nc4");
+    let mut writer = NcFileWriter::new();
+    let lat = writer.def_dim("lat", 4).unwrap();
+    let lon = writer.def_dim("lon", 5).unwrap();
+    let field = writer
+        .def_var("temperature", &[lat, lon], NcType::Float64)
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(field), "units", "K")
+        .unwrap();
+    writer
+        .put_var_f64(
+            field,
+            &(0..20)
+                .map(|index| 250.0 + index as f64 * 0.25)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    writer.close(path).unwrap();
+    directory
+}
+
+fn coards_fixture() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("coards-float32.nc4");
+    let mut writer = NcFileWriter::new();
+    // The lightweight writer emits a dimension-scale dataset for every
+    // dimension and cannot give that scale the same HDF5 name as a coordinate
+    // variable. Keep the scales distinct while retaining explicit coordinate
+    // metadata for the reader to resolve.
+    let date = writer.def_dim("date_dim", 3).unwrap();
+    let lat = writer.def_dim("lat_dim", 4).unwrap();
+    let lon = writer.def_dim("lon_dim", 5).unwrap();
+
+    let lon_var = writer.def_var("lon", &[lon], NcType::Float32).unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lon_var), "long_name", "Longitude")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lon_var), "standard_name", "longitude")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lon_var), "units", "degrees_east")
+        .unwrap();
+    writer
+        .put_var_f64(lon_var, &[-180.0, -90.0, 0.0, 90.0, 180.0])
+        .unwrap();
+
+    let lat_var = writer.def_var("lat", &[lat], NcType::Float32).unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lat_var), "long_name", "Latitude")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lat_var), "standard_name", "latitude")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lat_var), "units", "degrees_north")
+        .unwrap();
+    writer
+        .put_var_f64(lat_var, &[-90.0, -30.0, 30.0, 90.0])
+        .unwrap();
+
+    let date_var = writer.def_var("date", &[date], NcType::Int32).unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(date_var), "long_name", "Time")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(date_var), "standard_name", "time")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(date_var), "units", "days since 2000-01-01")
+        .unwrap();
+    writer.put_var_i32(date_var, &[0, 31, 60]).unwrap();
+
+    let pixel_area = writer
+        .def_var("Pixel_area", &[date, lat, lon], NcType::Float32)
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(pixel_area), "long_name", "pixel area")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(pixel_area), "units", "kilometer2")
+        .unwrap();
+    writer
+        .put_var_f64(pixel_area, &(101..161).map(f64::from).collect::<Vec<_>>())
+        .unwrap();
+
+    let field = writer
+        .def_var("MACCity", &[date, lat, lon], NcType::Float32)
+        .unwrap();
+    writer
+        .put_att_str(
+            VarOrGroup::Var(field),
+            "long_name",
+            "synthetic COARDS float32 field",
+        )
+        .unwrap();
+    writer
+        .put_att_str(
+            VarOrGroup::Var(field),
+            "standard_name",
+            "surface_test_field",
+        )
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(field), "units", "kg m-2 s-1")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(field), "coordinates", "lat lon")
+        .unwrap();
+    writer
+        .put_var_f64(field, &(1..61).map(f64::from).collect::<Vec<_>>())
+        .unwrap();
+    writer.close(path).unwrap();
+    directory
+}
 
 #[test]
 fn bounds_reject_empty_and_overflow() {
@@ -87,7 +207,8 @@ fn format_boundary_rejects_netcdf3_and_non_hdf5_before_terminal_entry() {
 
 #[test]
 fn generated_netcdf4_fixture_exposes_metadata_and_slice_values() {
-    let source = ncview_rs::data::open("tests/fixtures/regular.nc4").unwrap();
+    let fixture = regular_fixture();
+    let source = ncview_rs::data::open(fixture.path().join("regular.nc4")).unwrap();
     assert_eq!(
         source.metadata().format,
         ncview_rs::data::DatasetFormat::NetCdf4
@@ -112,9 +233,16 @@ fn generated_netcdf4_fixture_exposes_metadata_and_slice_values() {
 
 #[test]
 fn coards_float32_time_lat_lon_dataset_reads_a_2d_slice() {
-    let source = ncview_rs::data::open("tests/fixtures/coards-float32.nc4").unwrap();
-    assert_eq!(source.time_label(0).as_deref(), Some("t=0"));
-    assert_eq!(source.time_label(1).as_deref(), Some("t=31"));
+    let fixture = coards_fixture();
+    let source = ncview_rs::data::open(fixture.path().join("coards-float32.nc4")).unwrap();
+    assert_eq!(
+        source.time_label(0).as_deref(),
+        Some("2000-01-01T00:00:00Z")
+    );
+    assert_eq!(
+        source.time_label(1).as_deref(),
+        Some("2000-02-01T00:00:00Z")
+    );
     for name in ["lon", "lat", "date", "MACCity"] {
         assert!(
             source
@@ -131,7 +259,7 @@ fn coards_float32_time_lat_lon_dataset_reads_a_2d_slice() {
         .iter()
         .find(|variable| variable.name == "MACCity")
         .unwrap();
-    assert_eq!(variable.dimensions, ["date", "lat", "lon"]);
+    assert_eq!(variable.dimensions, ["date", "lat_dim", "lon_dim"]);
     assert_eq!(variable.units.as_deref(), Some("kg m-2 s-1"));
     assert_eq!(
         variable.long_name.as_deref(),
@@ -146,7 +274,7 @@ fn coards_float32_time_lat_lon_dataset_reads_a_2d_slice() {
             .metadata()
             .dimensions
             .iter()
-            .find(|dimension| dimension.name == "lat")
+            .find(|dimension| dimension.name == "lat_dim")
             .map(|dimension| dimension.role),
         Some(ncview_rs::data::AxisRole::Latitude)
     );
@@ -155,7 +283,7 @@ fn coards_float32_time_lat_lon_dataset_reads_a_2d_slice() {
             .metadata()
             .dimensions
             .iter()
-            .find(|dimension| dimension.name == "lon")
+            .find(|dimension| dimension.name == "lon_dim")
             .map(|dimension| dimension.role),
         Some(ncview_rs::data::AxisRole::Longitude)
     );
@@ -215,9 +343,9 @@ fn coards_float32_time_lat_lon_dataset_reads_a_2d_slice() {
                 depth: 0,
                 bounds: Bounds::new(0, 4, 0, 3).unwrap(),
             },
-            Some("lat"),
+            Some("lat_dim"),
             Some("date"),
-            &[("lon".into(), 2)],
+            &[("lon_dim".into(), 2)],
         )
         .unwrap();
     assert_eq!(hovmoller.values.shape(), &[4, 3]);

@@ -1,5 +1,8 @@
 use ncview_rs::{
-    app::{AppState, Command, Effect, GridMode, LimitField, Overlay},
+    app::{
+        AppState, Command, Effect, GridMode, LimitField, Overlay, PlotAxisField, PlotKind,
+        PlotYAxis,
+    },
     data::Variable,
     ui::sidebar::filter_variables,
 };
@@ -17,10 +20,14 @@ fn variable_selection_advances_generation_and_emits_read_effect() {
         }],
         ..AppState::default()
     };
+    state.view.limits = Some((1.0, 2.0));
+    state.view.limits_manual = true;
     let effect = state.reduce(Command::SelectVariable(0));
     assert!(matches!(effect, Some(Effect::ReadSlice { .. })));
     assert_eq!(state.view.generation.0, 1);
     assert_eq!(state.view.selected_variable.as_deref(), Some("temperature"));
+    assert_eq!(state.view.limits, None);
+    assert!(!state.view.limits_manual);
 }
 
 #[test]
@@ -187,7 +194,102 @@ fn map_hover_and_click_pin_a_point_for_time_series() {
     state.reduce(Command::SelectPoint { row: 4, col: 7 });
     assert_eq!(state.view.selected_point, Some((4, 7)));
     state.reduce(Command::ActivatePoint);
-    assert_eq!(state.view.overlay, Some(Overlay::TimeSeries));
+    assert_eq!(state.view.overlay, Some(Overlay::Plot));
+}
+
+#[test]
+fn point_plot_chooser_switches_kind_and_histogram_axis() {
+    let mut state = AppState::default();
+    state.reduce(Command::SelectPoint { row: 2, col: 3 });
+    state.reduce(Command::OpenPlot);
+    assert_eq!(state.view.overlay, Some(Overlay::Plot));
+    assert_eq!(state.view.plot_draft.kind, PlotKind::TimeSeries);
+
+    state.reduce(Command::SetPlotKind(PlotKind::Histogram));
+    assert_eq!(state.view.plot_draft.y_axis, PlotYAxis::Frequency);
+    state.reduce(Command::FocusPlotAxis(PlotAxisField::Y));
+    state.reduce(Command::CyclePlotAxis(1));
+    assert_eq!(state.view.plot_draft.y_axis, PlotYAxis::Density);
+}
+
+#[test]
+fn point_selection_can_accumulate_and_remove_multiple_points() {
+    let mut state = AppState::default();
+    state.reduce(Command::HoverPoint {
+        x: 1,
+        y: 1,
+        row: 2,
+        col: 3,
+        value: Some(1.0),
+    });
+    state.reduce(Command::TogglePointSelection);
+    state.reduce(Command::HoverPoint {
+        x: 2,
+        y: 2,
+        row: 5,
+        col: 7,
+        value: Some(2.0),
+    });
+    state.reduce(Command::TogglePointSelection);
+    assert_eq!(state.view.selected_points, vec![(2, 3), (5, 7)]);
+    assert_eq!(state.view.selected_point, Some((5, 7)));
+
+    state.reduce(Command::TogglePointSelection);
+    assert_eq!(state.view.selected_points, vec![(2, 3)]);
+    assert_eq!(state.view.selected_point, Some((2, 3)));
+}
+
+#[test]
+fn scatter_plot_uses_time_axis_and_can_cycle_to_sample_index() {
+    let mut state = AppState::default();
+    state.reduce(Command::SelectPoint { row: 2, col: 3 });
+    state.reduce(Command::OpenPlot);
+    state.reduce(Command::SetPlotKind(PlotKind::Scatter));
+    assert_eq!(
+        state.view.plot_draft.x_axis,
+        ncview_rs::app::PlotXAxis::ValidTime
+    );
+    state.reduce(Command::CyclePlotAxis(1));
+    assert_eq!(
+        state.view.plot_draft.x_axis,
+        ncview_rs::app::PlotXAxis::SampleIndex
+    );
+    state.reduce(Command::CyclePlotAxis(1));
+    assert_eq!(
+        state.view.plot_draft.x_axis,
+        ncview_rs::app::PlotXAxis::Longitude
+    );
+    state.reduce(Command::CyclePlotAxis(1));
+    assert_eq!(
+        state.view.plot_draft.x_axis,
+        ncview_rs::app::PlotXAxis::Latitude
+    );
+}
+
+#[test]
+fn plot_axis_cycle_includes_arbitrary_variable_dimensions() {
+    let mut state = AppState::default();
+    state.view.axis_options = vec![
+        "time".into(),
+        "isobaricInhPa".into(),
+        "ensemble".into(),
+        "latitude".into(),
+        "longitude".into(),
+    ];
+    state.reduce(Command::SelectPoint { row: 1, col: 2 });
+    state.reduce(Command::OpenPlot);
+
+    state.reduce(Command::CyclePlotAxis(1));
+    state.reduce(Command::CyclePlotAxis(1));
+    assert_eq!(
+        state.view.plot_draft.x_axis,
+        ncview_rs::app::PlotXAxis::Dimension(1)
+    );
+    state.reduce(Command::CyclePlotAxis(1));
+    assert_eq!(
+        state.view.plot_draft.x_axis,
+        ncview_rs::app::PlotXAxis::Dimension(2)
+    );
 }
 
 #[test]
