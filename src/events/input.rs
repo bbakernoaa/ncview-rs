@@ -23,6 +23,7 @@ pub fn command_from_event_with_search(
             Some(Command::BeginDrag {
                 x: mouse.column,
                 y: mouse.row,
+                zoom: mouse.modifiers.contains(KeyModifiers::SHIFT),
             })
         }
         Event::Mouse(mouse) if mouse.kind == MouseEventKind::Drag(MouseButton::Left) => {
@@ -91,6 +92,12 @@ pub fn command_from_key_with_search(
         KeyCode::Down => Some(Command::SelectVariable(1)),
         KeyCode::Left => Some(Command::MoveTime(-1)),
         KeyCode::Right => Some(Command::MoveTime(1)),
+        // Keep the compact sidebar controls usable from the keyboard too.
+        // Terminals report shifted angle brackets and plus as character keys.
+        KeyCode::Char('<') => Some(Command::MoveTime(-1)),
+        KeyCode::Char('>') => Some(Command::MoveTime(1)),
+        KeyCode::Char('-') => Some(Command::DecreasePlaybackSpeed),
+        KeyCode::Char('+') => Some(Command::IncreasePlaybackSpeed),
         KeyCode::Char('[') => Some(Command::MoveDepth(-1)),
         KeyCode::Char(']') => Some(Command::MoveDepth(1)),
         KeyCode::Char('c') => Some(Command::CyclePalette),
@@ -105,6 +112,7 @@ pub fn command_from_key_with_search(
         KeyCode::Enter => Some(Command::ActivatePoint),
         KeyCode::Char('g') => Some(Command::ToggleGridMode),
         KeyCode::Char('b') => Some(Command::ToggleLandBorders),
+        KeyCode::Char('z') => Some(Command::ToggleColorScaleScope),
         KeyCode::Char('s') => Some(Command::ToggleScale),
         KeyCode::Char(' ') => Some(Command::TogglePlayback),
         KeyCode::Char('{') => Some(Command::PreviousFile),
@@ -131,6 +139,22 @@ mod tests {
         assert_eq!(
             command_from_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE)),
             Some(Command::MoveDepth(1))
+        );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT)),
+            Some(Command::MoveTime(-1))
+        );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT)),
+            Some(Command::MoveTime(1))
+        );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE)),
+            Some(Command::DecreasePlaybackSpeed)
+        );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::SHIFT)),
+            Some(Command::IncreasePlaybackSpeed)
         );
         assert_eq!(
             command_from_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),

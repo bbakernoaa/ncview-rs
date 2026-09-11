@@ -7,9 +7,55 @@ use ratatui::{
 };
 
 use crate::data::{DatasetMetadata, Variable};
-use crate::render::colors::{Palette, ScaleMode};
+use crate::{
+    app::ColorScaleScope,
+    render::colors::{Palette, ScaleMode},
+};
 
 use super::theme;
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    let mut result = value.chars().take(max_chars - 1).collect::<String>();
+    result.push('…');
+    result
+}
+
+fn truncate_variable_name(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+
+    let characters = value.chars().collect::<Vec<_>>();
+    let suffix_len = (max_chars - 1) / 2;
+    let prefix_len = max_chars - 1 - suffix_len;
+    let prefix = characters[..prefix_len].iter().collect::<String>();
+    let suffix = characters[characters.len() - suffix_len..]
+        .iter()
+        .collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
+fn truncate_path(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    let tail = value
+        .rsplit_once('/')
+        .map_or(value, |(_, filename)| filename);
+    format!("…/{}", truncate_text(tail, max_chars.saturating_sub(2)))
+}
 
 pub fn filter_variables<'a>(variables: &'a [Variable], query: &str) -> Vec<&'a Variable> {
     let query = query.to_ascii_lowercase();
@@ -39,6 +85,7 @@ pub fn render(
     limits: Option<(f64, f64)>,
     filter_range: Option<(f64, f64)>,
     scale: ScaleMode,
+    color_scale_scope: ColorScaleScope,
 ) {
     render_with_search(
         frame,
@@ -50,6 +97,7 @@ pub fn render(
         limits,
         filter_range,
         scale,
+        color_scale_scope,
         "",
         false,
     );
@@ -66,9 +114,11 @@ pub fn render_with_search(
     limits: Option<(f64, f64)>,
     filter_range: Option<(f64, f64)>,
     scale: ScaleMode,
+    color_scale_scope: ColorScaleScope,
     variable_query: &str,
     variable_search_active: bool,
 ) {
+    let content_width = usize::from(area.width.saturating_sub(2));
     let limit_text = limits.map_or_else(
         || "limits: auto".to_string(),
         |(min, max)| format!("limits: {min:.4}..{max:.4}"),
@@ -97,7 +147,10 @@ pub fn render_with_search(
             format!("{} ", theme::ICON_FILE),
             theme::title_style(theme::BLUE),
         ),
-        Span::styled(filename, theme::muted_style()),
+        Span::styled(
+            truncate_path(filename, content_width.saturating_sub(2)),
+            theme::muted_style(),
+        ),
     ])];
     lines.push(Line::from(Span::styled(
         format!("{}  Colormap", theme::ICON_PALETTE),
@@ -110,11 +163,18 @@ pub fn render_with_search(
     };
     lines.push(Line::from(vec![
         Span::styled("  ● ", Style::default().fg(theme::PEACH)),
-        Span::styled(palette_label, Style::default().fg(theme::TEXT)),
+        Span::styled(
+            truncate_text(&palette_label, content_width.saturating_sub(4)),
+            Style::default().fg(theme::TEXT),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  scale: {}  ", scale.name()), theme::muted_style()),
+        Span::styled("[s]", theme::title_style(theme::TEAL)),
     ]));
     lines.push(Line::from(Span::styled(
-        format!("  scale: {}", scale.name()),
-        theme::muted_style(),
+        "  View actions",
+        theme::title_style(theme::TEAL),
     )));
     let button = |label: &str, color| {
         Span::styled(
@@ -125,16 +185,34 @@ pub fn render_with_search(
     lines.push(Line::from(vec![
         button("[c] MAP", theme::SURFACE_ALT),
         Span::raw(" "),
-        button("[a] AUTO", theme::SURFACE_ALT),
+        button("[v] REV", theme::SURFACE_ALT),
         Span::raw(" "),
-        button("[l]LIM", theme::SURFACE_ALT),
+        button("[a] AUTO", theme::SURFACE_ALT),
     ]));
     lines.push(Line::from(vec![
+        button("[l] LIM", theme::SURFACE_ALT),
+        Span::raw(" "),
         button("[f]MASK", theme::SURFACE_ALT),
         Span::raw(" "),
         button("[x] AXES", theme::SURFACE_ALT),
-        Span::raw(" "),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "  Navigation",
+        theme::title_style(theme::BLUE),
+    )));
+    lines.push(Line::from(vec![
         button("[r] RESET", theme::SURFACE_ALT),
+        Span::raw(" "),
+        button("[<] DATE", theme::SURFACE_ALT),
+        Span::raw(" "),
+        button("[>] DATE", theme::SURFACE_ALT),
+    ]));
+    lines.push(Line::from(vec![
+        button("[-]SPD", theme::SURFACE_ALT),
+        Span::raw(" "),
+        button("[+]SPD", theme::SURFACE_ALT),
+        Span::raw(" "),
+        button("[z]SCALE", theme::SURFACE_ALT),
     ]));
     lines.push(Line::from(Span::styled(
         format!("{}  Variables", theme::ICON_VARIABLE),
@@ -151,9 +229,9 @@ pub fn render_with_search(
         ),
         Span::styled(
             if variable_query.is_empty() {
-                "type to search variables"
+                "type to search…".to_string()
             } else {
-                variable_query
+                truncate_text(variable_query, content_width.saturating_sub(4))
             },
             if variable_search_active {
                 Style::default().fg(theme::TEXT)
@@ -180,7 +258,7 @@ pub fn render_with_search(
                     }),
                 ),
                 Span::styled(
-                    name,
+                    truncate_variable_name(&name, content_width.saturating_sub(4)),
                     Style::default().fg(if selected {
                         theme::TEXT
                     } else {
@@ -196,38 +274,65 @@ pub fn render_with_search(
         theme::title_style(theme::BLUE),
     )));
     for dimension in dimensions {
-        lines.push(Line::from(vec![
-            Span::styled("  • ", theme::muted_style()),
-            Span::styled(dimension.name.as_str(), Style::default().fg(theme::TEXT)),
-            Span::styled(format!(" = {}", dimension.length), theme::muted_style()),
-        ]));
+        let label = format!("  • {} = {}", dimension.name, dimension.length);
+        lines.push(Line::from(Span::styled(
+            truncate_text(&label, content_width),
+            theme::muted_style(),
+        )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("  ↕ ", Style::default().fg(theme::TEAL)),
-        Span::styled(limit_text, theme::muted_style()),
+        Span::styled(
+            truncate_text(&limit_text, content_width.saturating_sub(4)),
+            theme::muted_style(),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  ▪ ", Style::default().fg(theme::RED)),
         Span::styled(
-            filter_range.map_or_else(
-                || "mask: off".into(),
-                |(min, max)| format!("mask: {min:.4}..{max:.4}"),
+            truncate_text(
+                &filter_range.map_or_else(
+                    || "mask: off".into(),
+                    |(min, max)| format!("mask: {min:.4}..{max:.4}"),
+                ),
+                content_width.saturating_sub(4),
             ),
             theme::muted_style(),
         ),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("{}  Grid", theme::ICON_GRID),
-        theme::title_style(theme::TEAL),
+        format!("  scope: {}  [z]", color_scale_scope.name(),),
+        theme::muted_style(),
     )));
     lines.push(Line::from(Span::styled(
-        "  g  logical  •  projected   v  reverse   b  coastline   i  filter   e  export",
+        "  [v] reverse  [b] map backdrop",
         theme::muted_style(),
     )));
     frame.render_widget(
         Paragraph::new(lines).block(theme::panel("Dataset", theme::BLUE)),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_variable_name;
+
+    #[test]
+    fn variable_truncation_preserves_both_ends() {
+        let name = "dust_dry_gt0um_aerosol_optical_thickness_545nm-565nm";
+        let displayed = truncate_variable_name(name, 26);
+
+        assert_eq!(displayed.chars().count(), 26);
+        assert!(displayed.starts_with("dust_dry_gt0"));
+        assert!(displayed.ends_with("545nm-565nm"));
+        assert!(displayed.contains('…'));
+    }
+
+    #[test]
+    fn short_variable_names_are_unchanged() {
+        assert_eq!(truncate_variable_name("temperature", 26), "temperature");
+    }
 }

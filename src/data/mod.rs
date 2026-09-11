@@ -2,16 +2,23 @@
 
 pub mod coordinates;
 pub mod fixtures;
+pub mod grib2;
+pub mod grib2_catalog;
+pub mod grib2_identity;
+pub mod grib2_index;
+pub mod grib2_manifest;
+pub mod grib2_types;
 pub mod netcdf4;
 pub mod slice;
 
-use std::path::Path;
+use std::{fs::File, io::Read, path::Path};
 
 use crate::error::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatasetFormat {
     NetCdf4,
+    Grib2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +51,17 @@ pub struct Variable {
 pub struct PointCoordinates {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+}
+
+/// Normalize geographic longitudes to the convention used in the viewer.
+/// Non-finite values are preserved so missing coordinate diagnostics are not
+/// turned into arbitrary geographic positions.
+pub fn normalize_longitude(value: f64) -> f64 {
+    if value.is_finite() {
+        (value + 180.0).rem_euclid(360.0) - 180.0
+    } else {
+        value
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,5 +100,24 @@ pub trait DataSource: Send + Sync {
 
 pub fn open(path: impl AsRef<Path>) -> Result<Box<dyn DataSource>> {
     let path = path.as_ref();
-    netcdf4::NetCdf4Source::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
+    let extension_matches = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "grib" | "grib2" | "grb" | "grb2"
+            )
+        });
+    let magic_matches = File::open(path)
+        .and_then(|mut file| {
+            let mut magic = [0_u8; 4];
+            file.read_exact(&mut magic).map(|_| magic)
+        })
+        .is_ok_and(|magic| magic == *b"GRIB");
+    if extension_matches || magic_matches {
+        grib2::Grib2Source::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
+    } else {
+        netcdf4::NetCdf4Source::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
+    }
 }

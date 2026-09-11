@@ -61,6 +61,7 @@ pub enum Command {
     BeginDrag {
         x: u16,
         y: u16,
+        zoom: bool,
     },
     UpdateDrag {
         x: u16,
@@ -102,6 +103,7 @@ pub enum Command {
     },
     ToggleGridMode,
     ToggleLandBorders,
+    ToggleColorScaleScope,
     ToggleScale,
     TogglePlayback,
     IncreasePlaybackSpeed,
@@ -137,6 +139,7 @@ pub struct ViewModel {
     pub palette: Palette,
     pub palette_catalog: Vec<Palette>,
     pub limits: Option<(f64, f64)>,
+    pub global_limits: Option<(f64, f64)>,
     pub limits_manual: bool,
     pub filter_range: Option<(f64, f64)>,
     pub limit_draft: Option<LimitDraft>,
@@ -160,6 +163,7 @@ pub struct ViewModel {
     pub grid_mode: GridMode,
     pub show_land_borders: bool,
     pub scale_mode: ScaleMode,
+    pub color_scale_scope: ColorScaleScope,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -216,6 +220,21 @@ pub enum GridMode {
     Projected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScaleScope {
+    CurrentView,
+    GlobalView,
+}
+
+impl ColorScaleScope {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CurrentView => "current",
+            Self::GlobalView => "global",
+        }
+    }
+}
+
 impl Default for ViewModel {
     fn default() -> Self {
         Self {
@@ -235,6 +254,7 @@ impl Default for ViewModel {
             palette: Palette::Viridis,
             palette_catalog: discover_colormaps(),
             limits: None,
+            global_limits: None,
             limits_manual: false,
             filter_range: None,
             limit_draft: None,
@@ -261,6 +281,7 @@ impl Default for ViewModel {
             // or use the command palette to enable them when needed.
             show_land_borders: false,
             scale_mode: ScaleMode::Linear,
+            color_scale_scope: ColorScaleScope::CurrentView,
         }
     }
 }
@@ -639,10 +660,11 @@ impl AppState {
                 self.view.drag = None;
                 None
             }
-            Command::BeginDrag { x, y } => {
+            Command::BeginDrag { x, y, zoom } => {
                 self.view.drag = Some(crate::events::mouse::DragState {
                     start: (x, y),
                     current: (x, y),
+                    zoom,
                 });
                 None
             }
@@ -657,6 +679,7 @@ impl AppState {
                 None
             }
             Command::Pan { rows, cols } => {
+                self.view.drag = None;
                 let full = self
                     .view
                     .full_bounds
@@ -791,6 +814,7 @@ impl AppState {
                 None
             }
             Command::SelectPoint { row, col } => {
+                self.view.drag = None;
                 self.view.selected_point = Some((row, col));
                 self.view.selected_coordinates = PointCoordinates::default();
                 self.view.time_series.clear();
@@ -867,6 +891,13 @@ impl AppState {
                 self.view.show_land_borders = !self.view.show_land_borders;
                 None
             }
+            Command::ToggleColorScaleScope => {
+                self.view.color_scale_scope = match self.view.color_scale_scope {
+                    ColorScaleScope::CurrentView => ColorScaleScope::GlobalView,
+                    ColorScaleScope::GlobalView => ColorScaleScope::CurrentView,
+                };
+                None
+            }
             Command::ToggleScale => {
                 self.view.scale_mode = match self.view.scale_mode {
                     ScaleMode::Linear => {
@@ -903,6 +934,7 @@ impl AppState {
         self.view.hover_point = None;
         self.view.zoom_bounds = None;
         self.view.full_bounds = None;
+        self.view.global_limits = None;
         self.view.drag = None;
         self.view.time_series.clear();
         self.view.time_series_labels.clear();
@@ -1030,6 +1062,10 @@ pub const COMMAND_PALETTE: &[PaletteEntry] = &[
         shortcut: "a",
     },
     PaletteEntry {
+        label: "Toggle current/global color scale",
+        shortcut: "z",
+    },
+    PaletteEntry {
         label: "Edit color limits",
         shortcut: "l",
     },
@@ -1050,7 +1086,7 @@ pub const COMMAND_PALETTE: &[PaletteEntry] = &[
         shortcut: "g",
     },
     PaletteEntry {
-        label: "Toggle coastline overlay",
+        label: "Toggle filled map backdrop",
         shortcut: "b",
     },
     PaletteEntry {
@@ -1128,23 +1164,24 @@ fn palette_command(index: usize) -> Command {
         3 => Command::CycleImageFilter,
         4 => Command::ExportCurrent,
         5 => Command::AutomaticLimits,
-        6 => Command::OpenLimits,
-        7 => Command::OpenFilter,
-        8 => Command::ClearFilter,
-        9 => Command::ResetZoom,
-        10 => Command::ToggleGridMode,
-        11 => Command::ToggleLandBorders,
-        12 => Command::ToggleScale,
-        13 => Command::IncreasePlaybackSpeed,
-        14 => Command::DecreasePlaybackSpeed,
-        15 => Command::OpenAxisOverlay,
-        16 => Command::SelectVariable(0),
-        17 => Command::SelectVariable(1),
-        18 => Command::MoveTime(-1),
-        19 => Command::MoveTime(1),
-        20 => Command::OpenVariableSearch,
-        21 => Command::PreviousFile,
-        22 => Command::NextFile,
+        6 => Command::ToggleColorScaleScope,
+        7 => Command::OpenLimits,
+        8 => Command::OpenFilter,
+        9 => Command::ClearFilter,
+        10 => Command::ResetZoom,
+        11 => Command::ToggleGridMode,
+        12 => Command::ToggleLandBorders,
+        13 => Command::ToggleScale,
+        14 => Command::IncreasePlaybackSpeed,
+        15 => Command::DecreasePlaybackSpeed,
+        16 => Command::OpenAxisOverlay,
+        17 => Command::SelectVariable(0),
+        18 => Command::SelectVariable(1),
+        19 => Command::MoveTime(-1),
+        20 => Command::MoveTime(1),
+        21 => Command::OpenVariableSearch,
+        22 => Command::PreviousFile,
+        23 => Command::NextFile,
         _ => Command::ToggleHelp,
     }
 }

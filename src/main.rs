@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use crossterm::{
     event, execute,
     terminal::{LeaveAlternateScreen, disable_raw_mode},
@@ -14,9 +14,10 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use ncview_rs::{
     analysis::mapping::screen_to_source,
-    app::{AppState, AxisField, Command, LimitField, Overlay},
+    app::{AppState, AxisField, ColorScaleScope, Command, LimitField, Overlay},
     data::{
         self, AxisRole, DatasetMetadata, Variable,
+        grib2_manifest::{self, ManifestFormat},
         slice::{Bounds, SliceRequest},
     },
     events::input,
@@ -28,16 +29,72 @@ use ncview_rs::{
 #[command(
     name = "ncv",
     version,
-    about = "Terminal-native NetCDF scientific data viewer"
+    about = "Terminal-native NetCDF and GRIB2 scientific data viewer"
 )]
 struct Cli {
-    /// One or more NetCDF-4 datasets to inspect. Shell globs are supported.
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+    /// One or more NetCDF-4 or GRIB2 datasets to inspect. Shell globs are supported.
     #[arg(value_name = "DATASET", num_args = 0..)]
     dataset: Vec<String>,
 }
 
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Create a Kerchunk-compatible GRIB2 reference manifest from a `.idx` sidecar.
+    Manifest {
+        /// Output profile. `virtualizarr` emits a VirtualiZarr-consumable Kerchunk profile.
+        #[arg(long, value_parser = ["kerchunk", "virtualizarr"])]
+        format: String,
+        /// GRIB2 source object.
+        #[arg(long)]
+        input: String,
+        /// Matching NOAA-style `.idx` sidecar.
+        #[arg(long)]
+        idx: String,
+        /// Manifest destination JSON.
+        #[arg(long)]
+        output: String,
+        /// URI to place in byte-range references instead of the local source path.
+        #[arg(long)]
+        source_uri: Option<String>,
+        /// Treat warnings and mismatches as errors.
+        #[arg(long)]
+        strict: bool,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(CliCommand::Manifest {
+        format,
+        input,
+        idx,
+        output,
+        source_uri,
+        strict,
+    }) = cli.command
+    {
+        let manifest_format = match format.as_str() {
+            "kerchunk" => ManifestFormat::Kerchunk,
+            "virtualizarr" => ManifestFormat::Virtualizarr,
+            _ => unreachable!("clap validates manifest format"),
+        };
+        return match grib2_manifest::write_manifest(
+            Path::new(&input),
+            Path::new(&idx),
+            Path::new(&output),
+            manifest_format,
+            source_uri.as_deref(),
+            strict,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("ncv manifest: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
     if cli.dataset.is_empty() {
         let mut command = Cli::command();
         let _ = command.print_help();
@@ -107,7 +164,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 source.metadata(),
                 &state.view,
                 &state.variable_query,
-                graphics.supports_graphics(),
+                Some(&graphics),
             );
             if matches!(command, Command::Quit)
                 && state.view.overlay.is_none()
@@ -163,6 +220,9 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     | Command::ResetZoom
                     | Command::Pan { .. }
                     | Command::SetAxes { .. }
+                    | Command::AutomaticLimits
+                    | Command::ToggleColorScaleScope
+                    | Command::ToggleScale
             );
             let axis_submit = matches!(command, Command::ActivatePoint)
                 && state.view.overlay == Some(Overlay::Axis);
@@ -362,17 +422,17 @@ fn translate_mouse(
     metadata: &DatasetMetadata,
     view: &ncview_rs::app::ViewModel,
     variable_query: &str,
-    graphics_enabled: bool,
+    graphics: Option<&GraphicsRenderer>,
 ) -> Command {
-    if let Command::BeginDrag { x, y } = command {
+    if let Command::BeginDrag { x, y, zoom } = command {
         if view.help_visible || view.overlay.is_some() {
             return Command::Pointer { x, y };
         }
-        let Some(canvas) = map_drawable(area, view, graphics_enabled) else {
+        let Some(canvas) = map_drawable(area, view, graphics) else {
             return Command::Pointer { x, y };
         };
         return if canvas.contains((x, y).into()) {
-            Command::BeginDrag { x, y }
+            Command::BeginDrag { x, y, zoom }
         } else {
             Command::Pointer { x, y }
         };
@@ -392,15 +452,25 @@ fn translate_mouse(
                 metadata,
                 view,
                 variable_query,
-                graphics_enabled,
+                graphics,
             );
         };
         let Some(slice) = view.slice.as_ref() else {
             return Command::CancelDrag;
         };
-        let Some(canvas) = map_drawable(area, view, graphics_enabled) else {
+        let Some(canvas) = map_drawable(area, view, graphics) else {
             return Command::CancelDrag;
         };
+        if let Some(current) = view.zoom_bounds
+            && !drag.zoom
+            && let Some((rows, cols)) = drag.pan_delta(
+                canvas,
+                current.row_end.saturating_sub(current.row_start),
+                current.col_end.saturating_sub(current.col_start),
+            )
+        {
+            return Command::Pan { rows, cols };
+        }
         let (rows, cols) = slice.values.dim();
         if let Some(bounds) = drag.bounds(canvas, rows, cols) {
             return Command::Zoom(Bounds {
@@ -410,7 +480,7 @@ fn translate_mouse(
                 col_end: slice.source_bounds.col_start + bounds.col_end,
             });
         }
-        return map_point_at(x, y, area, view, graphics_enabled)
+        return map_point_at(x, y, area, view, graphics)
             .map(|(row, col, _)| Command::SelectPoint { row, col })
             .unwrap_or(Command::CancelDrag);
     }
@@ -452,7 +522,7 @@ fn translate_mouse(
         return Command::Pointer { x, y };
     }
     let areas = dashboard_layout::dashboard(area);
-    if let Some((row, col, value)) = map_point_at(x, y, area, view, graphics_enabled) {
+    if let Some((row, col, value)) = map_point_at(x, y, area, view, graphics) {
         return if clicked {
             Command::SelectPoint { row, col }
         } else if view
@@ -481,11 +551,15 @@ fn translate_mouse(
         if x <= areas.timeline.x.saturating_add(7) {
             return Command::TogglePlayback;
         }
-        if x >= areas.timeline.right().saturating_sub(8) {
-            return Command::IncreasePlaybackSpeed;
-        }
-        if x >= areas.timeline.right().saturating_sub(15) {
-            return Command::DecreasePlaybackSpeed;
+        // The timeline speed controls are right-aligned in the panel title:
+        // "[−] slower  [＋] faster". Give each control a generous hitbox.
+        let speed_start = areas.timeline.right().saturating_sub(23);
+        if x >= speed_start {
+            return if x < speed_start.saturating_add(11) {
+                Command::DecreasePlaybackSpeed
+            } else {
+                Command::IncreasePlaybackSpeed
+            };
         }
         let start = areas.timeline.x.saturating_add(1);
         let end = areas
@@ -510,27 +584,44 @@ fn translate_mouse(
         .into_iter()
         .take(8)
         .collect::<Vec<_>>();
-    // Sidebar rows: filename, colormap name/scale, variables, dimensions,
-    // then the limit/filter controls and grid mode. Keep mouse hit targets
-    // aligned with the compact sidebar rendering.
-    let action_row_one = areas.sidebar.y.saturating_add(5);
-    let action_row_two = areas.sidebar.y.saturating_add(6);
+    // Sidebar rows: filename, colormap name/scale, a View actions heading,
+    // two view-action rows, a Navigation heading, two navigation rows,
+    // variables, dimensions, then the limit/filter controls. Keep mouse hit
+    // targets aligned with the visible button rows.
+    let action_row_one = areas.sidebar.y.saturating_add(6);
+    let action_row_two = areas.sidebar.y.saturating_add(7);
     let action_third = (areas.sidebar.width / 3).max(1);
     if y == action_row_one {
         return match (x.saturating_sub(areas.sidebar.x)) / action_third {
             0 => Command::CyclePalette,
-            1 => Command::AutomaticLimits,
-            _ => Command::OpenLimits,
+            1 => Command::TogglePaletteReverse,
+            _ => Command::AutomaticLimits,
         };
     }
     if y == action_row_two {
         return match (x.saturating_sub(areas.sidebar.x)) / action_third {
-            0 => Command::OpenFilter,
-            1 => Command::OpenAxisOverlay,
-            _ => Command::ResetZoom,
+            0 => Command::OpenLimits,
+            1 => Command::OpenFilter,
+            _ => Command::OpenAxisOverlay,
         };
     }
-    let search_row = areas.sidebar.y.saturating_add(8);
+    let date_row = areas.sidebar.y.saturating_add(9);
+    if y == date_row {
+        return match (x.saturating_sub(areas.sidebar.x)) / action_third {
+            0 => Command::ResetZoom,
+            1 => Command::MoveTime(-1),
+            _ => Command::MoveTime(1),
+        };
+    }
+    let speed_row = areas.sidebar.y.saturating_add(10);
+    if y == speed_row {
+        return match (x.saturating_sub(areas.sidebar.x)) / action_third {
+            0 => Command::DecreasePlaybackSpeed,
+            1 => Command::IncreasePlaybackSpeed,
+            _ => Command::ToggleColorScaleScope,
+        };
+    }
+    let search_row = areas.sidebar.y.saturating_add(12);
     if y == search_row {
         return Command::OpenVariableSearch;
     }
@@ -547,12 +638,9 @@ fn translate_mouse(
         .saturating_add(1)
         .saturating_add(u16::try_from(dimensions).unwrap_or(u16::MAX));
     let limits_row = dimensions_end.saturating_add(1);
-    let filter_row = limits_row.saturating_add(1);
-    let grid_row = filter_row.saturating_add(3);
     match y {
         value if value == palette_row => Command::CyclePalette,
         value if value == limits_row => Command::OpenLimits,
-        value if value == grid_row => Command::ToggleGridMode,
         _ => Command::Pointer { x, y },
     }
 }
@@ -562,12 +650,12 @@ fn map_point_at(
     y: u16,
     area: Rect,
     view: &ncview_rs::app::ViewModel,
-    graphics_enabled: bool,
+    graphics: Option<&GraphicsRenderer>,
 ) -> Option<(usize, usize, Option<f64>)> {
     let slice = view.slice.as_ref()?;
-    let drawable = map_drawable(area, view, graphics_enabled)?;
+    let drawable = map_drawable(area, view, graphics)?;
     let (rows, cols) = slice.values.dim();
-    let drawable = if graphics_enabled {
+    let drawable = if graphics.is_some_and(GraphicsRenderer::supports_graphics) {
         drawable
     } else {
         Rect::new(
@@ -585,7 +673,7 @@ fn map_point_at(
 fn map_drawable(
     area: Rect,
     view: &ncview_rs::app::ViewModel,
-    graphics_enabled: bool,
+    graphics: Option<&GraphicsRenderer>,
 ) -> Option<Rect> {
     let _ = view.slice.as_ref()?;
     let panel = dashboard_layout::dashboard(area).canvas;
@@ -595,7 +683,10 @@ fn map_drawable(
         panel.width.saturating_sub(2),
         panel.height.saturating_sub(2),
     );
-    graphics_enabled.then_some(inner).or_else(|| {
+    if graphics.is_some_and(GraphicsRenderer::supports_graphics) {
+        return Some(graphics.map_or(inner, |renderer| renderer.drawable_area(inner)));
+    }
+    {
         let slice = view.slice.as_ref()?;
         let (rows, cols) = slice.values.dim();
         Some(Rect::new(
@@ -604,7 +695,7 @@ fn map_drawable(
             inner.width.min(u16::try_from(cols).unwrap_or(u16::MAX)),
             inner.height.min(u16::try_from(rows).unwrap_or(u16::MAX)),
         ))
-    })
+    }
 }
 
 fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
@@ -681,11 +772,41 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
         &fixed_axes,
     ) {
         Ok(slice) => {
+            let current_limits = slice_limits(&slice, state.view.scale_mode);
+            let full_limits = if bounds == full_bounds {
+                current_limits
+            } else if state.view.color_scale_scope == ColorScaleScope::GlobalView {
+                let full_request = SliceRequest {
+                    variable: variable_name.clone(),
+                    time: state.view.time_index,
+                    depth: state.view.depth_index,
+                    bounds: full_bounds,
+                };
+                source
+                    .read_slice_on_axes(
+                        &full_request,
+                        state.view.y_axis.as_deref(),
+                        state.view.x_axis.as_deref(),
+                        &fixed_axes,
+                    )
+                    .ok()
+                    .and_then(|full_slice| slice_limits(&full_slice, state.view.scale_mode))
+            } else {
+                None
+            };
+            if bounds == full_bounds {
+                state.view.global_limits = current_limits;
+            } else if state.view.color_scale_scope == ColorScaleScope::GlobalView
+                && let Some(full_limits) = full_limits
+            {
+                state.view.global_limits = Some(full_limits);
+            }
             if !state.view.limits_manual {
-                state.view.limits = if state.view.scale_mode == ncview_rs::app::ScaleMode::Log {
-                    ncview_rs::app::positive_slice_limits(&slice)
-                } else {
-                    slice.statistics.map(|stats| (stats.min, stats.max))
+                state.view.limits = match state.view.color_scale_scope {
+                    ColorScaleScope::CurrentView => current_limits,
+                    ColorScaleScope::GlobalView => {
+                        state.view.global_limits.or(full_limits).or(current_limits)
+                    }
                 };
             }
             state.view.slice = Some(slice);
@@ -709,6 +830,17 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
             state.view.loading = ncview_rs::app::LoadingState::Error;
             state.view.status = format!("{variable_name}: {error}");
         }
+    }
+}
+
+fn slice_limits(
+    slice: &ncview_rs::data::slice::Slice2D,
+    scale: ncview_rs::app::ScaleMode,
+) -> Option<(f64, f64)> {
+    if scale == ncview_rs::app::ScaleMode::Log {
+        ncview_rs::app::positive_slice_limits(slice)
+    } else {
+        slice.statistics.map(|stats| (stats.min, stats.max))
     }
 }
 

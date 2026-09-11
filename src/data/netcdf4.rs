@@ -10,6 +10,7 @@ use oxinetcdf::{NcFile, NcGroup, NcType};
 use super::slice::{CoordinateGrid, PackedAttributes, Slice2D, SliceRequest, classify_packed};
 use super::{
     AxisRole, DataSource, DatasetFormat, DatasetMetadata, Dimension, PointCoordinates, Variable,
+    normalize_longitude,
 };
 use crate::error::{NcvError, Result};
 
@@ -609,16 +610,18 @@ impl NetCdf4Source {
                 row,
                 col,
             ),
-            longitude: self.find_coordinate_value(
-                &coordinates,
-                &names,
-                &shape,
-                AxisRole::Longitude,
-                col_axis,
-                (shape[row_axis], shape[col_axis]),
-                row,
-                col,
-            ),
+            longitude: self
+                .find_coordinate_value(
+                    &coordinates,
+                    &names,
+                    &shape,
+                    AxisRole::Longitude,
+                    col_axis,
+                    (shape[row_axis], shape[col_axis]),
+                    row,
+                    col,
+                )
+                .map(normalize_longitude),
         }
     }
 }

@@ -35,6 +35,7 @@ fn reverse_drag_maps_to_nonempty_source_bounds() {
     let drag = DragState {
         start: (18, 12),
         current: (8, 4),
+        zoom: false,
     };
     let bounds = drag.bounds(Rect::new(4, 2, 20, 12), 100, 200).unwrap();
     assert!(bounds.row_start < bounds.row_end);

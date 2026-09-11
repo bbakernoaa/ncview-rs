@@ -1,4 +1,4 @@
-use ratatui::{Frame, layout::Rect, widgets::Gauge};
+use ratatui::{Frame, layout::Rect, text::Line, widgets::Gauge};
 
 use super::theme;
 
@@ -21,7 +21,8 @@ pub fn render(
     } else {
         "[ ▶ Play ]"
     };
-    let title = format!("{}  Time   {}  [−] [＋]", theme::ICON_TIME, button);
+    let title = format!("{}  Time   {}", theme::ICON_TIME, button);
+    let speed_controls = Line::from(" [−] slower  [＋] faster ").right_aligned();
     let label = format!(
         "{}/{}  {}  ×{speed:.2}",
         index,
@@ -30,7 +31,7 @@ pub fn render(
     );
     frame.render_widget(
         Gauge::default()
-            .block(theme::panel(&title, theme::BLUE))
+            .block(theme::panel(&title, theme::BLUE).title_top(speed_controls))
             .label(label)
             .gauge_style(
                 ratatui::style::Style::default()

@@ -58,6 +58,7 @@ pub enum Validity {
 pub struct Statistics {
     pub min: f64,
     pub max: f64,
+    pub mean: f64,
     pub finite_count: usize,
 }
 
@@ -153,17 +154,20 @@ impl Slice2D {
         }
         let mut min = f64::INFINITY;
         let mut max = f64::NEG_INFINITY;
+        let mut sum = 0.0;
         let mut finite_count = 0;
         for ((row, col), value) in values.indexed_iter() {
             if validity[(row, col)] == Validity::Finite && value.is_finite() {
                 min = min.min(*value);
                 max = max.max(*value);
+                sum += *value;
                 finite_count += 1;
             }
         }
         let statistics = (finite_count > 0).then_some(Statistics {
             min,
             max,
+            mean: sum / finite_count as f64,
             finite_count,
         });
         Ok(Self {

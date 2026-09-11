@@ -31,7 +31,9 @@ pub fn render(frame: &mut Frame, area: Rect) {
   q / Esc       quit (Esc closes a dialog first)\n\
   ↑ / ↓         previous / next variable\n\
   ← / →         previous / next time slice\n\
+  < / >         previous / next time slice\n\
   Space         play / pause timeline\n\
+  - / +         decrease / increase playback speed\n\
   { / }         previous / next file\n\
   [ / ]         previous / next depth slice\n\
   c             cycle colormap\n\
@@ -40,8 +42,10 @@ pub fn render(frame: &mut Frame, area: Rect) {
   l             edit min/max limits\n\
   f             mask data outside a range\n\
   s             toggle linear/log color scale\n\
+  z             toggle current/global color scale\n\
   r             reset zoom\n\
   g             logical/projected grid\n\
+  b             toggle filled land/ocean map backdrop\n\
   Enter         open pinned point time series\n\
 Mouse\n\
   move over map  hover row/col/value readout\n\
@@ -58,11 +62,11 @@ Limits dialog: type numbers, Tab switches fields, Enter applies, Esc cancels";
         )
         .replace(
             "  r             reset zoom",
-            "  r             reset zoom\n  drag map      zoom to a rectangle",
+            "  r             reset zoom\n  drag map      zoom to a rectangle; drag zoomed map to pan\n  Shift+drag    zoom again while already zoomed",
         )
         .replace(
             "  click a variable, palette, limits, grid, or timeline",
-            "  click a sidebar button, variable, grid, or timeline",
+            "  click a sidebar button, variable, timeline play/pause, or speed control",
         );
     frame.render_widget(
         Paragraph::new(text).block(theme::panel("󰋖  Help", theme::TEAL)),

@@ -55,6 +55,14 @@ pub struct ScientificColorMap {
     pub colors: Vec<[u8; 3]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MapOverlayColors {
+    pub(crate) ocean: [u8; 3],
+    pub(crate) land: [u8; 3],
+    pub(crate) grid: [u8; 4],
+    pub(crate) coast: [u8; 4],
+}
+
 impl Palette {
     pub fn name(&self) -> &str {
         match self {
@@ -144,6 +152,31 @@ impl Palette {
         [0, 1, 2].map(|channel| {
             (a[channel] as f64 + (b[channel] as f64 - a[channel] as f64) * fraction).round() as u8
         })
+    }
+
+    /// Pick map-overlay colors that contrast with the low end of the active
+    /// scientific palette. The overlay is presentation-only; field colors
+    /// and the palette itself are never modified.
+    pub(crate) fn map_overlay_colors(&self) -> MapOverlayColors {
+        let low = self.sample(0.0);
+        let luminance =
+            (0.2126 * f64::from(low[0]) + 0.7152 * f64::from(low[1]) + 0.0722 * f64::from(low[2]))
+                / 255.0;
+        if luminance < 0.48 {
+            MapOverlayColors {
+                ocean: [15, 22, 36],
+                land: [232, 238, 244],
+                grid: [224, 236, 250, 175],
+                coast: [255, 255, 255, 225],
+            }
+        } else {
+            MapOverlayColors {
+                ocean: [238, 242, 246],
+                land: [43, 53, 67],
+                grid: [32, 43, 58, 175],
+                coast: [8, 18, 30, 225],
+            }
+        }
     }
 }
 
@@ -305,6 +338,7 @@ pub fn color_for_with_limits_and_filter_and_scale(
     let stats = slice.statistics.unwrap_or(crate::data::slice::Statistics {
         min: 0.0,
         max: 1.0,
+        mean: 0.5,
         finite_count: 0,
     });
     color_for_value_with_limits_and_filter_and_scale(

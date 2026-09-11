@@ -3,16 +3,18 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 
 use crate::{
     data::slice::Slice2D,
+    events::mouse::DragState,
     render::landmask,
     render::{
         colors::{Palette, ScaleMode, color_for_with_limits_and_filter_and_scale},
+        map_background,
         protocol::GraphicsRenderer,
-        raster::rgb_raster_with_options_for_view,
+        raster::{blend_rgb, rgb_raster_with_options_for_view},
     },
 };
 
@@ -106,6 +108,8 @@ pub fn render_with_points_and_image(
     scale: ScaleMode,
     hover_point: Option<(usize, usize)>,
     selected_point: Option<(usize, usize)>,
+    drag: Option<DragState>,
+    zoom_active: bool,
     graphics: Option<&mut GraphicsRenderer>,
 ) {
     render_content(
@@ -121,6 +125,8 @@ pub fn render_with_points_and_image(
         scale,
         hover_point,
         selected_point,
+        drag,
+        zoom_active,
         graphics,
     );
 }
@@ -154,6 +160,8 @@ pub fn render_with_points(
         hover_point,
         selected_point,
         None,
+        false,
+        None,
     );
 }
 
@@ -171,6 +179,8 @@ fn render_content(
     scale: ScaleMode,
     hover_point: Option<(usize, usize)>,
     selected_point: Option<(usize, usize)>,
+    drag: Option<DragState>,
+    zoom_active: bool,
     graphics: Option<&mut GraphicsRenderer>,
 ) {
     let message = if constrained {
@@ -229,19 +239,30 @@ fn render_content(
             target_height,
             selected_point,
         );
+        let image_area = graphics.drawable_area(inner);
         if graphics.render(frame, inner, image.into()) {
+            render_drag_box(frame, image_area, drag, zoom_active);
             return;
         }
     }
     let width = usize::from(inner.width).min(cols);
     let height = usize::from(inner.height).min(rows);
+    let background = show_land_borders.then(|| {
+        map_background::render_with_palette(
+            width,
+            height,
+            slice.coordinates.as_ref(),
+            land_detail,
+            &palette,
+        )
+    });
     let lines = (0..height)
         .map(|screen_row| {
             let source_row = screen_row * rows / height;
             let spans = (0..width)
                 .map(|screen_col| {
                     let source_col = screen_col * cols / width;
-                    let rgb = color_for_with_limits_and_filter_and_scale(
+                    let data_rgb = color_for_with_limits_and_filter_and_scale(
                         slice,
                         source_row,
                         source_col,
@@ -250,6 +271,20 @@ fn render_content(
                         filter,
                         scale,
                     );
+                    let background_rgb = background.as_ref().map(|background| {
+                        background.get_pixel(screen_col as u32, screen_row as u32).0
+                    });
+                    let rgb = if let Some(background_rgb) = background_rgb {
+                        if slice.validity[(source_row, source_col)]
+                            == crate::data::slice::Validity::Finite
+                        {
+                            blend_rgb(background_rgb, data_rgb, 0.82)
+                        } else {
+                            background_rgb
+                        }
+                    } else {
+                        data_rgb
+                    };
                     let border = show_land_borders
                         && slice
                             .coordinates
@@ -309,4 +344,43 @@ fn render_content(
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), inner);
+    render_drag_box(frame, inner, drag, zoom_active);
+}
+
+fn render_drag_box(frame: &mut Frame, area: Rect, drag: Option<DragState>, zoom_active: bool) {
+    let Some(drag) = drag else { return };
+    if zoom_active && !drag.zoom {
+        return;
+    }
+    if drag.start == drag.current || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let x0 = drag
+        .start
+        .0
+        .min(drag.current.0)
+        .clamp(area.x, area.right() - 1);
+    let x1 = drag
+        .start
+        .0
+        .max(drag.current.0)
+        .clamp(area.x, area.right() - 1);
+    let y0 = drag
+        .start
+        .1
+        .min(drag.current.1)
+        .clamp(area.y, area.bottom() - 1);
+    let y1 = drag
+        .start
+        .1
+        .max(drag.current.1)
+        .clamp(area.y, area.bottom() - 1);
+    let rect = Rect::new(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Thick)
+            .border_style(Style::default().fg(Color::Rgb(255, 230, 160))),
+        rect,
+    );
 }

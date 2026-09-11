@@ -20,3 +20,12 @@ fn missing_dataset_prints_usage_without_entering_terminal() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: ncv"));
 }
+
+#[test]
+fn manifest_subcommand_describes_both_profiles() {
+    let output = ncv().args(["manifest", "--help"]).output().unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(help.contains("kerchunk"));
+    assert!(help.contains("virtualizarr"));
+}

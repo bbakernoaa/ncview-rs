@@ -22,6 +22,15 @@ mod tests {
     }
 
     #[test]
+    fn map_overlay_switches_contrast_with_palette_low_end() {
+        let dark_data = Palette::Viridis.map_overlay_colors();
+        let light_data = Palette::Viridis.toggle_reversed().map_overlay_colors();
+        assert!(dark_data.land[0] > 200);
+        assert!(light_data.land[0] < 100);
+        assert_ne!(dark_data.grid, light_data.grid);
+    }
+
+    #[test]
     fn parses_ncview_scientific_colour_map_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("batlow.ncmap");

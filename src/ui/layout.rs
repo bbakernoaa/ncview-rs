@@ -24,7 +24,7 @@ pub fn dashboard(area: Rect) -> DashboardAreas {
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(28),
+            Constraint::Length(32),
             Constraint::Min(1),
             Constraint::Length(30),
         ])

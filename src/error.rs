@@ -18,6 +18,8 @@ pub enum NcvError {
     WorkerStopped,
     #[error("dataset adapter error for {path}: {reason}")]
     Adapter { path: PathBuf, reason: String },
+    #[error("GRIB2 error for {path}: {reason}")]
+    Grib2 { path: PathBuf, reason: String },
     #[error("I/O error for {path}: {source}")]
     Io {
         path: PathBuf,

@@ -2,6 +2,7 @@
 
 pub mod colors;
 pub mod landmask;
+pub mod map_background;
 pub mod protocol;
 pub mod raster;
 

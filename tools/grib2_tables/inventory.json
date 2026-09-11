@@ -1,0 +1,60 @@
+{
+  "schema": "ncv-grib2-table-inventory/v1",
+  "noaa_baseline": {
+    "release": "37.0.0",
+    "published": "2026-06-01",
+    "index": "https://www.nco.ncep.noaa.gov/pmb/docs/grib2/grib2_doc/",
+    "sha256": null
+  },
+  "wmo_baseline": {
+    "source": "WMO Information System latest GRIB2 release",
+    "index": "https://community.wmo.int/en/wis/latest-version",
+    "sha256": null
+  },
+  "document_parts": [
+    "introduction",
+    "revision-history",
+    "appendix-a",
+    "appendix-b",
+    "appendix-c"
+  ],
+  "sections": [
+    {"id": "0", "name": "Indicator Section"},
+    {"id": "1", "name": "Identification Section"},
+    {"id": "2", "name": "Local Use Section"},
+    {"id": "3", "name": "Grid Definition Section"},
+    {"id": "4", "name": "Product Definition Section"},
+    {"id": "5", "name": "Data Representation Section"},
+    {"id": "6", "name": "Bit Map Section"},
+    {"id": "7", "name": "Data Section"},
+    {"id": "8", "name": "End Section"}
+  ],
+  "templates": [
+    {"id": "1.0", "name": "Calendar Definition"},
+    {"id": "1.1", "name": "Paleontological Offset"},
+    {"id": "1.2", "name": "Calendar Definition and Paleontological Offset"}
+  ],
+  "table_ids": [
+    "0.0", "1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6",
+    "3.0", "3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8", "3.9",
+    "3.10", "3.11", "3.12", "3.13", "3.15", "3.20", "3.21", "3.25",
+    "4.0", "4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "4.7", "4.8", "4.9",
+    "4.10", "4.11", "4.12", "4.13", "4.14", "4.15", "4.16", "4.91",
+    "4.100", "4.101", "4.102", "4.103", "4.104", "4.105", "4.106",
+    "4.120", "4.121", "4.122",
+    "4.201", "4.202", "4.203", "4.204", "4.205", "4.206", "4.207", "4.208",
+    "4.209", "4.210", "4.211", "4.212", "4.213", "4.214", "4.215", "4.216",
+    "4.217", "4.218", "4.219", "4.220", "4.221", "4.222", "4.223", "4.224",
+    "4.225", "4.227", "4.228", "4.230", "4.233", "4.234", "4.236",
+    "4.238", "4.239", "4.240", "4.241", "4.242", "4.243", "4.244",
+    "4.246", "4.247", "4.248", "4.249", "4.250", "4.251", "4.252", "4.253", "4.254",
+    "4.333", "4.335", "4.336",
+    "5.0", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.25", "5.26", "5.40",
+    "6.0", "7.0"
+  ],
+  "special_families": [
+    "4.2-discipline-category",
+    "centre-local-tables",
+    "wmo-reserved-and-future-codes"
+  ]
+}

@@ -225,6 +225,26 @@ pub fn is_land(latitude: f64, longitude: f64) -> bool {
     is_land_with_detail(latitude, longitude, Detail::Global)
 }
 
+/// Return the lazily selected Natural Earth rings for a presentation layer.
+/// The map renderer uses these filled rings; scientific masking still comes
+/// exclusively from the dataset's validity values.
+pub fn polygons_for_detail(detail: Detail) -> Vec<&'static [(f64, f64)]> {
+    match detail {
+        Detail::Global if !vendored::POLYGONS.is_empty() => vendored::POLYGONS.to_vec(),
+        Detail::Global => FALLBACK_POLYGONS.to_vec(),
+        Detail::Regional => regional_polygons()
+            .polygons
+            .iter()
+            .map(Vec::as_slice)
+            .collect(),
+        Detail::Local => local_polygons()
+            .polygons
+            .iter()
+            .map(Vec::as_slice)
+            .collect(),
+    }
+}
+
 pub fn is_land_with_detail(latitude: f64, longitude: f64, detail: Detail) -> bool {
     let longitude = normalize_longitude(longitude);
     match detail {

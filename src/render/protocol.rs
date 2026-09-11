@@ -5,7 +5,10 @@ use std::{
 
 use image::DynamicImage;
 use image::imageops::FilterType;
-use ratatui::{Frame, layout::Rect};
+use ratatui::{
+    Frame,
+    layout::{Rect, Size},
+};
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{Resize, StatefulImage};
@@ -69,6 +72,29 @@ impl GraphicsRenderer {
         } else {
             filter_label(self.resize_filter)
         }
+    }
+
+    /// Return the portion of a terminal area occupied by the proportional
+    /// graphics image. Kitty, Sixel, and iTerm2 may letterbox an image rather
+    /// than filling every cell in the panel; mouse mapping must use this same
+    /// rectangle or point markers appear displaced from the click.
+    pub fn drawable_area(&self, area: Rect) -> Rect {
+        if !self.supports_graphics() || area.width == 0 || area.height == 0 {
+            return area;
+        }
+        let Some(image) = self.image.as_ref() else {
+            return area;
+        };
+        let size = image.size_for(
+            Resize::Scale(Some(self.resize_filter)),
+            Size::new(area.width, area.height),
+        );
+        Rect::new(
+            area.x,
+            area.y,
+            size.width.min(area.width),
+            size.height.min(area.height),
+        )
     }
 
     pub fn cycle_filter(&mut self) -> bool {

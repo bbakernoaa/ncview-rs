@@ -117,6 +117,7 @@ pub fn render_with_search_and_image(
         view.limits.or(limits),
         view.filter_range,
         view.scale_mode,
+        view.color_scale_scope,
         variable_query,
         variable_search_active,
     );
@@ -135,6 +136,8 @@ pub fn render_with_search_and_image(
             .as_ref()
             .map(|point| (point.row, point.col)),
         view.selected_point,
+        view.drag,
+        view.zoom_bounds.is_some(),
         graphics,
     );
     let selected_metadata = metadata
@@ -164,6 +167,15 @@ pub fn render_with_search_and_image(
     let status = if view.help_visible {
         "Keys: arrows navigate  [/] depth  click map to select  Enter: time series  ? help"
             .to_string()
+    } else if let Some(drag) = view.drag {
+        if view.zoom_bounds.is_some() && !drag.zoom {
+            "dragging map — release to pan  •  r resets zoom".to_string()
+        } else {
+            format!(
+                "zoom box  ({}, {}) → ({}, {})  •  release to zoom",
+                drag.start.0, drag.start.1, drag.current.0, drag.current.1,
+            )
+        }
     } else if let Some(point) = view.hover_point.as_ref() {
         let value = view
             .slice
@@ -184,9 +196,10 @@ pub fn render_with_search_and_image(
             || format!("lon index {}", point.col),
             |value| format!("lon {value:.5}"),
         );
+        let statistics = slice_statistics(view);
         format!(
-            "hover  {latitude}  {longitude}  value {:>14}{}  (click to pin)",
-            value, selected
+            "hover  {latitude}  {longitude}  value {:>14}{}  |  {statistics}  (click to pin)",
+            value, selected,
         )
     } else if let Some((row, col)) = view.selected_point {
         let latitude = view.selected_coordinates.latitude.map_or_else(
@@ -202,7 +215,10 @@ pub fn render_with_search_and_image(
             .as_ref()
             .and_then(|slice| slice.value_at_source(row, col))
             .map_or_else(|| "masked".to_string(), format_point_value);
-        format!("point  {latitude}  {longitude}  value {value:>14}  (Enter for time series)")
+        let statistics = slice_statistics(view);
+        format!(
+            "point  {latitude}  {longitude}  value {value:>14}  |  {statistics}  (Enter for time series)"
+        )
     } else {
         view.status.clone()
     };
@@ -211,6 +227,24 @@ pub fn render_with_search_and_image(
     if view.help_visible {
         help::render(frame, area);
     }
+}
+
+fn slice_statistics(view: &ViewModel) -> String {
+    view.slice
+        .as_ref()
+        .and_then(|slice| slice.statistics)
+        .map_or_else(
+            || "stats: no finite values".to_string(),
+            |stats| {
+                format!(
+                    "stats min {} max {} mean {} n {}",
+                    format_point_value(stats.min),
+                    format_point_value(stats.max),
+                    format_point_value(stats.mean),
+                    stats.finite_count
+                )
+            },
+        )
 }
 
 fn spatial_axes_selected(view: &ViewModel, metadata: &DatasetMetadata) -> bool {

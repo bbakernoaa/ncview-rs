@@ -8,7 +8,7 @@ use crate::{
             Palette, ScaleMode, color_for_value_with_limits_and_filter_and_scale,
             color_for_with_limits,
         },
-        landmask,
+        landmask, map_background,
     },
 };
 
@@ -118,9 +118,19 @@ fn rasterize(
     let statistics = slice.statistics.unwrap_or(crate::data::slice::Statistics {
         min: 0.0,
         max: 1.0,
+        mean: 0.5,
         finite_count: 0,
     });
     let mut image = RgbImage::new(output_cols as u32, output_rows as u32);
+    let background = show_land_borders.then(|| {
+        map_background::render_with_palette(
+            output_cols,
+            output_rows,
+            slice.coordinates.as_ref(),
+            land_detail,
+            &palette,
+        )
+    });
     for output_row in 0..output_rows {
         let (row_start, row_end) = bin_range(output_row, rows, output_rows);
         for output_col in 0..output_cols {
@@ -128,25 +138,6 @@ fn rasterize(
             let mut sum = 0.0;
             let mut count = 0_usize;
             let mut filtered = false;
-            let land_border = show_land_borders
-                && [
-                    (row_start, col_start),
-                    (row_start, col_end - 1),
-                    (row_end - 1, col_start),
-                    (row_end - 1, col_end - 1),
-                ]
-                .into_iter()
-                .any(|(row, col)| {
-                    slice
-                        .coordinates
-                        .as_ref()
-                        .and_then(|grid| {
-                            landmask::cell_is_border_grid_with_detail(grid, row, col, land_detail)
-                        })
-                        .unwrap_or_else(|| {
-                            landmask::cell_is_border_with_detail(rows, cols, row, col, land_detail)
-                        })
-                });
             for row in row_start..row_end {
                 for col in col_start..col_end {
                     let value = slice.values[(row, col)];
@@ -163,8 +154,11 @@ fn rasterize(
                     count += 1;
                 }
             }
+            let background_rgb = background
+                .as_ref()
+                .map(|background| background.get_pixel(output_col as u32, output_row as u32).0);
             let mut rgb = if count == 0 {
-                if filtered { [30, 30, 46] } else { [80, 80, 80] }
+                background_rgb.unwrap_or(if filtered { [30, 30, 46] } else { [80, 80, 80] })
             } else {
                 color_for_value_with_limits_and_filter_and_scale(
                     sum / count as f64,
@@ -176,10 +170,12 @@ fn rasterize(
                     scale,
                 )
             };
-            if land_border {
-                // Use a neutral map-style coastline. The border is an
-                // annotation, not another data color.
-                rgb = [0, 0, 0];
+            if let Some(background_rgb) = background_rgb
+                && count > 0
+            {
+                // Keep geographic context visible beneath global fields while
+                // preserving the scientific color ordering of the data layer.
+                rgb = blend_rgb(background_rgb, rgb, 0.82);
             }
             image.put_pixel(output_col as u32, output_row as u32, Rgb(rgb));
         }
@@ -191,6 +187,14 @@ fn rasterize(
         mark_point(&mut image, slice, point, [255, 255, 255]);
     }
     image
+}
+
+pub fn blend_rgb(background: [u8; 3], foreground: [u8; 3], opacity: f32) -> [u8; 3] {
+    let opacity = opacity.clamp(0.0, 1.0);
+    std::array::from_fn(|index| {
+        (background[index] as f32 * (1.0 - opacity) + foreground[index] as f32 * opacity).round()
+            as u8
+    })
 }
 
 fn bin_range(index: usize, source_len: usize, output_len: usize) -> (usize, usize) {

@@ -1,5 +1,8 @@
 # ncview-rs
 
+[![CI](https://github.com/bbakernoaa/ncview-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/bbakernoaa/ncview-rs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `ncv` is a terminal-native, read-only scientific viewer for local NetCDF-4 files stored in HDF5.
 It is designed for SSH sessions on HPC systems and is distributed as a single Rust binary with no
 native NetCDF/HDF5 runtime dependency.
@@ -31,6 +34,26 @@ ncv path/to/data.nc
 The release workflow publishes Linux x86_64, macOS arm64, and Windows x86_64 archives for tags
 named `v*`. Each release includes a `SHA256SUMS` file.
 
+## Screenshots
+
+These examples are generated from a deterministic synthetic field, so the repository never embeds
+private scientific data. The same export path is used for real NetCDF-4 slices.
+
+<table>
+  <tr>
+    <td><img src="assets/readme/ncv-export-viridis.png" alt="ncv Viridis export with metadata and colorbar" width="480"></td>
+    <td><img src="assets/readme/ncv-export-reversed.png" alt="ncv reversed Viridis export with metadata and colorbar" width="480"></td>
+  </tr>
+  <tr>
+    <td align="center">Presentation-ready PNG export</td>
+    <td align="center">The same slice with the colormap reversed</td>
+  </tr>
+</table>
+
+The editable vector companions are available as
+[Viridis SVG](assets/readme/ncv-export-viridis.svg) and
+[reversed-colormap SVG](assets/readme/ncv-export-reversed.svg).
+
 ## Usage
 
 ```bash
@@ -42,21 +65,26 @@ ncv files_to_open_*.nc
 ```
 
 The dashboard provides variable and dimension navigation, `c` palette cycling, `v` palette
-reversal, `a` automatic
-limits, `l` limits, `f` data masking, `s` linear/log color scaling, `r` zoom reset, `x` axis selection, Space play/pause, Enter time-series inspection, and `g`
-logical/projected grid selection. Press `Ctrl-P` or `:` for a searchable command palette; `?`
-opens the keyboard/mouse help. In the limits dialog, type directly to replace the selected
+reversal, `a` automatic limits, `l` limits, `f` data masking, `s` linear/log color scaling,
+`z` current/global color scaling, `r` zoom reset, `x` axis selection, `b` filled map backdrop,
+`<`/`>` date stepping, and `-`/`+` playback speed, Space play/pause, Enter
+time-series inspection, and `g` logical/projected grid selection. The sidebar includes clickable
+date step, playback speed, scale-scope, palette, limits, mask, axis, and zoom controls. Press
+`Ctrl-P` or `:` for a searchable command palette; `?` opens the keyboard/mouse help. In the limits dialog, type directly to replace the selected
 minimum or maximum, use Tab to switch fields, and press Enter to apply (Esc cancels). `q` exits
 and restores the terminal. When multiple files are open, `{` and `}` switch the active dataset.
 
 The sidebar also exposes clickable buttons for palette cycling, automatic limits, limits editing,
 filtering, axis selection, and zoom reset. Drag across the map to zoom to a region; use
-Shift+arrow keys to pan and `r` to return to the full map. The timeline has a visible Play/Pause
-button, a progress gauge, and a speed control.
+Shift+arrow keys or drag a zoomed map to pan; use Shift-drag to zoom again inside the current view, and `r` to return to the full map. Press `b` to layer a D3-inspired
+ocean, graticule, and filled Natural Earth land backdrop beneath the scientific raster; valid
+data is composited above it and fill/missing cells reveal the geographic context. The timeline
+has a visible Play/Pause button, a progress gauge, and labeled speed controls.
 
 Move the mouse over the map to see its latitude, longitude, and current-slice value in the status
 bar. Click a map cell to pin it (shown with a marker), then press Enter to load its full time
-series. Coordinate variables are read from NetCDF metadata, including 2-D curvilinear latitude
+series. The status bar also reports min/max/mean and finite-count statistics for the displayed
+slice. Coordinate variables are read from NetCDF metadata, including 2-D curvilinear latitude
 and longitude fields; when a file has no coordinate variable, the status falls back to source
 indices.
 NetCDF-4 subgroup variables are shown with qualified names such as `physics/temperature` and can
@@ -65,6 +93,10 @@ retaining the group variable's data and metadata.
 
 The data mask keeps only values between the chosen bounds; NetCDF `_FillValue` and missing values
 remain masked automatically by the data loader.
+
+By default, automatic colors follow the currently displayed slice, so zooming improves contrast.
+Press `z` or click the scale-scope button to switch to `global`, which preserves the full unzoomed
+slice range while zooming. Manual limits always take precedence over either automatic mode.
 
 The coastline overlay is backed by vendored 110m, 50m, and 10m Natural Earth land topologies from
 [world-atlas](https://github.com/topojson/world-atlas) (distributed through jsDelivr). It is a
@@ -90,8 +122,23 @@ The interface uses a Catppuccin-inspired RGB theme, rounded ratatui panels, popu
 Nerd Font icons with Unicode fallbacks. A terminal without Nerd Font glyphs will still retain the
 layout and color treatment.
 
-NetCDF-4/HDF5 is the only supported file format in v0.1. NetCDF-3 and arbitrary HDF5 files are
-rejected before terminal entry with an actionable diagnostic. Source files are never modified.
+NetCDF-4/HDF5 and local GRIB2 are supported. GRIB2 is decoded with the pure-Rust `grib` feature
+set; `.grib`, `.grib2`, `.grb`, `.grb2`, and GRIB-magic files are detected automatically. Source
+files are never modified. NetCDF-3 and arbitrary HDF5 files are rejected before terminal entry
+with an actionable diagnostic.
+
+GRIB2 `.idx` sidecars can also be turned into deterministic Kerchunk-compatible reference JSON:
+
+```bash
+ncv manifest --format kerchunk --input forecast.grib2 --idx forecast.grib2.idx \
+  --output forecast.refs.json --strict
+```
+
+Use `--format virtualizarr` for the VirtualiZarr Kerchunk-parser profile. The manifest retains
+raw table codes and the full Section 4 product payload, so aerosol fields that share a display
+short name (for example `AOTK`) remain independently selectable by species, particle-size
+interval, wavelength, and product-template context. The pinned NOAA/NCEP table inventory and
+update policy are documented in `tools/grib2_tables/README.md`.
 
 ## Configuration
 

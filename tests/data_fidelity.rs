@@ -31,6 +31,7 @@ fn slice_requires_matching_shapes_and_computes_statistics() {
     let slice = Slice2D::new(values, validity, bounds).unwrap();
     assert_eq!(slice.statistics.unwrap().min, 1.0);
     assert_eq!(slice.statistics.unwrap().max, 2.0);
+    assert_eq!(slice.statistics.unwrap().mean, 1.5);
     assert_eq!(slice.value_at_source(0, 1), Some(2.0));
     assert_eq!(slice.value_at_source(1, 0), None);
 }
@@ -204,7 +205,7 @@ fn coards_float32_time_lat_lon_dataset_reads_a_2d_slice() {
 
     let coordinates = source.point_coordinates("MACCity", 2, 4);
     assert_eq!(coordinates.latitude, Some(30.0));
-    assert_eq!(coordinates.longitude, Some(180.0));
+    assert_eq!(coordinates.longitude, Some(-180.0));
 
     let hovmoller = source
         .read_slice_on_axes(
