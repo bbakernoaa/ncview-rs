@@ -425,7 +425,7 @@ fn translate_mouse(
     graphics: Option<&GraphicsRenderer>,
 ) -> Command {
     if let Command::BeginDrag { x, y, zoom } = command {
-        if view.help_visible || view.overlay.is_some() {
+        if view.help_visible || view.overlay.is_some() || view.variable_search_active {
             return Command::Pointer { x, y };
         }
         let Some(canvas) = map_drawable(area, view, graphics) else {
@@ -491,6 +491,9 @@ fn translate_mouse(
     };
     if right {
         return Command::ToggleHelp;
+    }
+    if view.variable_search_active {
+        return Command::Pointer { x, y };
     }
     if matches!(view.overlay, Some(Overlay::Limits | Overlay::Filter)) {
         let width = area.width.saturating_mul(3) / 5;
@@ -749,6 +752,7 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
     state.view.time_index = state.view.time_index.min(time_length.saturating_sub(1));
     state.view.depth_index = state.view.depth_index.min(depth_length.saturating_sub(1));
     state.view.time_label = source.time_label(state.view.time_index);
+    state.view.level_label = source.vertical_label(&variable_name, state.view.depth_index);
     state.view.full_bounds = Some(full_bounds);
     let bounds = state.view.zoom_bounds.unwrap_or(full_bounds);
     let fixed_axes = fixed_axes_for_plane(
@@ -820,10 +824,18 @@ fn load_selected(state: &mut AppState, source: &dyn data::DataSource, metadata: 
                 point.value = Some(value);
             }
             state.view.loading = ncview_rs::app::LoadingState::Ready;
-            state.view.status = format!(
-                "{variable_name}  t={}  z={}  ready",
-                state.view.time_index, state.view.depth_index
-            );
+            let time_text = state
+                .view
+                .time_label
+                .as_deref()
+                .unwrap_or("coordinate index");
+            let level_text = state
+                .view
+                .level_label
+                .as_deref()
+                .map(|label| format!("  level={label}"))
+                .unwrap_or_default();
+            state.view.status = format!("{variable_name}  time={time_text}{level_text}  ready");
         }
         Err(error) => {
             state.view.slice = None;

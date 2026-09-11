@@ -52,6 +52,42 @@ fn variable_selection_moves_between_plottable_fields() {
 }
 
 #[test]
+fn variable_browser_moves_without_loading_until_submit() {
+    let mut state = AppState {
+        variables: vec![
+            Variable {
+                name: "temperature".into(),
+                dimensions: vec!["lat".into(), "lon".into()],
+                numeric: true,
+                units: None,
+                long_name: None,
+                standard_name: None,
+            },
+            Variable {
+                name: "humidity".into(),
+                dimensions: vec!["lat".into(), "lon".into()],
+                numeric: true,
+                units: None,
+                long_name: None,
+                standard_name: None,
+            },
+        ],
+        ..AppState::default()
+    };
+    state.view.selected_variable = Some("temperature".into());
+    state.reduce(Command::OpenVariableSearch);
+
+    assert!(state.reduce(Command::SelectVariable(1)).is_none());
+    assert_eq!(state.view.selected_variable.as_deref(), Some("temperature"));
+    assert_eq!(state.view.variable_browser_index, 1);
+
+    let effect = state.reduce(Command::SubmitVariableSearch);
+    assert!(matches!(effect, Some(Effect::ReadSlice { .. })));
+    assert_eq!(state.view.selected_variable.as_deref(), Some("humidity"));
+    assert!(!state.view.variable_search_active);
+}
+
+#[test]
 fn navigation_is_clamped_and_filter_is_fuzzy() {
     let mut state = AppState::default();
     state.view.time_length = 3;

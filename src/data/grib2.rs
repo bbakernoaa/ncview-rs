@@ -111,6 +111,15 @@ impl Grib2Source {
                 resolution.push(catalog.resolve("4.233", u64::from(aerosol_code)));
             }
             let description = parameter_label.unwrap_or_else(|| message.describe());
+            let time_label = if supported_product_template(product_template) {
+                catch_unwind(AssertUnwindSafe(|| message.temporal_info()))
+                    .ok()
+                    .and_then(|temporal| temporal.forecast_time_target.or(temporal.ref_time))
+                    .map(|time| time.to_rfc3339())
+                    .unwrap_or_else(|| iso_datetime(&section1.payload.ref_time))
+            } else {
+                iso_datetime(&section1.payload.ref_time)
+            };
             let header = Grib2MessageHeader {
                 location: Grib2SourceLocation {
                     path: path.display().to_string(),
@@ -133,19 +142,26 @@ impl Grib2Source {
                 resolution,
             };
             let identity = FieldIdentity::from_header(&header);
-            let variable_name = if used_names.insert(identity.human_name.clone()) {
-                identity.human_name.clone()
-            } else {
-                format!("{}__field_{:04}", identity.human_name, ordinal + 1)
-            };
-            let time_label = format!("t={:?}", section1.payload.ref_time);
+            let surface_info = supported_product_template(product_template)
+                .then(|| message.prod_def().fixed_surfaces())
+                .flatten()
+                .and_then(|(first, second)| surface_qualifier(&first, &second));
+            let preferred_name = surface_info.as_ref().map_or_else(
+                || identity.human_name.clone(),
+                |(qualifier, _)| format!("{}_{}", identity.human_name, qualifier),
+            );
+            let variable_name =
+                unique_variable_name(&preferred_name, &time_label, ordinal, &mut used_names);
+            let long_name = surface_info.map_or(identity.display_label.clone(), |(_, level)| {
+                format!("{} ({level})", identity.display_label)
+            });
             messages.push(MessageDescriptor {
                 variable: Variable {
                     name: variable_name,
                     dimensions: vec!["latitude".into(), "longitude".into()],
                     numeric: true,
                     units: None,
-                    long_name: Some(identity.display_label),
+                    long_name: Some(long_name),
                     standard_name: None,
                 },
                 header,
@@ -440,6 +456,119 @@ fn unsupported_template_reason(source: &[u8]) -> String {
     }
 }
 
+fn supported_product_template(template: u16) -> bool {
+    matches!(template, 0 | 1 | 2 | 5 | 6)
+}
+
+fn unique_variable_name(
+    preferred: &str,
+    time_label: &str,
+    ordinal: usize,
+    used_names: &mut HashSet<String>,
+) -> String {
+    if used_names.insert(preferred.to_owned()) {
+        return preferred.to_owned();
+    }
+
+    let time_suffix = slug_component(time_label);
+    if !time_suffix.is_empty() {
+        let candidate = format!("{preferred}_valid_{time_suffix}");
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+
+    let mut variant = ordinal + 1;
+    loop {
+        let candidate = format!("{preferred}_variant_{variant:03}");
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+        variant += 1;
+    }
+}
+
+fn surface_qualifier(
+    first: &grib::FixedSurface,
+    second: &grib::FixedSurface,
+) -> Option<(String, String)> {
+    let first_value = first.value();
+    if !first_value.is_finite() {
+        return None;
+    }
+    let (label, _, _) = first.describe();
+    let slugged_label = slug_component(&label);
+    let machine_label = slugged_label
+        .strip_suffix("_surface")
+        .unwrap_or(&slugged_label)
+        .to_owned();
+    let unit = first.unit().map(slug_component).unwrap_or_default();
+    let display_label = label
+        .strip_suffix(" surface")
+        .unwrap_or(&label)
+        .to_ascii_lowercase();
+    let display_unit = first.unit().unwrap_or_default();
+    let mut machine = format!("{}_{}{}", machine_label, compact_number(first_value), unit);
+    let mut display = format!(
+        "{} {}{}",
+        display_label,
+        compact_number(first_value),
+        if display_unit.is_empty() {
+            String::new()
+        } else {
+            format!(" {display_unit}")
+        }
+    );
+    let second_value = second.value();
+    if second_value.is_finite()
+        && second.surface_type == first.surface_type
+        && (second_value - first_value).abs() > f64::EPSILON
+    {
+        machine.push('-');
+        machine.push_str(&compact_number(second_value));
+        machine.push_str(&unit);
+        display.push('–');
+        display.push_str(&compact_number(second_value));
+        if !display_unit.is_empty() {
+            display.push(' ');
+            display.push_str(display_unit);
+        }
+    }
+    Some((machine, display))
+}
+
+fn compact_number(value: f64) -> String {
+    let mut result = format!("{value:.6}");
+    while result.ends_with('0') {
+        result.pop();
+    }
+    if result.ends_with('.') {
+        result.pop();
+    }
+    result
+}
+
+fn slug_component(value: &str) -> String {
+    let mut result = String::new();
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            result.push(character.to_ascii_lowercase());
+        } else if character == '.' {
+            result.push('p');
+        } else if !result.ends_with('_') {
+            result.push('_');
+        }
+    }
+    result.trim_matches('_').to_owned()
+}
+
+fn iso_datetime(value: &grib::def::grib2::template::param_set::DateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        value.year, value.month, value.day, value.hour, value.minute, value.second
+    )
+}
+
 impl DataSource for Grib2Source {
     fn metadata(&self) -> &DatasetMetadata {
         &self.metadata
@@ -543,7 +672,13 @@ impl DataSource for Grib2Source {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_grib2_longitude_order, normalized_grib_bytes};
+    use super::{iso_datetime, normalize_grib2_longitude_order, normalized_grib_bytes};
+
+    #[test]
+    fn formats_grib_reference_time_as_iso8601() {
+        let value = grib::def::grib2::template::param_set::DateTime::new(2023, 7, 9, 4, 5, 6);
+        assert_eq!(iso_datetime(&value), "2023-07-09T04:05:06Z");
+    }
 
     #[test]
     fn normalizes_unknown_product_template_without_changing_section_bounds() {

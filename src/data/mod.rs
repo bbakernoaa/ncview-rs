@@ -90,6 +90,10 @@ pub trait DataSource: Send + Sync {
         None
     }
 
+    fn vertical_label(&self, _variable: &str, _index: usize) -> Option<String> {
+        None
+    }
+
     fn point_coordinates(&self, _variable: &str, _row: usize, _col: usize) -> PointCoordinates {
         PointCoordinates {
             latitude: None,

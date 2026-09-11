@@ -131,6 +131,7 @@ pub struct ViewModel {
     pub time_index: usize,
     pub time_length: usize,
     pub time_label: Option<String>,
+    pub level_label: Option<String>,
     pub playing: bool,
     pub playback_speed: f32,
     pub depth_index: usize,
@@ -157,6 +158,7 @@ pub struct ViewModel {
     pub time_series: Vec<(f64, f64)>,
     pub time_series_labels: Vec<String>,
     pub variable_search_active: bool,
+    pub variable_browser_index: usize,
     pub x_axis: Option<String>,
     pub y_axis: Option<String>,
     pub axis_options: Vec<String>,
@@ -246,6 +248,7 @@ impl Default for ViewModel {
             time_index: 0,
             time_length: 1,
             time_label: None,
+            level_label: None,
             playing: false,
             playback_speed: 1.0,
             depth_index: 0,
@@ -272,6 +275,7 @@ impl Default for ViewModel {
             time_series: Vec::new(),
             time_series_labels: Vec::new(),
             variable_search_active: false,
+            variable_browser_index: 0,
             x_axis: None,
             y_axis: None,
             axis_options: Vec::new(),
@@ -315,6 +319,7 @@ impl AppState {
                 if self.view.variable_search_active {
                     self.view.variable_search_active = false;
                     self.variable_query.clear();
+                    self.view.variable_browser_index = 0;
                 } else if self.view.overlay.is_some() {
                     self.view.overlay = None;
                     self.view.limit_draft = None;
@@ -325,6 +330,22 @@ impl AppState {
             Command::PreviousFile | Command::NextFile => None,
             Command::SetBounds(_) | Command::Resize { .. } => None,
             Command::SelectVariable(index) => {
+                if self.view.variable_search_active {
+                    let visible =
+                        crate::ui::sidebar::filter_variables(&self.variables, &self.variable_query);
+                    if visible.is_empty() {
+                        return None;
+                    }
+                    let current = self
+                        .view
+                        .variable_browser_index
+                        .min(visible.len().saturating_sub(1));
+                    let delta = if index == 0 { -1 } else { 1 };
+                    self.view.variable_browser_index = current
+                        .saturating_add_signed(delta)
+                        .min(visible.len().saturating_sub(1));
+                    return None;
+                }
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     return self.reduce(Command::PaletteMove(if index == 0 { -1 } else { 1 }));
                 }
@@ -397,6 +418,7 @@ impl AppState {
             }
             Command::UpdateVariableQuery(query) => {
                 self.variable_query = query;
+                self.view.variable_browser_index = 0;
                 None
             }
             Command::CyclePalette => {
@@ -504,8 +526,15 @@ impl AppState {
             Command::OpenVariableSearch => {
                 self.view.help_visible = false;
                 self.view.variable_search_active = true;
+                self.view.variable_browser_index =
+                    crate::ui::sidebar::filter_variables(&self.variables, "")
+                        .iter()
+                        .position(|variable| {
+                            self.view.selected_variable.as_deref() == Some(variable.name.as_str())
+                        })
+                        .unwrap_or(0);
                 self.view.status =
-                    "search variables: type a name, Enter selects the first match, Esc clears"
+                    "browse variables: type to filter, Enter loads the selected field, Esc closes"
                         .into();
                 None
             }
@@ -513,7 +542,11 @@ impl AppState {
                 self.view.variable_search_active = false;
                 let visible =
                     crate::ui::sidebar::filter_variables(&self.variables, &self.variable_query);
-                if let Some(variable) = visible.first() {
+                let target = self
+                    .view
+                    .variable_browser_index
+                    .min(visible.len().saturating_sub(1));
+                if let Some(variable) = visible.get(target) {
                     self.select_variable(variable.name.clone())
                 } else {
                     self.view.status = "no matching variables".into();
@@ -542,6 +575,7 @@ impl AppState {
                 {
                     if self.variable_query.len() < 64 {
                         self.variable_query.push(character);
+                        self.view.variable_browser_index = 0;
                     }
                 } else if matches!(self.view.overlay, Some(Overlay::Axis))
                     && let Some(draft) = self.view.axis_draft.as_mut()
@@ -583,6 +617,7 @@ impl AppState {
                     self.view.palette_index = 0;
                 } else if self.view.variable_search_active {
                     self.variable_query.pop();
+                    self.view.variable_browser_index = 0;
                 } else if matches!(self.view.overlay, Some(Overlay::Axis))
                     && let Some(draft) = self.view.axis_draft.as_mut()
                 {

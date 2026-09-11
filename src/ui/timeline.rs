@@ -23,12 +23,12 @@ pub fn render(
     };
     let title = format!("{}  Time   {}", theme::ICON_TIME, button);
     let speed_controls = Line::from(" [−] slower  [＋] faster ").right_aligned();
-    let label = format!(
-        "{}/{}  {}  ×{speed:.2}",
-        index,
-        length.saturating_sub(1),
-        time_label.unwrap_or("coordinate index"),
-    );
+    let time_text = time_label.unwrap_or("coordinate index");
+    let label = if length <= 1 {
+        format!("{time_text}  ×{speed:.2}")
+    } else {
+        format!("{index}/{}  {time_text}  ×{speed:.2}", length - 1)
+    };
     frame.render_widget(
         Gauge::default()
             .block(theme::panel(&title, theme::BLUE).title_top(speed_controls))

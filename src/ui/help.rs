@@ -54,6 +54,7 @@ Mouse\n\
   right-click or ? closes this help\n\
 Command palette\n\
   Ctrl-P or :   search actions, then Enter to run\n\
+  /             browse and search all plottable variables\n\
 Limits dialog: type numbers, Tab switches fields, Enter applies, Esc cancels";
     let text = text
         .replace(

@@ -154,6 +154,7 @@ pub fn render_with_search_and_image(
         selected_metadata.and_then(|variable| variable.units.as_deref()),
         selected_metadata.and_then(|variable| variable.long_name.as_deref()),
         selected_metadata.and_then(|variable| variable.standard_name.as_deref()),
+        selected_level_label(metadata, selected_metadata, view).as_deref(),
     );
     timeline::render(
         frame,
@@ -223,10 +224,36 @@ pub fn render_with_search_and_image(
         view.status.clone()
     };
     status::render(frame, areas.status, &status);
-    popup::render(frame, area, view, metadata);
+    popup::render(frame, area, view, metadata, variable_query);
     if view.help_visible {
         help::render(frame, area);
     }
+}
+
+fn selected_level_label(
+    metadata: &DatasetMetadata,
+    variable: Option<&crate::data::Variable>,
+    view: &ViewModel,
+) -> Option<String> {
+    if let Some(level_label) = view.level_label.as_ref() {
+        return Some(level_label.clone());
+    }
+    let variable = variable?;
+    let dimension = variable.dimensions.iter().find_map(|name| {
+        metadata
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.name == *name)
+            .filter(|dimension| dimension.role == AxisRole::Depth)
+    })?;
+    (view.depth_length > 1).then(|| {
+        format!(
+            "{} index {} of {}",
+            dimension.name,
+            view.depth_index,
+            view.depth_length.saturating_sub(1)
+        )
+    })
 }
 
 fn slice_statistics(view: &ViewModel) -> String {

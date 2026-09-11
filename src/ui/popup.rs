@@ -1,16 +1,27 @@
 use super::chart;
 use crate::app::{AxisField, COMMAND_PALETTE, LimitField, Overlay, ViewModel, palette_matches};
-use crate::data::DatasetMetadata;
+use crate::data::{DatasetMetadata, Variable};
 use ratatui::{
     Frame,
     layout::Rect,
     style::Style,
-    widgets::{Clear, Paragraph},
+    text::{Line, Span},
+    widgets::{Clear, Paragraph, Wrap},
 };
 
-use super::theme;
+use super::{sidebar, theme};
 
-pub fn render(frame: &mut Frame, area: Rect, view: &ViewModel, metadata: &DatasetMetadata) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    view: &ViewModel,
+    metadata: &DatasetMetadata,
+    variable_query: &str,
+) {
+    if view.variable_search_active {
+        render_variable_browser(frame, area, view, metadata, variable_query);
+        return;
+    }
     let Some(overlay) = view.overlay else { return };
     let title = match overlay {
         Overlay::Limits => "Limits",
@@ -152,4 +163,141 @@ pub fn render(frame: &mut Frame, area: Rect, view: &ViewModel, metadata: &Datase
             popup,
         );
     }
+}
+
+fn render_variable_browser(
+    frame: &mut Frame,
+    area: Rect,
+    view: &ViewModel,
+    metadata: &DatasetMetadata,
+    variable_query: &str,
+) {
+    let width = area.width.saturating_mul(4).saturating_div(5).max(1);
+    let height = area.height.saturating_mul(4).saturating_div(5).max(1);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    };
+    let shadow = Rect {
+        x: popup.x.saturating_add(1),
+        y: popup.y.saturating_add(1),
+        width: popup.width,
+        height: popup.height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(theme::SHADOW)),
+        shadow,
+    );
+
+    let block = theme::panel("Variables", theme::MAUVE);
+    let inner = block.inner(popup);
+    let plottable = metadata
+        .variables
+        .iter()
+        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+        .cloned()
+        .collect::<Vec<Variable>>();
+    let filtered = sidebar::filter_variables(&plottable, variable_query);
+    let selected = view
+        .variable_browser_index
+        .min(filtered.len().saturating_sub(1));
+    let name_width = usize::from(inner.width.saturating_sub(3)).max(1);
+    let entries = filtered
+        .iter()
+        .enumerate()
+        .map(|(index, variable)| {
+            wrap_name(&variable.name, name_width)
+                .into_iter()
+                .enumerate()
+                .map(|(line_index, chunk)| {
+                    let marker = if line_index == 0 {
+                        if index == selected { "▶ " } else { "  " }
+                    } else {
+                        "  "
+                    };
+                    let style = if index == selected {
+                        theme::title_style(theme::TEXT)
+                    } else {
+                        theme::muted_style()
+                    };
+                    Line::from(vec![
+                        Span::styled(marker, style),
+                        Span::styled(chunk, style),
+                    ])
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let list_height = usize::from(inner.height).saturating_sub(4);
+    let start = visible_window_start(&entries, selected, list_height);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Search: ", theme::title_style(theme::TEAL)),
+        Span::styled(
+            if variable_query.is_empty() {
+                "<all>"
+            } else {
+                variable_query
+            },
+            theme::muted_style(),
+        ),
+    ])];
+    lines.push(Line::from(""));
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No matching plottable variables",
+            theme::muted_style(),
+        )));
+    } else {
+        let mut used = 0usize;
+        for entry in entries.iter().skip(start) {
+            if used >= list_height {
+                break;
+            }
+            let room = list_height - used;
+            lines.extend(entry.iter().take(room).cloned());
+            used += entry.len().min(room);
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} field(s)  ↑↓ select  Enter open  Esc close",
+            filtered.len()
+        ),
+        theme::muted_style(),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        popup,
+    );
+}
+
+fn wrap_name(value: &str, width: usize) -> Vec<String> {
+    let characters = value.chars().collect::<Vec<_>>();
+    if characters.is_empty() {
+        return vec![String::new()];
+    }
+    characters
+        .chunks(width.max(1))
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+fn visible_window_start(entries: &[Vec<Line<'_>>], selected: usize, height: usize) -> usize {
+    if entries.is_empty() || height == 0 {
+        return 0;
+    }
+    let selected = selected.min(entries.len() - 1);
+    let mut start = selected;
+    let mut used = entries[selected].len();
+    while start > 0 && used + entries[start - 1].len() <= height {
+        start -= 1;
+        used += entries[start].len();
+    }
+    start
 }

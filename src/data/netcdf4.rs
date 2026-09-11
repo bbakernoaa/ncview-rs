@@ -332,6 +332,10 @@ impl DataSource for NetCdf4Source {
         NetCdf4Source::time_label(self, index)
     }
 
+    fn vertical_label(&self, variable: &str, index: usize) -> Option<String> {
+        NetCdf4Source::vertical_label(self, variable, index)
+    }
+
     fn point_coordinates(&self, variable: &str, row: usize, col: usize) -> PointCoordinates {
         NetCdf4Source::point_coordinates(self, variable, row, col)
     }
@@ -569,6 +573,66 @@ impl NetCdf4Source {
             .copied()?;
         let units = variable.units();
         Some(format_time_coordinate(value, units.as_deref()))
+    }
+
+    fn vertical_label(&self, variable_name: &str, index: usize) -> Option<String> {
+        let variable = self.root.variable(variable_name)?;
+        let dimension_names = variable.dim_names();
+        let declared = self.root.coordinates_of(variable_name).unwrap_or_default();
+        let coordinate = declared
+            .iter()
+            .filter_map(|name| self.root.variable(name))
+            .find(|candidate| axis_role(candidate) == AxisRole::Depth)
+            .or_else(|| {
+                dimension_names.iter().find_map(|dimension_name| {
+                    self.root.variables.iter().find(|candidate| {
+                        candidate.name == *dimension_name && axis_role(candidate) == AxisRole::Depth
+                    })
+                })
+            })
+            .or_else(|| {
+                dimension_names.iter().find_map(|dimension_name| {
+                    self.root.variables.iter().find(|candidate| {
+                        axis_role(candidate) == AxisRole::Depth
+                            && candidate.shape.len() == 1
+                            && candidate.name.eq_ignore_ascii_case(dimension_name)
+                    })
+                })
+            })?;
+        let length = usize::try_from(*coordinate.shape.first()?).ok()?;
+        if coordinate.shape.len() != 1 || index >= length {
+            return None;
+        }
+        let range = index..index + 1;
+        let dataset = self
+            .file
+            .h5()
+            .dataset_slice(&coordinate.h5_path, std::slice::from_ref(&range))
+            .ok()?;
+        let value = decode_coordinate_values(&dataset, coordinate)
+            .ok()?
+            .first()
+            .copied()
+            .filter(|value| value.is_finite())?;
+        let dimension_name = dimension_names
+            .iter()
+            .find(|name| coordinate.name.eq_ignore_ascii_case(name))
+            .copied()
+            .unwrap_or(coordinate.name.as_str());
+        let description = attribute_text(coordinate, "long_name")
+            .or_else(|| attribute_text(coordinate, "standard_name"))
+            .unwrap_or_else(|| dimension_name.to_string());
+        let units = coordinate.units().unwrap_or_default();
+        let value_text = compact_coordinate_value(value);
+        let level_text = if units.is_empty() {
+            format!("{description} {value_text}")
+        } else {
+            format!("{description} {value_text} {units}")
+        };
+        Some(format!(
+            "{level_text} (index {index} of {})",
+            length.saturating_sub(1)
+        ))
     }
 
     fn point_coordinates(&self, variable_name: &str, row: usize, col: usize) -> PointCoordinates {
@@ -1114,7 +1178,16 @@ fn role_for_name(name: &str) -> AxisRole {
     let lower = name.to_ascii_lowercase();
     if lower.contains("time") {
         AxisRole::Time
-    } else if lower.contains("depth") || lower == "lev" {
+    } else if lower.contains("depth")
+        || lower == "lev"
+        || lower == "level"
+        || lower == "levels"
+        || lower.contains("pressure")
+        || lower.contains("isobaric")
+        || lower.contains("height")
+        || lower.contains("altitude")
+        || lower.contains("hybrid")
+    {
         AxisRole::Depth
     } else if lower == "date" || lower == "dates" {
         AxisRole::Time
@@ -1125,6 +1198,17 @@ fn role_for_name(name: &str) -> AxisRole {
     } else {
         AxisRole::Other
     }
+}
+
+fn compact_coordinate_value(value: f64) -> String {
+    let mut text = format!("{value:.6}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
 }
 
 fn format_time_coordinate(value: f64, units: Option<&str>) -> String {

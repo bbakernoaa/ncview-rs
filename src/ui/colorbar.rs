@@ -40,7 +40,7 @@ pub fn render_with_units(
     units: Option<&str>,
 ) {
     render_with_metadata(
-        frame, area, palette, limits, scale, variable, units, None, None,
+        frame, area, palette, limits, scale, variable, units, None, None, None,
     );
 }
 
@@ -55,6 +55,7 @@ pub fn render_with_metadata(
     units: Option<&str>,
     long_name: Option<&str>,
     standard_name: Option<&str>,
+    level: Option<&str>,
 ) {
     let title = format!("{} Legend", theme::ICON_PALETTE);
     let block = theme::panel(&title, theme::PEACH);
@@ -97,6 +98,14 @@ pub fn render_with_metadata(
         push_metadata_lines(
             &mut metadata_lines,
             &format!("standard: {standard_name}"),
+            false,
+            width,
+        );
+    }
+    if let Some(level) = level {
+        push_metadata_lines(
+            &mut metadata_lines,
+            &format!("level: {level}"),
             false,
             width,
         );
