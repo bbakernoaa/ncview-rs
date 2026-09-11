@@ -1,8 +1,11 @@
+use std::sync::OnceLock;
+
 use image::{DynamicImage, RgbImage};
 use plotters::prelude::{
     BitMapBackend, ChartBuilder as PlotChartBuilder, Circle, Color, IntoDrawingArea, IntoFont,
     LineSeries, PathElement, RGBColor, Rectangle,
 };
+use plotters::style::{FontStyle, register_font};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -84,6 +87,9 @@ fn make_plot_image(
     histogram_values: &[f64],
     area: Rect,
 ) -> Option<DynamicImage> {
+    if !ensure_chart_font() {
+        return None;
+    }
     let width = u32::from(area.width).saturating_mul(14).clamp(480, 2200);
     let height = u32::from(area.height).saturating_mul(28).clamp(300, 1300);
     let mut buffer = vec![0_u8; width as usize * height as usize * 3];
@@ -102,6 +108,18 @@ fn make_plot_image(
     Some(DynamicImage::ImageRgb8(RgbImage::from_raw(
         width, height, buffer,
     )?))
+}
+
+fn ensure_chart_font() -> bool {
+    static REGISTERED: OnceLock<bool> = OnceLock::new();
+    *REGISTERED.get_or_init(|| {
+        register_font(
+            "sans-serif",
+            FontStyle::Normal,
+            include_bytes!("../../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf"),
+        )
+        .is_ok()
+    })
 }
 
 fn draw_series_image(
