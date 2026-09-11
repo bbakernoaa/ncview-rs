@@ -30,3 +30,7 @@ coverage/
 .agents/
 specs/
 .specify/
+
+*.grib2
+*.idx
+*.grb2
