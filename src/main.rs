@@ -67,7 +67,26 @@ enum CliCommand {
     },
 }
 
+fn setup_panic_hook() {
+    let _ = color_eyre::install();
+    human_panic::setup_panic!();
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(
+            stdout,
+            crossterm::cursor::Show,
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        let _ = io::Write::flush(&mut stdout);
+        prev_hook(panic_info);
+    }));
+}
+
 fn main() -> ExitCode {
+    setup_panic_hook();
     let cli = Cli::parse();
     if let Some(CliCommand::Manifest {
         format,
@@ -118,8 +137,43 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut active_file = 0usize;
     let initial_source = sources[active_file].as_ref();
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        use std::io::Write;
+        while let Ok(bytes) = stdout_rx.recv() {
+            let _ = handle.write_all(&bytes);
+            let _ = handle.flush();
+        }
+    });
+
+    struct ChannelWriter {
+        tx: std::sync::mpsc::Sender<Vec<u8>>,
+        buffer: Vec<u8>,
+    }
+
+    impl std::io::Write for ChannelWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if !self.buffer.is_empty() {
+                let bytes = std::mem::take(&mut self.buffer);
+                let _ = self.tx.send(bytes);
+            }
+            Ok(())
+        }
+    }
+
+    let channel_writer = ChannelWriter {
+        tx: stdout_tx,
+        buffer: Vec::new(),
+    };
+
     let mut session = ncview_rs::events::terminal::TerminalSession::enter()?;
-    let backend = CrosstermBackend::new(io::stdout());
+    let backend = CrosstermBackend::new(channel_writer);
     let mut terminal = Terminal::new(backend)?;
     let mut graphics = GraphicsRenderer::probe();
     let mut chart_graphics = graphics.secondary();
@@ -133,7 +187,11 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             state.variables.len()
         );
     }
+    let mut dirty = true;
+    let mut last_render = Instant::now();
+    let frame_budget = Duration::from_millis(33); // ~30 FPS throttle max
     let mut last_playback_tick = Instant::now();
+
     loop {
         let source = sources[active_file].as_ref();
         if state.view.playing
@@ -143,26 +201,45 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             state.reduce(Command::TickPlayback);
             load_selected(&mut state, &sources, active_file);
             last_playback_tick = Instant::now();
+            dirty = true;
         }
-        terminal.draw(|frame| {
-            dashboard::render_with_search_and_image(
-                frame,
-                frame.area(),
-                &state.view,
-                &display_dataset_name(&datasets[active_file], active_file, datasets.len()),
-                source.metadata(),
-                &state.variable_query,
-                state.view.variable_search_active,
-                Some(&mut graphics),
-                Some(&mut chart_graphics),
-            )
-        })?;
-        if event::poll(std::time::Duration::from_millis(100))?
+
+        if dirty && last_render.elapsed() >= frame_budget {
+            terminal.draw(|frame| {
+                dashboard::render_with_search_and_image(
+                    frame,
+                    frame.area(),
+                    &state.view,
+                    &display_dataset_name(&datasets[active_file], active_file, datasets.len()),
+                    source.metadata(),
+                    &state.variable_query,
+                    state.view.variable_search_active,
+                    Some(&mut graphics),
+                    Some(&mut chart_graphics),
+                )
+            })?;
+            last_render = Instant::now();
+            dirty = false;
+        }
+
+        // Compute poll timeout: idle if not playing, else remaining time to next playback tick/render
+        let poll_timeout = if state.view.playing {
+            let playback_interval = Duration::from_secs_f32(1.0 / state.view.playback_speed);
+            let elapsed = last_playback_tick.elapsed();
+            playback_interval.saturating_sub(elapsed).min(Duration::from_millis(33))
+        } else if dirty {
+            frame_budget.saturating_sub(last_render.elapsed())
+        } else {
+            Duration::from_millis(100)
+        };
+
+        if event::poll(poll_timeout)?
             && let Some(command) = input::command_from_event_with_search(
                 event::read()?,
                 state.view.variable_search_active,
             )
         {
+            dirty = true;
             let size = terminal.size()?;
             let command = translate_mouse(
                 command,

@@ -19,7 +19,9 @@ path = "src/main.rs"
 [dependencies]
 base64-simd = "0.8"
 clap = { version = "4.5", features = ["derive"] }
+color-eyre = "0.6"
 colorous = "1.0.16"
+human-panic = "2.0"
 crossterm = "0.29"
 grib = { version = "0.18.4", default-features = false, features = ["jpeg2000-unpack-with-hayro", "png-unpack-with-png-crate", "ccsds-unpack-with-rust-aec", "gridpoints-proj", "time-calculation"] }
 image = { version = "0.25.10", default-features = false }

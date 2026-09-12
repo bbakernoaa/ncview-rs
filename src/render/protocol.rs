@@ -233,7 +233,14 @@ impl ProtocolState {
         }
     }
     pub fn probe() -> Self {
-        let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let p = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+            let _ = tx.send(p);
+        });
+        let mut picker = rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .unwrap_or_else(|_| Picker::halfblocks());
         // `from_query_stdio` can time out when iTerm2 is behind SSH or a
         // multiplexer. Preserve the terminal's environment hint in that
         // error path instead of silently falling back to half-block cells.
