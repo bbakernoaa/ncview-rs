@@ -206,7 +206,7 @@ impl Palette {
 pub struct ColorMapper<'a> {
     sampler: PaletteSampler<'a>,
     min: f64,
-    max: f64,
+    inv_range: f64,
     scale: ScaleMode,
     raw_min: f64,
     raw_max: f64,
@@ -231,10 +231,15 @@ impl<'a> ColorMapper<'a> {
                 }
             }
         };
+        let inv_range = if min.is_finite() && max.is_finite() && max > min {
+            1.0 / (max - min)
+        } else {
+            0.0
+        };
         Self {
             sampler,
             min,
-            max,
+            inv_range,
             scale,
             raw_min,
             raw_max,
@@ -248,11 +253,21 @@ impl<'a> ColorMapper<'a> {
                 return [80, 80, 80];
             }
             let val = value.log10();
-            self.sampler.sample(normalize(val, self.min, self.max))
+            self.sampler
+                .sample(normalize_fast(val, self.min, self.inv_range))
         } else {
-            self.sampler.sample(normalize(value, self.min, self.max))
+            self.sampler
+                .sample(normalize_fast(value, self.min, self.inv_range))
         }
     }
+}
+
+#[inline]
+pub fn normalize_fast(value: f64, min: f64, inv_range: f64) -> f64 {
+    if !value.is_finite() || inv_range == 0.0 {
+        return 0.5;
+    }
+    ((value - min) * inv_range).clamp(0.0, 1.0)
 }
 
 impl Palette {

@@ -5,7 +5,7 @@
 //! the same Natural Earth rings as the coastline overlay, but fills them and
 //! adds subtle graticules before the data raster is composited over the top.
 
-use image::{Rgb, RgbImage};
+use image::RgbImage;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::data::slice::CoordinateGrid;
@@ -56,9 +56,10 @@ pub fn render_with_palette(
 
     let bytes = pixmap.data();
     let mut image = RgbImage::new(width as u32, height as u32);
-    for (index, pixel) in image.pixels_mut().enumerate() {
-        let offset = index * 4;
-        *pixel = Rgb([bytes[offset], bytes[offset + 1], bytes[offset + 2]]);
+    let (src_chunks, _) = bytes.as_chunks::<4>();
+    let (dst_chunks, _) = image.as_mut().as_chunks_mut::<3>();
+    for (src, dst) in src_chunks.iter().zip(dst_chunks) {
+        *dst = [src[0], src[1], src[2]];
     }
     image
 }

@@ -666,14 +666,12 @@ fn contains(polygon: &[(f64, f64)], latitude: f64, longitude: f64) -> bool {
 }
 
 fn unwrap_near(longitude: f64, anchor: f64) -> f64 {
-    let mut longitude = longitude;
-    while longitude - anchor > 180.0 {
-        longitude -= 360.0;
+    let diff = longitude - anchor;
+    if diff.abs() <= 180.0 {
+        longitude
+    } else {
+        longitude - 360.0 * (diff / 360.0).round()
     }
-    while longitude - anchor < -180.0 {
-        longitude += 360.0;
-    }
-    longitude
 }
 
 #[cfg(test)]
