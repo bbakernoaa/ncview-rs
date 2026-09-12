@@ -263,13 +263,7 @@ fn render_content(
                 .map(|screen_col| {
                     let source_col = screen_col * cols / width;
                     let data_rgb = color_for_with_limits_and_filter_and_scale(
-                        slice,
-                        source_row,
-                        source_col,
-                        palette.clone(),
-                        limits,
-                        filter,
-                        scale,
+                        slice, source_row, source_col, &palette, limits, filter, scale,
                     );
                     let background_rgb = background.as_ref().map(|background| {
                         background.get_pixel(screen_col as u32, screen_row as u32).0

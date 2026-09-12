@@ -151,6 +151,28 @@ pub fn classify_packed(values: &[f64], attributes: PackedAttributes) -> (Vec<f64
 }
 
 impl Slice2D {
+    pub fn with_statistics(
+        values: Array2<f64>,
+        validity: Array2<Validity>,
+        source_bounds: Bounds,
+        statistics: Option<Statistics>,
+    ) -> Result<Self> {
+        if values.raw_dim() != validity.raw_dim()
+            || values.raw_dim() != ndarray::Ix2(source_bounds.shape().0, source_bounds.shape().1)
+        {
+            return Err(NcvError::InvalidSlice(
+                "values, mask, and bounds shapes differ".into(),
+            ));
+        }
+        Ok(Self {
+            values,
+            validity,
+            source_bounds,
+            statistics,
+            coordinates: None,
+        })
+    }
+
     pub fn new(
         values: Array2<f64>,
         validity: Array2<Validity>,
@@ -192,13 +214,7 @@ impl Slice2D {
             mean: sum / finite_count as f64,
             finite_count,
         });
-        Ok(Self {
-            values,
-            validity,
-            source_bounds,
-            statistics,
-            coordinates: None,
-        })
+        Self::with_statistics(values, validity, source_bounds, statistics)
     }
 
     pub fn with_coordinates(mut self, coordinates: CoordinateGrid) -> Self {
@@ -226,7 +242,7 @@ impl Slice2D {
             self.source_bounds.row_start,
             self.source_bounds.row_end,
         )?;
-        Self::new(values, validity, bounds).map(|mut slice| {
+        Self::with_statistics(values, validity, bounds, self.statistics).map(|mut slice| {
             if let Some(coordinates) = &self.coordinates {
                 slice.coordinates = Some(CoordinateGrid {
                     latitude: coordinates

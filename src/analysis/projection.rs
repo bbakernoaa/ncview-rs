@@ -47,7 +47,7 @@ impl ProjectionIndex {
 
     pub fn nearest(&self, latitude: f64, longitude: f64) -> Option<SourceIndex> {
         let query = [latitude, normalize_longitude(longitude)];
-        let count = NonZeroUsize::new(self.points.len().clamp(1, 64))?;
+        let count = NonZeroUsize::new(self.points.len().clamp(1, 16))?;
         self.tree
             .query(&query)
             .nearest_n::<SquaredEuclidean<f64>>(count)

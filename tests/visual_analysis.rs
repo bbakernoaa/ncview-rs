@@ -47,8 +47,8 @@ fn manual_limits_change_the_rendered_color_mapping() {
     let values = Array2::from_shape_vec((1, 2), vec![0.0, 100.0]).unwrap();
     let mask = Array2::from_elem((1, 2), Validity::Finite);
     let slice = Slice2D::new(values, mask, Bounds::new(0, 1, 0, 2).unwrap()).unwrap();
-    let auto = color_for_with_limits(&slice, 0, 1, Palette::Viridis, None);
-    let manual = color_for_with_limits(&slice, 0, 1, Palette::Viridis, Some((0.0, 200.0)));
+    let auto = color_for_with_limits(&slice, 0, 1, &Palette::Viridis, None);
+    let manual = color_for_with_limits(&slice, 0, 1, &Palette::Viridis, Some((0.0, 200.0)));
     assert_ne!(auto, manual);
 }
 
@@ -85,7 +85,7 @@ fn data_filter_masks_values_outside_the_requested_range() {
         &slice,
         0,
         0,
-        ncview_rs::render::colors::Palette::Viridis,
+        &ncview_rs::render::colors::Palette::Viridis,
         None,
         state.view.filter_range,
     );
@@ -97,12 +97,12 @@ fn logarithmic_scale_changes_color_normalization_and_rejects_nonpositive_values(
     let values = Array2::from_shape_vec((1, 2), vec![10.0, -1.0]).unwrap();
     let mask = Array2::from_elem((1, 2), Validity::Finite);
     let slice = Slice2D::new(values, mask, Bounds::new(0, 1, 0, 2).unwrap()).unwrap();
-    let linear = color_for_with_limits(&slice, 0, 0, Palette::Viridis, Some((1.0, 100.0)));
+    let linear = color_for_with_limits(&slice, 0, 0, &Palette::Viridis, Some((1.0, 100.0)));
     let logarithmic = color_for_with_limits_and_filter_and_scale(
         &slice,
         0,
         0,
-        Palette::Viridis,
+        &Palette::Viridis,
         Some((1.0, 100.0)),
         None,
         ScaleMode::Log,
@@ -112,7 +112,7 @@ fn logarithmic_scale_changes_color_normalization_and_rejects_nonpositive_values(
         &slice,
         0,
         1,
-        Palette::Viridis,
+        &Palette::Viridis,
         Some((1.0, 100.0)),
         None,
         ScaleMode::Log,
