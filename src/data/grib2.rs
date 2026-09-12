@@ -245,10 +245,7 @@ impl Grib2Source {
             .nth(message_idx)
             .ok_or_else(|| NcvError::Grib2 {
                 path: self.path.clone(),
-                reason: format!(
-                    "message {} disappeared while decoding",
-                    message_idx
-                ),
+                reason: format!("message {} disappeared while decoding", message_idx),
             })?;
         let mut latlons = message
             .latlons()
@@ -643,10 +640,7 @@ impl DataSource for Grib2Source {
             let local_row = row - request.bounds.row_start;
             for col in request.bounds.col_start..request.bounds.col_end {
                 let value = values[row_offset + col];
-                let local = (
-                    local_row,
-                    col - request.bounds.col_start,
-                );
+                let local = (local_row, col - request.bounds.col_start);
                 selected[local] = value;
                 validity[local] = if value.is_nan() {
                     Validity::Missing
