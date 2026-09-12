@@ -76,11 +76,12 @@ pub fn parse_index(path: &Path, text: &str, source_len: u64) -> Result<Vec<Index
         parsed.push((line, ordinal, offset, trimmed.to_owned(), fields));
     }
 
+    let offsets: Vec<u64> = parsed.iter().map(|item| item.2).collect();
     parsed
         .into_iter()
         .enumerate()
         .map(|(position, (line, ordinal, offset, raw, fields))| {
-            let end = parsed_offset_after(text, position + 1).unwrap_or(source_len);
+            let end = offsets.get(position + 1).copied().unwrap_or(source_len);
             let length = end
                 .checked_sub(offset)
                 .ok_or_else(|| index_error(path, line, "byte range length underflow"))?;
@@ -97,18 +98,6 @@ pub fn parse_index(path: &Path, text: &str, source_len: u64) -> Result<Vec<Index
             })
         })
         .collect()
-}
-
-fn parsed_offset_after(text: &str, target_position: usize) -> Option<u64> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            line.split(':').nth(1)?.trim().parse::<u64>().ok()
-        })
-        .nth(target_position)
 }
 
 fn index_error(path: &Path, line: usize, reason: &str) -> NcvError {

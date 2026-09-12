@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use grib::{Grib2SubmessageDecoder, LatLons};
 use ndarray::Array2;
@@ -32,6 +33,7 @@ pub struct Grib2Source {
     parsed_bytes: Vec<u8>,
     metadata: DatasetMetadata,
     messages: Vec<MessageDescriptor>,
+    decoded_cache: Mutex<std::collections::HashMap<usize, (Vec<f64>, CoordinateGrid)>>,
 }
 
 impl Grib2Source {
@@ -207,6 +209,7 @@ impl Grib2Source {
             parsed_bytes,
             metadata,
             messages,
+            decoded_cache: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -221,6 +224,13 @@ impl Grib2Source {
     }
 
     fn decode(&self, descriptor: &MessageDescriptor) -> Result<(Vec<f64>, CoordinateGrid)> {
+        let message_idx = descriptor.header.location.message;
+        if let Ok(cache) = self.decoded_cache.lock()
+            && let Some(cached) = cache.get(&message_idx)
+        {
+            return Ok(cached.clone());
+        }
+
         let parsed = catch_unwind(AssertUnwindSafe(|| grib::from_bytes(&self.parsed_bytes)))
             .map_err(|_| NcvError::Grib2 {
                 path: self.path.clone(),
@@ -232,13 +242,10 @@ impl Grib2Source {
             })?;
         let (_, message) = parsed
             .iter()
-            .nth(descriptor.header.location.message)
+            .nth(message_idx)
             .ok_or_else(|| NcvError::Grib2 {
                 path: self.path.clone(),
-                reason: format!(
-                    "message {} disappeared while decoding",
-                    descriptor.header.location.message
-                ),
+                reason: format!("message {} disappeared while decoding", message_idx),
             })?;
         let mut latlons = message
             .latlons()
@@ -296,13 +303,17 @@ impl Grib2Source {
             path: self.path.clone(),
             reason: format!("longitude grid: {error}"),
         })?;
-        Ok((
+        let result = (
             values,
             CoordinateGrid {
                 latitude: Some(latitude),
                 longitude: Some(longitude),
             },
-        ))
+        );
+        if let Ok(mut cache) = self.decoded_cache.lock() {
+            cache.insert(message_idx, result.clone());
+        }
+        Ok(result)
     }
 }
 
@@ -349,15 +360,36 @@ fn normalize_grib2_longitude_order(
 
     let mut reordered_values = vec![0.0; values.len()];
     let mut reordered_latlons = vec![(0.0, 0.0); latlons.len()];
+
+    let first_row_order = {
+        let mut order = (0..cols).collect::<Vec<_>>();
+        order.sort_by(|&left, &right| {
+            normalize_grib2_longitude(latlons[left].1)
+                .total_cmp(&normalize_grib2_longitude(latlons[right].1))
+                .then_with(|| left.cmp(&right))
+        });
+        order
+    };
+
     for row in 0..rows {
         let row_start = row * cols;
-        let mut order = (0..cols).collect::<Vec<_>>();
-        order.sort_by(|left, right| {
-            normalize_grib2_longitude(latlons[row_start + *left].1)
-                .total_cmp(&normalize_grib2_longitude(latlons[row_start + *right].1))
-                .then_with(|| left.cmp(right))
-        });
-        for (new_col, old_col) in order.into_iter().enumerate() {
+        let local_order;
+        let row_order = if row == 0
+            || (0..cols).all(|c| (latlons[row_start + c].1 - latlons[c].1).abs() < 1e-6)
+        {
+            &first_row_order[..]
+        } else {
+            let mut order = (0..cols).collect::<Vec<_>>();
+            order.sort_by(|&left, &right| {
+                normalize_grib2_longitude(latlons[row_start + left].1)
+                    .total_cmp(&normalize_grib2_longitude(latlons[row_start + right].1))
+                    .then_with(|| left.cmp(&right))
+            });
+            local_order = order;
+            &local_order[..]
+        };
+
+        for (new_col, &old_col) in row_order.iter().enumerate() {
             let old_index = row_start + old_col;
             let new_index = row_start + new_col;
             let (latitude, longitude) = latlons[old_index];
@@ -600,21 +632,15 @@ impl DataSource for Grib2Source {
                 "slice bounds exceed GRIB2 grid shape".into(),
             ));
         }
-        let full = Array2::from_shape_vec((descriptor.rows, descriptor.cols), values).map_err(
-            |error| NcvError::Grib2 {
-                path: self.path.clone(),
-                reason: format!("decoded grid shape: {error}"),
-            },
-        )?;
-        let mut selected = Array2::zeros(request.bounds.shape());
-        let mut validity = Array2::from_elem(request.bounds.shape(), Validity::Finite);
+        let out_shape = request.bounds.shape();
+        let mut selected = Array2::zeros(out_shape);
+        let mut validity = Array2::from_elem(out_shape, Validity::Finite);
         for row in request.bounds.row_start..request.bounds.row_end {
+            let row_offset = row * descriptor.cols;
+            let local_row = row - request.bounds.row_start;
             for col in request.bounds.col_start..request.bounds.col_end {
-                let value = full[(row, col)];
-                let local = (
-                    row - request.bounds.row_start,
-                    col - request.bounds.col_start,
-                );
+                let value = values[row_offset + col];
+                let local = (local_row, col - request.bounds.col_start);
                 selected[local] = value;
                 validity[local] = if value.is_nan() {
                     Validity::Missing

@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use ndarray::Array2;
@@ -22,6 +23,7 @@ pub struct NetCdf4Source {
     file: NcFile,
     root: NcGroup,
     metadata: DatasetMetadata,
+    coord_cache: Mutex<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl NetCdf4Source {
@@ -139,6 +141,7 @@ impl NetCdf4Source {
                 dimensions,
                 variables,
             },
+            coord_cache: Mutex::new(std::collections::HashMap::new()),
         })
     }
 }
@@ -346,6 +349,50 @@ impl DataSource for NetCdf4Source {
 }
 
 impl NetCdf4Source {
+    fn read_coordinate_values_cached(&self, variable: &oxinetcdf::NcVariable) -> Result<Vec<f64>> {
+        if let Ok(cache) = self.coord_cache.lock()
+            && let Some(cached) = cache.get(&variable.h5_path)
+        {
+            return Ok(cached.clone());
+        }
+
+        let element_count = variable
+            .shape
+            .iter()
+            .try_fold(1usize, |acc, &len| {
+                usize::try_from(len).ok()?.checked_mul(acc)
+            })
+            .ok_or_else(|| NcvError::InvalidSlice("coordinate shape exceeds usize".into()))?;
+
+        let ranges = variable
+            .shape
+            .iter()
+            .map(|&len| {
+                let size = usize::try_from(len).map_err(|_| {
+                    NcvError::InvalidSlice("coordinate dimension exceeds usize".into())
+                })?;
+                Ok(0..size)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let raw = self
+            .file
+            .h5()
+            .dataset_slice(&variable.h5_path, &ranges)
+            .map_err(|error| NcvError::Adapter {
+                path: self.path.clone(),
+                reason: error.to_string(),
+            })?;
+
+        let values = decode_coordinate_values(&raw, variable)?;
+        if values.len() == element_count
+            && let Ok(mut cache) = self.coord_cache.lock()
+        {
+            cache.insert(variable.h5_path.clone(), values.clone());
+        }
+        Ok(values)
+    }
+
     fn read_coordinate_grid(
         &self,
         variable: &oxinetcdf::NcVariable,
@@ -407,29 +454,31 @@ impl NetCdf4Source {
             .collect::<Result<Vec<_>>>()?;
         let rows = bounds.row_end - bounds.row_start;
         let cols = bounds.col_end - bounds.col_start;
-        let values = if coordinate_shape.len() == 1 {
-            let (start, end) = if role == AxisRole::Latitude {
-                (bounds.row_start, bounds.row_end)
+        let values = self.read_coordinate_values_cached(coordinate)?;
+        if coordinate_shape.len() == 1 {
+            let start = if role == AxisRole::Latitude {
+                bounds.row_start
             } else {
-                (bounds.col_start, bounds.col_end)
+                bounds.col_start
             };
-            if end > coordinate_shape[0] {
+            let end = if role == AxisRole::Latitude {
+                bounds.row_end
+            } else {
+                bounds.col_end
+            };
+            if end > values.len() {
                 return Err(NcvError::InvalidSlice(
                     "coordinate bounds exceed coordinate length".into(),
                 ));
             }
-            let raw = self
-                .file
-                .h5()
-                .dataset_slice(&coordinate.h5_path, std::slice::from_ref(&(start..end)))
-                .map_err(|error| NcvError::Adapter {
-                    path: self.path.clone(),
-                    reason: error.to_string(),
-                })?;
-            let values = decode_coordinate_values(&raw, coordinate)?;
-            Array2::from_shape_fn((rows, cols), |(row, col)| {
-                values[if role == AxisRole::Latitude { row } else { col }]
-            })
+            Ok(Array2::from_shape_fn((rows, cols), |(row, col)| {
+                let idx = if role == AxisRole::Latitude {
+                    start + row
+                } else {
+                    start + col
+                };
+                values[idx]
+            }))
         } else if coordinate_shape.len() == 2 {
             let direct = coordinate_shape == [grid_shape.0, grid_shape.1];
             let transposed = coordinate_shape == [grid_shape.1, grid_shape.0];
@@ -438,39 +487,22 @@ impl NetCdf4Source {
                     "2-D coordinate shape does not match data plane".into(),
                 ));
             }
-            let ranges = if direct {
-                vec![
-                    bounds.row_start..bounds.row_end,
-                    bounds.col_start..bounds.col_end,
-                ]
-            } else {
-                vec![
-                    bounds.col_start..bounds.col_end,
-                    bounds.row_start..bounds.row_end,
-                ]
-            };
-            let raw = self
-                .file
-                .h5()
-                .dataset_slice(&coordinate.h5_path, &ranges)
-                .map_err(|error| NcvError::Adapter {
-                    path: self.path.clone(),
-                    reason: error.to_string(),
-                })?;
-            let values = decode_coordinate_values(&raw, coordinate)?;
-            let shape = if direct { (rows, cols) } else { (cols, rows) };
-            let plane =
-                Array2::from_shape_vec(shape, values).map_err(|error| NcvError::Adapter {
-                    path: self.path.clone(),
-                    reason: error.to_string(),
-                })?;
-            if direct { plane } else { plane.t().to_owned() }
+            let coord_cols = coordinate_shape[1];
+            let plane = Array2::from_shape_fn((rows, cols), |(r, c)| {
+                let (source_r, source_c) = if direct {
+                    (bounds.row_start + r, bounds.col_start + c)
+                } else {
+                    (bounds.col_start + c, bounds.row_start + r)
+                };
+                let idx = source_r * coord_cols + source_c;
+                values.get(idx).copied().unwrap_or(f64::NAN)
+            });
+            Ok(plane)
         } else {
-            return Err(NcvError::InvalidSlice(
+            Err(NcvError::InvalidSlice(
                 "coordinate variable is not 1-D or 2-D".into(),
-            ));
-        };
-        Ok(values)
+            ))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -565,16 +597,8 @@ impl NetCdf4Source {
         if index >= length {
             return None;
         }
-        let range = index..index + 1;
-        let dataset = self
-            .file
-            .h5()
-            .dataset_slice(&variable.h5_path, std::slice::from_ref(&range))
-            .ok()?;
-        let value = dataset_as_f64(&dataset, &variable.nc_type())
-            .ok()?
-            .first()
-            .copied()?;
+        let values = self.read_coordinate_values_cached(variable).ok()?;
+        let value = *values.get(index)?;
         let units = variable.units();
         Some(format_time_coordinate(value, units.as_deref()))
     }
@@ -607,17 +631,11 @@ impl NetCdf4Source {
         if coordinate.shape.len() != 1 || index >= length {
             return None;
         }
-        let range = index..index + 1;
-        let dataset = self
-            .file
-            .h5()
-            .dataset_slice(&coordinate.h5_path, std::slice::from_ref(&range))
-            .ok()?;
-        let value = decode_coordinate_values(&dataset, coordinate)
-            .ok()?
-            .first()
-            .copied()
-            .filter(|value| value.is_finite())?;
+        let values = self.read_coordinate_values_cached(coordinate).ok()?;
+        let value = *values.get(index)?;
+        if !value.is_finite() {
+            return None;
+        }
         let dimension_name = dimension_names
             .iter()
             .find(|name| coordinate.name.eq_ignore_ascii_case(name))
@@ -668,14 +686,7 @@ impl NetCdf4Source {
                     })
                 })
             })?;
-        let length = usize::try_from(*coordinate.shape.first()?).ok()?;
-        let range = 0..length;
-        let dataset = self
-            .file
-            .h5()
-            .dataset_slice(&coordinate.h5_path, std::slice::from_ref(&range))
-            .ok()?;
-        decode_coordinate_values(&dataset, coordinate).ok()
+        self.read_coordinate_values_cached(coordinate).ok()
     }
 
     fn point_coordinates(&self, variable_name: &str, row: usize, col: usize) -> PointCoordinates {
@@ -794,16 +805,10 @@ impl NetCdf4Source {
                 })
                 .unwrap_or(coordinate)
         };
-        let ranges = if coordinate.shape.len() == 1 {
-            // Some COARDS/HDF5 files expose an opaque dimension name for the
-            // coordinate variable. The role and matching length are already
-            // authoritative here, so do not require the raw dimension names
-            // to match the canonicalized data dimensions.
+        let values = self.read_coordinate_values_cached(coordinate).ok()?;
+        if coordinate.shape.len() == 1 {
             let index = if role == AxisRole::Latitude { row } else { col };
-            if index >= usize::try_from(*coordinate.shape.first()?).ok()? {
-                return None;
-            }
-            std::iter::once(index..index + 1).collect()
+            values.get(index).copied().filter(|v| v.is_finite())
         } else if coordinate.shape.len() == 2 {
             let coordinate_rows = usize::try_from(coordinate.shape[0]).ok()?;
             let coordinate_cols = usize::try_from(coordinate.shape[1]).ok()?;
@@ -818,23 +823,11 @@ impl NetCdf4Source {
             if coordinate_row >= coordinate_rows || coordinate_col >= coordinate_cols {
                 return None;
             }
-            vec![
-                coordinate_row..coordinate_row + 1,
-                coordinate_col..coordinate_col + 1,
-            ]
+            let index = coordinate_row * coordinate_cols + coordinate_col;
+            values.get(index).copied().filter(|v| v.is_finite())
         } else {
-            return None;
-        };
-        let dataset = self
-            .file
-            .h5()
-            .dataset_slice(&coordinate.h5_path, &ranges)
-            .ok()?;
-        dataset_as_f64(&dataset, &coordinate.nc_type())
-            .ok()?
-            .first()
-            .copied()
-            .filter(|value| value.is_finite())
+            None
+        }
     }
 }
 
