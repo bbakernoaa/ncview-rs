@@ -56,11 +56,10 @@ pub fn render_with_palette(
 
     let bytes = pixmap.data();
     let mut image = RgbImage::new(width as u32, height as u32);
-    for (src, dst) in bytes
-        .chunks_exact(4)
-        .zip(image.as_mut().chunks_exact_mut(3))
-    {
-        dst.copy_from_slice(&src[..3]);
+    let (src_chunks, _) = bytes.as_chunks::<4>();
+    let (dst_chunks, _) = image.as_mut().as_chunks_mut::<3>();
+    for (src, dst) in src_chunks.iter().zip(dst_chunks) {
+        *dst = [src[0], src[1], src[2]];
     }
     image
 }
