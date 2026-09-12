@@ -4,10 +4,7 @@ use crate::{
     analysis::projection::ProjectionIndex,
     data::slice::Slice2D,
     render::{
-        colors::{
-            Palette, ScaleMode, color_for_value_with_limits_and_filter_and_scale,
-            color_for_with_limits,
-        },
+        colors::{Palette, ScaleMode, color_for_with_limits},
         landmask, map_background,
     },
 };
@@ -29,18 +26,16 @@ pub fn rgb_raster_with_limits(
         mean: 0.5,
         finite_count: 0,
     });
+    let mapper =
+        crate::render::colors::ColorMapper::new(&palette, stats, limits, ScaleMode::Linear);
     let mut pixels = image.pixels_mut();
     if let (Some(v_slice), Some(m_slice)) = (slice.values.as_slice(), slice.validity.as_slice()) {
         for (&value, &mask) in v_slice.iter().zip(m_slice.iter()) {
-            let rgb = color_for_value_with_limits_and_filter_and_scale(
-                value,
-                mask,
-                stats,
-                &palette,
-                limits,
-                None,
-                ScaleMode::Linear,
-            );
+            let rgb = if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                mapper.map_value(value)
+            } else {
+                [80, 80, 80]
+            };
             if let Some(pixel) = pixels.next() {
                 *pixel = Rgb(rgb);
             }
@@ -138,6 +133,7 @@ fn rasterize(
         mean: 0.5,
         finite_count: 0,
     });
+    let mapper = crate::render::colors::ColorMapper::new(&palette, statistics, limits, scale);
     let mut image = RgbImage::new(output_cols as u32, output_rows as u32);
     let background = show_land_borders.then(|| {
         map_background::render_with_palette(
@@ -204,15 +200,7 @@ fn rasterize(
             let mut rgb = if count == 0 {
                 background_rgb.unwrap_or(if filtered { [30, 30, 46] } else { [80, 80, 80] })
             } else {
-                color_for_value_with_limits_and_filter_and_scale(
-                    sum / count as f64,
-                    crate::data::slice::Validity::Finite,
-                    statistics,
-                    &palette,
-                    limits,
-                    None,
-                    scale,
-                )
+                mapper.map_value(sum / count as f64)
             };
             if let Some(background_rgb) = background_rgb
                 && count > 0

@@ -192,8 +192,8 @@ impl Slice2D {
         if let (Some(v_slice), Some(m_slice)) = (values.as_slice(), validity.as_slice()) {
             for (&value, &mask) in v_slice.iter().zip(m_slice.iter()) {
                 if mask == Validity::Finite && value.is_finite() {
-                    min = min.min(value);
-                    max = max.max(value);
+                    min = f64::min(min, value);
+                    max = f64::max(max, value);
                     sum += value;
                     finite_count += 1;
                 }
@@ -201,8 +201,8 @@ impl Slice2D {
         } else {
             for (&value, &mask) in values.iter().zip(validity.iter()) {
                 if mask == Validity::Finite && value.is_finite() {
-                    min = min.min(value);
-                    max = max.max(value);
+                    min = f64::min(min, value);
+                    max = f64::max(max, value);
                     sum += value;
                     finite_count += 1;
                 }

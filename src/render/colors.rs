@@ -55,6 +55,74 @@ pub struct ScientificColorMap {
     pub colors: Vec<[u8; 3]>,
 }
 
+#[derive(Clone, Copy)]
+pub enum PaletteSampler<'a> {
+    Gradient {
+        gradient: Gradient,
+        reversed: bool,
+    },
+    Custom {
+        map: &'a ScientificColorMap,
+        reversed: bool,
+    },
+}
+
+impl<'a> PaletteSampler<'a> {
+    pub fn new(palette: &'a Palette) -> Self {
+        let mut curr = palette;
+        let mut reversed = false;
+        while let Palette::Reversed(inner) = curr {
+            reversed = !reversed;
+            curr = inner;
+        }
+        if let Some(gradient) = curr.gradient() {
+            Self::Gradient { gradient, reversed }
+        } else if let Palette::Custom(map) = curr {
+            Self::Custom { map, reversed }
+        } else {
+            unreachable!("all non-custom palettes have a gradient")
+        }
+    }
+
+    #[inline]
+    pub fn sample(&self, position: f64) -> [u8; 3] {
+        let pos = match self {
+            Self::Gradient { reversed, .. } | Self::Custom { reversed, .. } if *reversed => {
+                1.0 - position
+            }
+            _ => position,
+        }
+        .clamp(0.0, 1.0);
+
+        match self {
+            Self::Gradient { gradient, .. } => {
+                let color = gradient.eval_continuous(pos);
+                [color.r, color.g, color.b]
+            }
+            Self::Custom { map, .. } => {
+                if map.colors.is_empty() {
+                    return [0, 0, 0];
+                }
+                let max_idx = map.colors.len().saturating_sub(1);
+                let scaled = pos * (max_idx as f64);
+                let lower = scaled.floor() as usize;
+                let upper = scaled.ceil() as usize;
+                if lower == upper {
+                    return map.colors[lower];
+                }
+                let fraction = scaled - lower as f64;
+                let a = map.colors[lower];
+                let b = map.colors[upper];
+                [
+                    (a[0] as f64 + (b[0] as f64 - a[0] as f64) * fraction).round() as u8,
+                    (a[1] as f64 + (b[1] as f64 - a[1] as f64) * fraction).round() as u8,
+                    (a[2] as f64 + (b[2] as f64 - a[2] as f64) * fraction).round() as u8,
+                ]
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MapOverlayColors {
     pub(crate) ocean: [u8; 3],
@@ -125,35 +193,69 @@ impl Palette {
         }
     }
 
-    pub(crate) fn sample(&self, position: f64) -> [u8; 3] {
-        if let Self::Reversed(palette) = self {
-            return palette.sample(1.0 - position);
-        }
-        let position = position.clamp(0.0, 1.0);
-        if let Some(gradient) = self.gradient() {
-            let color = gradient.eval_continuous(position);
-            return [color.r, color.g, color.b];
-        }
-        let Self::Custom(map) = self else {
-            unreachable!("all built-in palettes have a gradient")
-        };
-        if map.colors.is_empty() {
-            return [0, 0, 0];
-        }
-        let scaled = position * (map.colors.len().saturating_sub(1) as f64);
-        let lower = scaled.floor() as usize;
-        let upper = scaled.ceil() as usize;
-        if lower == upper {
-            return map.colors[lower];
-        }
-        let fraction = scaled - lower as f64;
-        let a = map.colors[lower];
-        let b = map.colors[upper];
-        [0, 1, 2].map(|channel| {
-            (a[channel] as f64 + (b[channel] as f64 - a[channel] as f64) * fraction).round() as u8
-        })
+    pub fn sampler(&self) -> PaletteSampler<'_> {
+        PaletteSampler::new(self)
     }
 
+    pub(crate) fn sample(&self, position: f64) -> [u8; 3] {
+        self.sampler().sample(position)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ColorMapper<'a> {
+    sampler: PaletteSampler<'a>,
+    min: f64,
+    max: f64,
+    scale: ScaleMode,
+    raw_min: f64,
+    raw_max: f64,
+}
+
+impl<'a> ColorMapper<'a> {
+    pub fn new(
+        palette: &'a Palette,
+        stats: crate::data::slice::Statistics,
+        limits: Option<(f64, f64)>,
+        scale: ScaleMode,
+    ) -> Self {
+        let sampler = palette.sampler();
+        let (raw_min, raw_max) = limits.unwrap_or((stats.min, stats.max));
+        let (min, max) = match scale {
+            ScaleMode::Linear => (raw_min, raw_max),
+            ScaleMode::Log => {
+                if raw_min > 0.0 && raw_max > 0.0 {
+                    (raw_min.log10(), raw_max.log10())
+                } else {
+                    (raw_min, raw_max)
+                }
+            }
+        };
+        Self {
+            sampler,
+            min,
+            max,
+            scale,
+            raw_min,
+            raw_max,
+        }
+    }
+
+    #[inline]
+    pub fn map_value(&self, value: f64) -> [u8; 3] {
+        if self.scale == ScaleMode::Log {
+            if value <= 0.0 || self.raw_min <= 0.0 || self.raw_max <= 0.0 {
+                return [80, 80, 80];
+            }
+            let val = value.log10();
+            self.sampler.sample(normalize(val, self.min, self.max))
+        } else {
+            self.sampler.sample(normalize(value, self.min, self.max))
+        }
+    }
+}
+
+impl Palette {
     /// Pick map-overlay colors that contrast with the low end of the active
     /// scientific palette. The overlay is presentation-only; field colors
     /// and the palette itself are never modified.
@@ -278,6 +380,7 @@ fn parse_ncmap(name: &str, contents: &str) -> Option<Palette> {
     })))
 }
 
+#[inline]
 pub fn normalize(value: f64, min: f64, max: f64) -> f64 {
     if !value.is_finite() || !min.is_finite() || !max.is_finite() || max <= min {
         return 0.5;

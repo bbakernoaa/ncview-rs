@@ -287,6 +287,7 @@ impl Grib2Source {
             descriptor.rows,
             descriptor.cols,
         );
+        normalize_grib2_latitude_order(&mut values, &mut latlons, descriptor.rows, descriptor.cols);
         let latitude = Array2::from_shape_vec(
             (descriptor.rows, descriptor.cols),
             latlons.iter().map(|(lat, _)| *lat).collect(),
@@ -403,6 +404,46 @@ fn normalize_grib2_longitude_order(
 
 fn normalize_grib2_longitude(longitude: f64) -> f64 {
     (longitude + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// Ensure rows are ordered with respect to latitude from north to south (decreasing latitude).
+/// If a GRIB2 field is packed south-to-north (increasing latitude), flip the rows
+/// so that top display rows correspond to northern latitudes.
+fn normalize_grib2_latitude_order(
+    values: &mut [f64],
+    latlons: &mut [(f64, f64)],
+    rows: usize,
+    cols: usize,
+) {
+    if rows <= 1 || cols == 0 || values.len() != rows.saturating_mul(cols) {
+        return;
+    }
+    // Compare first row mean latitude with last row mean latitude
+    let first_row_lat: f64 = latlons[0..cols]
+        .iter()
+        .map(|(lat, _)| *lat)
+        .filter(|lat| lat.is_finite())
+        .sum::<f64>()
+        / (cols as f64);
+    let last_row_start = (rows - 1) * cols;
+    let last_row_lat: f64 = latlons[last_row_start..last_row_start + cols]
+        .iter()
+        .map(|(lat, _)| *lat)
+        .filter(|lat| lat.is_finite())
+        .sum::<f64>()
+        / (cols as f64);
+
+    if first_row_lat < last_row_lat {
+        // Reverse rows so northernmost latitudes come first (index 0)
+        for r in 0..(rows / 2) {
+            let top = r * cols;
+            let bottom = (rows - 1 - r) * cols;
+            for c in 0..cols {
+                values.swap(top + c, bottom + c);
+                latlons.swap(top + c, bottom + c);
+            }
+        }
+    }
 }
 
 /// `grib` 0.18.4 only models a subset of Product Definition Template 4.x and
@@ -764,6 +805,22 @@ mod tests {
         assert_eq!(
             latlons,
             [(0.0, -180.0), (0.0, -90.0), (0.0, 0.0), (0.0, 90.0)]
+        );
+    }
+
+    #[test]
+    fn flips_south_to_north_latitude_order() {
+        use super::normalize_grib2_latitude_order;
+
+        let mut values = vec![10.0, 20.0, 30.0, 40.0];
+        let mut latlons = vec![(-45.0, 0.0), (-45.0, 90.0), (45.0, 0.0), (45.0, 90.0)];
+
+        normalize_grib2_latitude_order(&mut values, &mut latlons, 2, 2);
+
+        assert_eq!(values, [30.0, 40.0, 10.0, 20.0]);
+        assert_eq!(
+            latlons,
+            [(45.0, 0.0), (45.0, 90.0), (-45.0, 0.0), (-45.0, 90.0),]
         );
     }
 }
