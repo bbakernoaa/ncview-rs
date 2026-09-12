@@ -17,7 +17,7 @@ use super::{canvas, colorbar, help, layout, popup, sidebar, status, theme, timel
 /// difficult to read accurately in the status bar.
 pub fn format_point_value(value: f64) -> String {
     let magnitude = value.abs();
-    if value.is_finite() && magnitude > 0.0 && (magnitude < 1.0e-4 || magnitude >= 1.0e6) {
+    if value.is_finite() && magnitude > 0.0 && !(1.0e-4..1.0e6).contains(&magnitude) {
         format!("{value:.8e}")
     } else {
         format!("{value:.6}")

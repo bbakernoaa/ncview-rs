@@ -609,28 +609,22 @@ fn translate_mouse(
     }
     if view.variable_search_active {
         let popup = variable_browser_rect(area);
-        if clicked {
-            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
-                return Command::Quit;
-            }
+        if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
+            return Command::Quit;
         }
         return Command::Pointer { x, y };
     }
     if view.help_visible {
         let popup = help_rect(area);
-        if clicked {
-            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
-                return Command::ToggleHelp;
-            }
+        if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
+            return Command::ToggleHelp;
         }
         return Command::Pointer { x, y };
     }
     if let Some(overlay) = view.overlay {
         let popup = overlay_rect(area, overlay);
-        if clicked {
-            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
-                return Command::Quit;
-            }
+        if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
+            return Command::Quit;
         }
         if matches!(overlay, Overlay::Limits | Overlay::Filter) {
             if clicked {
