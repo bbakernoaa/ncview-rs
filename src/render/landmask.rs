@@ -599,7 +599,14 @@ fn close_ring(polygon: &mut Vec<(f64, f64)>) {
 }
 
 fn normalize_longitude(longitude: f64) -> f64 {
-    (longitude + 180.0).rem_euclid(360.0) - 180.0
+    let mut normalized = longitude;
+    while normalized < -180.0 {
+        normalized += 360.0;
+    }
+    while normalized > 180.0 {
+        normalized -= 360.0;
+    }
+    normalized
 }
 
 fn longitude_bin(longitude: f64) -> usize {

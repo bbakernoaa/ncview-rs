@@ -253,9 +253,11 @@ impl<'a> ColorMapper<'a> {
                 return [80, 80, 80];
             }
             let val = value.log10();
-            self.sampler.sample(normalize_fast(val, self.min, self.inv_range))
+            self.sampler
+                .sample(normalize_fast(val, self.min, self.inv_range))
         } else {
-            self.sampler.sample(normalize_fast(value, self.min, self.inv_range))
+            self.sampler
+                .sample(normalize_fast(value, self.min, self.inv_range))
         }
     }
 }
@@ -299,71 +301,65 @@ impl Palette {
 /// the current directory or in one of the conventional Ncview data directories.
 /// Invalid files are ignored so an optional colour-map bundle can never make a
 /// dataset fail to open.
-static DISCOVERED_COLORMAPS: std::sync::OnceLock<Vec<Palette>> = std::sync::OnceLock::new();
-
 pub fn discover_colormaps() -> Vec<Palette> {
-    DISCOVERED_COLORMAPS
-        .get_or_init(|| {
-            // These maps are compiled into `colorous`, so the baseline scientific
-            // catalog works in a single binary with no external color-map directory.
-            let mut palettes = vec![
-                Palette::Viridis,
-                Palette::Plasma,
-                Palette::Turbo,
-                Palette::Inferno,
-                Palette::Magma,
-                Palette::Cividis,
-                Palette::Cool,
-                Palette::Warm,
-                Palette::Cubehelix,
-                Palette::Spectral,
-            ];
-            let mut names = palettes
-                .iter()
-                .map(|palette| palette.name().to_ascii_lowercase())
-                .collect::<HashSet<_>>();
-            let mut directories = vec![PathBuf::from(".")];
-            for variable in ["NCVIEW_COLORMAPS", "NCVIEW_LIB_DIR", "NCVIEWBASE"] {
-                if let Some(value) = env::var_os(variable) {
-                    let path = PathBuf::from(value);
-                    directories.push(path.clone());
-                    if variable == "NCVIEWBASE" {
-                        directories.push(path.join("colormaps"));
-                        directories.push(path.join("share").join("ncview"));
-                        directories.push(path.join("share").join("ncview").join("colormaps"));
-                    }
-                }
+    // These maps are compiled into `colorous`, so the baseline scientific
+    // catalog works in a single binary with no external color-map directory.
+    let mut palettes = vec![
+        Palette::Viridis,
+        Palette::Plasma,
+        Palette::Turbo,
+        Palette::Inferno,
+        Palette::Magma,
+        Palette::Cividis,
+        Palette::Cool,
+        Palette::Warm,
+        Palette::Cubehelix,
+        Palette::Spectral,
+    ];
+    let mut names = palettes
+        .iter()
+        .map(|palette| palette.name().to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut directories = vec![PathBuf::from(".")];
+    for variable in ["NCVIEW_COLORMAPS", "NCVIEW_LIB_DIR", "NCVIEWBASE"] {
+        if let Some(value) = env::var_os(variable) {
+            let path = PathBuf::from(value);
+            directories.push(path.clone());
+            if variable == "NCVIEWBASE" {
+                directories.push(path.join("colormaps"));
+                directories.push(path.join("share").join("ncview"));
+                directories.push(path.join("share").join("ncview").join("colormaps"));
             }
-            for directory in directories {
-                let Ok(entries) = fs::read_dir(directory) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|extension| extension.to_str()) != Some("ncmap") {
-                        continue;
-                    }
-                    let Some(palette) = load_ncmap(&path) else {
-                        continue;
-                    };
-                    if names.insert(palette.name().to_ascii_lowercase()) {
-                        palettes.push(palette);
-                    }
-                }
+        }
+    }
+    for directory in directories {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("ncmap") {
+                continue;
             }
-            for (name, contents) in vendored::VENDORED {
-                if names.contains(&name.to_ascii_lowercase()) {
-                    continue;
-                }
-                if let Some(palette) = parse_ncmap(name, contents)
-                    && names.insert(palette.name().to_ascii_lowercase())
-                {
-                    palettes.push(palette);
-                }
+            let Some(palette) = load_ncmap(&path) else {
+                continue;
+            };
+            if names.insert(palette.name().to_ascii_lowercase()) {
+                palettes.push(palette);
             }
-            palettes
-        })
-        .clone()
+        }
+    }
+    for (name, contents) in vendored::VENDORED {
+        if names.contains(&name.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Some(palette) = parse_ncmap(name, contents)
+            && names.insert(palette.name().to_ascii_lowercase())
+        {
+            palettes.push(palette);
+        }
+    }
+    palettes
 }
 
 /// Parse an Ncview `.ncmap` file: one RGB triplet (0..255) per line.
