@@ -385,10 +385,10 @@ impl NetCdf4Source {
             })?;
 
         let values = decode_coordinate_values(&raw, variable)?;
-        if values.len() == element_count {
-            if let Ok(mut cache) = self.coord_cache.lock() {
-                cache.insert(variable.h5_path.clone(), values.clone());
-            }
+        if values.len() == element_count
+            && let Ok(mut cache) = self.coord_cache.lock()
+        {
+            cache.insert(variable.h5_path.clone(), values.clone());
         }
         Ok(values)
     }
