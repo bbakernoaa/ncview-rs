@@ -266,7 +266,7 @@ fn render_content(
                         slice,
                         source_row,
                         source_col,
-                        palette.clone(),
+                        &palette,
                         limits,
                         filter,
                         scale,

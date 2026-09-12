@@ -23,19 +23,36 @@ pub fn rgb_raster_with_limits(
 ) -> RgbImage {
     let (rows, cols) = slice.values.dim();
     let mut image = RgbImage::new(cols as u32, rows as u32);
-    for row in 0..rows {
-        for col in 0..cols {
-            image.put_pixel(
-                col as u32,
-                row as u32,
-                Rgb(color_for_with_limits(
-                    slice,
-                    row,
-                    col,
-                    palette.clone(),
-                    limits,
-                )),
+    let stats = slice.statistics.unwrap_or(crate::data::slice::Statistics {
+        min: 0.0,
+        max: 1.0,
+        mean: 0.5,
+        finite_count: 0,
+    });
+    let mut pixels = image.pixels_mut();
+    if let (Some(v_slice), Some(m_slice)) = (slice.values.as_slice(), slice.validity.as_slice()) {
+        for (&value, &mask) in v_slice.iter().zip(m_slice.iter()) {
+            let rgb = color_for_value_with_limits_and_filter_and_scale(
+                value,
+                mask,
+                stats,
+                &palette,
+                limits,
+                None,
+                ScaleMode::Linear,
             );
+            if let Some(pixel) = pixels.next() {
+                *pixel = Rgb(rgb);
+            }
+        }
+    } else {
+        for row in 0..rows {
+            for col in 0..cols {
+                let rgb = color_for_with_limits(slice, row, col, &palette, limits);
+                if let Some(pixel) = pixels.next() {
+                    *pixel = Rgb(rgb);
+                }
+            }
         }
     }
     image
@@ -131,6 +148,10 @@ fn rasterize(
             &palette,
         )
     });
+    let v_slice = slice.values.as_slice();
+    let m_slice = slice.validity.as_slice();
+    let mut pixels = image.pixels_mut();
+
     for output_row in 0..output_rows {
         let (row_start, row_end) = bin_range(output_row, rows, output_rows);
         for output_col in 0..output_cols {
@@ -138,22 +159,45 @@ fn rasterize(
             let mut sum = 0.0;
             let mut count = 0_usize;
             let mut filtered = false;
-            for row in row_start..row_end {
-                for col in col_start..col_end {
-                    let value = slice.values[(row, col)];
-                    if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
-                        || !value.is_finite()
-                    {
-                        continue;
+
+            if let (Some(v_s), Some(m_s)) = (v_slice, m_slice) {
+                for row in row_start..row_end {
+                    let row_offset = row * cols;
+                    let v_row = &v_s[row_offset..row_offset + cols];
+                    let m_row = &m_s[row_offset..row_offset + cols];
+                    for col in col_start..col_end {
+                        let value = v_row[col];
+                        if m_row[col] != crate::data::slice::Validity::Finite || !value.is_finite()
+                        {
+                            continue;
+                        }
+                        if filter.is_some_and(|(min, max)| value < min || value > max) {
+                            filtered = true;
+                            continue;
+                        }
+                        sum += value;
+                        count += 1;
                     }
-                    if filter.is_some_and(|(min, max)| value < min || value > max) {
-                        filtered = true;
-                        continue;
+                }
+            } else {
+                for row in row_start..row_end {
+                    for col in col_start..col_end {
+                        let value = slice.values[(row, col)];
+                        if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
+                            || !value.is_finite()
+                        {
+                            continue;
+                        }
+                        if filter.is_some_and(|(min, max)| value < min || value > max) {
+                            filtered = true;
+                            continue;
+                        }
+                        sum += value;
+                        count += 1;
                     }
-                    sum += value;
-                    count += 1;
                 }
             }
+
             let background_rgb = background
                 .as_ref()
                 .map(|background| background.get_pixel(output_col as u32, output_row as u32).0);
@@ -164,7 +208,7 @@ fn rasterize(
                     sum / count as f64,
                     crate::data::slice::Validity::Finite,
                     statistics,
-                    palette.clone(),
+                    &palette,
                     limits,
                     None,
                     scale,
@@ -177,7 +221,9 @@ fn rasterize(
                 // preserving the scientific color ordering of the data layer.
                 rgb = blend_rgb(background_rgb, rgb, 0.82);
             }
-            image.put_pixel(output_col as u32, output_row as u32, Rgb(rgb));
+            if let Some(pixel) = pixels.next() {
+                *pixel = Rgb(rgb);
+            }
         }
     }
     if let Some(point) = selected_point {

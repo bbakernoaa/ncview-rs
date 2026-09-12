@@ -285,7 +285,7 @@ pub fn normalize(value: f64, min: f64, max: f64) -> f64 {
     ((value - min) / (max - min)).clamp(0.0, 1.0)
 }
 
-pub fn color_for(slice: &Slice2D, row: usize, col: usize, palette: Palette) -> [u8; 3] {
+pub fn color_for(slice: &Slice2D, row: usize, col: usize, palette: &Palette) -> [u8; 3] {
     color_for_with_limits(slice, row, col, palette, None)
 }
 
@@ -293,7 +293,7 @@ pub fn color_for_with_limits(
     slice: &Slice2D,
     row: usize,
     col: usize,
-    palette: Palette,
+    palette: &Palette,
     limits: Option<(f64, f64)>,
 ) -> [u8; 3] {
     color_for_with_limits_and_filter_and_scale(
@@ -311,7 +311,7 @@ pub fn color_for_with_limits_and_filter(
     slice: &Slice2D,
     row: usize,
     col: usize,
-    palette: Palette,
+    palette: &Palette,
     limits: Option<(f64, f64)>,
     filter: Option<(f64, f64)>,
 ) -> [u8; 3] {
@@ -330,7 +330,7 @@ pub fn color_for_with_limits_and_filter_and_scale(
     slice: &Slice2D,
     row: usize,
     col: usize,
-    palette: Palette,
+    palette: &Palette,
     limits: Option<(f64, f64)>,
     filter: Option<(f64, f64)>,
     scale: ScaleMode,
@@ -356,7 +356,7 @@ pub fn color_for_value_with_limits_and_filter_and_scale(
     value: f64,
     validity: Validity,
     stats: crate::data::slice::Statistics,
-    palette: Palette,
+    palette: &Palette,
     limits: Option<(f64, f64)>,
     filter: Option<(f64, f64)>,
     scale: ScaleMode,

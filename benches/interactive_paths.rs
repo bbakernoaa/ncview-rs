@@ -45,10 +45,9 @@ fn interactive_paths(criterion: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    startup_scaffold,
-    slice_and_raster,
-    interactive_paths
-);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().without_plots();
+    targets = startup_scaffold, slice_and_raster, interactive_paths
+}
 criterion_main!(benches);
