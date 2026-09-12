@@ -26,7 +26,8 @@ pub fn rgb_raster_with_limits(
         mean: 0.5,
         finite_count: 0,
     });
-    let mapper = crate::render::colors::ColorMapper::new(&palette, stats, limits, ScaleMode::Linear);
+    let mapper =
+        crate::render::colors::ColorMapper::new(&palette, stats, limits, ScaleMode::Linear);
     let mut pixels = image.pixels_mut();
     if let (Some(v_slice), Some(m_slice)) = (slice.values.as_slice(), slice.validity.as_slice()) {
         for (&value, &mask) in v_slice.iter().zip(m_slice.iter()) {

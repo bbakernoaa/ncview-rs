@@ -78,10 +78,7 @@ impl<'a> PaletteSampler<'a> {
         if let Some(gradient) = curr.gradient() {
             Self::Gradient { gradient, reversed }
         } else if let Palette::Custom(map) = curr {
-            Self::Custom {
-                map,
-                reversed,
-            }
+            Self::Custom { map, reversed }
         } else {
             unreachable!("all non-custom palettes have a gradient")
         }
@@ -256,7 +253,6 @@ impl<'a> ColorMapper<'a> {
             self.sampler.sample(normalize(value, self.min, self.max))
         }
     }
-
 }
 
 impl Palette {
