@@ -206,6 +206,34 @@ pub enum Overlay {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    VariableSearch,
+    TextOverlay(Overlay),
+    PlotOverlay,
+    Help,
+}
+
+impl ViewModel {
+    pub fn input_mode(&self) -> InputMode {
+        if self.variable_search_active {
+            InputMode::VariableSearch
+        } else if let Some(overlay) = self.overlay {
+            match overlay {
+                Overlay::Limits | Overlay::Filter | Overlay::Axis | Overlay::CommandPalette => {
+                    InputMode::TextOverlay(overlay)
+                }
+                Overlay::Plot | Overlay::TimeSeries => InputMode::PlotOverlay,
+            }
+        } else if self.help_visible {
+            InputMode::Help
+        } else {
+            InputMode::Normal
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlotKind {
     TimeSeries,
     Scatter,
@@ -404,6 +432,8 @@ impl AppState {
                     self.view.overlay = None;
                     self.view.limit_draft = None;
                     self.view.axis_draft = None;
+                } else if self.view.help_visible {
+                    self.view.help_visible = false;
                 }
                 None
             }
@@ -809,7 +839,12 @@ impl AppState {
                         AxisField::X => &mut draft.x,
                         AxisField::Y => &mut draft.y,
                     };
-                    target.pop();
+                    if draft.replace_active {
+                        target.clear();
+                        draft.replace_active = false;
+                    } else {
+                        target.pop();
+                    }
                 } else if matches!(self.view.overlay, Some(Overlay::Limits | Overlay::Filter))
                     && let Some(draft) = self.view.limit_draft.as_mut()
                 {
