@@ -108,35 +108,46 @@ pub struct PackedAttributes {
 pub fn classify_packed(values: &[f64], attributes: PackedAttributes) -> (Vec<f64>, Vec<Validity>) {
     let scale = attributes.scale_factor.unwrap_or(1.0);
     let offset = attributes.add_offset.unwrap_or(0.0);
-    values
-        .iter()
-        .map(|&packed| {
-            let validity = if attributes
-                .fill
-                .is_some_and(|fill| packed.to_bits() == fill.to_bits())
-            {
-                Validity::Fill
-            } else if attributes
-                .missing
-                .is_some_and(|missing| packed.to_bits() == missing.to_bits())
-            {
-                Validity::Missing
-            } else if attributes.valid_min.is_some_and(|min| packed < min)
-                || attributes.valid_max.is_some_and(|max| packed > max)
-            {
-                Validity::InvalidRange
-            } else if packed.is_nan() {
-                Validity::NaN
-            } else if packed == f64::INFINITY {
-                Validity::PosInf
-            } else if packed == f64::NEG_INFINITY {
-                Validity::NegInf
-            } else {
-                Validity::Finite
-            };
-            (packed * scale + offset, validity)
-        })
-        .unzip()
+    let fill_bits = attributes.fill.map(f64::to_bits);
+    let missing_bits = attributes.missing.map(f64::to_bits);
+    let valid_min = attributes.valid_min;
+    let valid_max = attributes.valid_max;
+
+    let len = values.len();
+    let mut out_values = Vec::with_capacity(len);
+    let mut out_validity = Vec::with_capacity(len);
+    let is_identity = scale == 1.0 && offset == 0.0;
+
+    for &packed in values {
+        let bits = packed.to_bits();
+        let validity = if fill_bits.is_some_and(|f| bits == f) {
+            Validity::Fill
+        } else if missing_bits.is_some_and(|m| bits == m) {
+            Validity::Missing
+        } else if valid_min.is_some_and(|min| packed < min)
+            || valid_max.is_some_and(|max| packed > max)
+        {
+            Validity::InvalidRange
+        } else if packed.is_nan() {
+            Validity::NaN
+        } else if packed == f64::INFINITY {
+            Validity::PosInf
+        } else if packed == f64::NEG_INFINITY {
+            Validity::NegInf
+        } else {
+            Validity::Finite
+        };
+
+        let val = if is_identity {
+            packed
+        } else {
+            packed * scale + offset
+        };
+        out_values.push(val);
+        out_validity.push(validity);
+    }
+
+    (out_values, out_validity)
 }
 
 impl Slice2D {
@@ -156,12 +167,23 @@ impl Slice2D {
         let mut max = f64::NEG_INFINITY;
         let mut sum = 0.0;
         let mut finite_count = 0;
-        for ((row, col), value) in values.indexed_iter() {
-            if validity[(row, col)] == Validity::Finite && value.is_finite() {
-                min = min.min(*value);
-                max = max.max(*value);
-                sum += *value;
-                finite_count += 1;
+        if let (Some(v_slice), Some(m_slice)) = (values.as_slice(), validity.as_slice()) {
+            for (&value, &mask) in v_slice.iter().zip(m_slice.iter()) {
+                if mask == Validity::Finite && value.is_finite() {
+                    min = min.min(value);
+                    max = max.max(value);
+                    sum += value;
+                    finite_count += 1;
+                }
+            }
+        } else {
+            for (&value, &mask) in values.iter().zip(validity.iter()) {
+                if mask == Validity::Finite && value.is_finite() {
+                    min = min.min(value);
+                    max = max.max(value);
+                    sum += value;
+                    finite_count += 1;
+                }
             }
         }
         let statistics = (finite_count > 0).then_some(Statistics {
