@@ -42,10 +42,14 @@ jobs:
         shell: pwsh
         run: |
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          & (Join-Path $vcpkgRoot 'vcpkg.exe') install 'sqlite3[tool]:x64-windows-static'
+          & (Join-Path $vcpkgRoot 'vcpkg.exe') install 'sqlite3[core,tool]:x64-windows-static'
           $sqliteExe = Get-ChildItem -Path (Join-Path $vcpkgRoot 'installed/x64-windows-static') -Filter sqlite3.exe -Recurse | Select-Object -First 1
           if (-not $sqliteExe) { throw 'vcpkg did not provide the sqlite3 executable required by PROJ' }
           $sqliteExe.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $sqliteLib = Get-ChildItem -Path (Join-Path $vcpkgRoot 'installed/x64-windows-static') -Filter sqlite3.lib -Recurse | Select-Object -First 1
+          if ($sqliteLib) { "SQLite3_LIBRARY=$($sqliteLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          $sqliteInc = Get-ChildItem -Path (Join-Path $vcpkgRoot 'installed/x64-windows-static') -Filter sqlite3.h -Recurse | Select-Object -First 1
+          if ($sqliteInc) { "SQLite3_INCLUDE_DIR=$($sqliteInc.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "VCPKG_TARGET_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CMAKE_TOOLCHAIN_FILE=$(Join-Path $vcpkgRoot 'scripts/buildsystems/vcpkg.cmake')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
