@@ -236,10 +236,8 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if event::poll(poll_timeout)?
-            && let Some(command) = input::command_from_event_with_mode(
-                event::read()?,
-                state.view.input_mode(),
-            )
+            && let Some(command) =
+                input::command_from_event_with_mode(event::read()?, state.view.input_mode())
         {
             dirty = true;
             let size = terminal.size()?;
@@ -638,10 +636,16 @@ fn translate_mouse(
             if clicked {
                 let popup_x = popup.x;
                 let popup_y = popup.y;
-                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(1) {
+                if x >= popup_x
+                    && x < popup_x.saturating_add(popup.width)
+                    && y == popup_y.saturating_add(1)
+                {
                     return Command::FocusLimitField(LimitField::Min);
                 }
-                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(2) {
+                if x >= popup_x
+                    && x < popup_x.saturating_add(popup.width)
+                    && y == popup_y.saturating_add(2)
+                {
                     return Command::FocusLimitField(LimitField::Max);
                 }
             }
@@ -651,10 +655,16 @@ fn translate_mouse(
             if clicked {
                 let popup_x = popup.x;
                 let popup_y = popup.y;
-                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(1) {
+                if x >= popup_x
+                    && x < popup_x.saturating_add(popup.width)
+                    && y == popup_y.saturating_add(1)
+                {
                     return Command::FocusAxisField(AxisField::X);
                 }
-                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(2) {
+                if x >= popup_x
+                    && x < popup_x.saturating_add(popup.width)
+                    && y == popup_y.saturating_add(2)
+                {
                     return Command::FocusAxisField(AxisField::Y);
                 }
             }

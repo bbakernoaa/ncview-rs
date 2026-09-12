@@ -351,7 +351,10 @@ fn input_mode_reflects_active_popups_and_search() {
     assert_eq!(state.view.input_mode(), InputMode::Normal);
 
     state.reduce(Command::OpenLimits);
-    assert_eq!(state.view.input_mode(), InputMode::TextOverlay(Overlay::Limits));
+    assert_eq!(
+        state.view.input_mode(),
+        InputMode::TextOverlay(Overlay::Limits)
+    );
 
     state.reduce(Command::Quit);
     assert_eq!(state.view.input_mode(), InputMode::Normal);
@@ -372,15 +375,21 @@ fn input_mode_reflects_active_popups_and_search() {
 #[test]
 fn input_mode_key_events_do_not_trigger_main_shortcuts() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ncview_rs::events::input::command_from_key_with_mode;
     use ncview_rs::app::InputMode;
+    use ncview_rs::events::input::command_from_key_with_mode;
 
     let e_key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
     let c_key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
 
     // In normal mode 'e' exports and 'c' cycles palette
-    assert_eq!(command_from_key_with_mode(e_key, InputMode::Normal), Some(Command::ExportCurrent));
-    assert_eq!(command_from_key_with_mode(c_key, InputMode::Normal), Some(Command::CyclePalette));
+    assert_eq!(
+        command_from_key_with_mode(e_key, InputMode::Normal),
+        Some(Command::ExportCurrent)
+    );
+    assert_eq!(
+        command_from_key_with_mode(c_key, InputMode::Normal),
+        Some(Command::CyclePalette)
+    );
 
     // In text overlay mode, 'e' and 'c' are captured as input characters
     assert_eq!(

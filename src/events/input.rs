@@ -179,7 +179,9 @@ pub fn command_from_key_with_mode(key: KeyEvent, mode: InputMode) -> Option<Comm
                 KeyCode::Char('d') => Some(Command::SetPlotKind(crate::app::PlotKind::Scatter)),
                 KeyCode::Char('h') => Some(Command::SetPlotKind(crate::app::PlotKind::Histogram)),
                 KeyCode::Char('k') => Some(Command::SetPlotKind(crate::app::PlotKind::Cdf)),
-                KeyCode::Char('u') => Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile)),
+                KeyCode::Char('u') => {
+                    Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile))
+                }
                 KeyCode::Char('r') => Some(Command::ResetZoom),
                 KeyCode::Char('x') => Some(Command::OpenAxisOverlay),
                 KeyCode::Enter => Some(Command::ActivatePoint),
