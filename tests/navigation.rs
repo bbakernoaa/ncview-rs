@@ -343,3 +343,71 @@ fn axis_choices_cycle_and_pan_stays_inside_the_full_bounds() {
         Some(ncview_rs::data::slice::Bounds::new(6, 10, 14, 20).unwrap())
     );
 }
+
+#[test]
+fn input_mode_reflects_active_popups_and_search() {
+    use ncview_rs::app::InputMode;
+    let mut state = AppState::default();
+    assert_eq!(state.view.input_mode(), InputMode::Normal);
+
+    state.reduce(Command::OpenLimits);
+    assert_eq!(state.view.input_mode(), InputMode::TextOverlay(Overlay::Limits));
+
+    state.reduce(Command::Quit);
+    assert_eq!(state.view.input_mode(), InputMode::Normal);
+
+    state.reduce(Command::ToggleHelp);
+    assert_eq!(state.view.input_mode(), InputMode::Help);
+
+    state.reduce(Command::Quit);
+    assert_eq!(state.view.input_mode(), InputMode::Normal);
+
+    state.reduce(Command::OpenVariableSearch);
+    assert_eq!(state.view.input_mode(), InputMode::VariableSearch);
+
+    state.reduce(Command::Quit);
+    assert_eq!(state.view.input_mode(), InputMode::Normal);
+}
+
+#[test]
+fn input_mode_key_events_do_not_trigger_main_shortcuts() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ncview_rs::events::input::command_from_key_with_mode;
+    use ncview_rs::app::InputMode;
+
+    let e_key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+    let c_key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+
+    // In normal mode 'e' exports and 'c' cycles palette
+    assert_eq!(command_from_key_with_mode(e_key, InputMode::Normal), Some(Command::ExportCurrent));
+    assert_eq!(command_from_key_with_mode(c_key, InputMode::Normal), Some(Command::CyclePalette));
+
+    // In text overlay mode, 'e' and 'c' are captured as input characters
+    assert_eq!(
+        command_from_key_with_mode(e_key, InputMode::TextOverlay(Overlay::Limits)),
+        Some(Command::InputChar('e'))
+    );
+    assert_eq!(
+        command_from_key_with_mode(c_key, InputMode::TextOverlay(Overlay::Axis)),
+        Some(Command::InputChar('c'))
+    );
+
+    // In help mode, 'e' and 'c' are ignored
+    assert_eq!(command_from_key_with_mode(e_key, InputMode::Help), None);
+    assert_eq!(command_from_key_with_mode(c_key, InputMode::Help), None);
+}
+
+#[test]
+fn backspace_in_axis_draft_clears_or_pops_input() {
+    let mut state = AppState::default();
+    state.view.axis_options = vec!["lat".into(), "lon".into()];
+    state.reduce(Command::OpenAxisOverlay);
+    assert!(state.view.axis_draft.as_ref().unwrap().replace_active);
+
+    state.reduce(Command::DeleteInput);
+    assert_eq!(state.view.axis_draft.as_ref().unwrap().x, "");
+    assert!(!state.view.axis_draft.as_ref().unwrap().replace_active);
+
+    state.reduce(Command::InputChar('y'));
+    assert_eq!(state.view.axis_draft.as_ref().unwrap().x, "y");
+}

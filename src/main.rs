@@ -236,9 +236,9 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if event::poll(poll_timeout)?
-            && let Some(command) = input::command_from_event_with_search(
+            && let Some(command) = input::command_from_event_with_mode(
                 event::read()?,
-                state.view.variable_search_active,
+                state.view.input_mode(),
             )
         {
             dirty = true;
@@ -254,6 +254,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if matches!(command, Command::Quit)
                 && state.view.overlay.is_none()
                 && !state.view.variable_search_active
+                && !state.view.help_visible
             {
                 break;
             }
@@ -609,74 +610,85 @@ fn translate_mouse(
         return Command::ToggleHelp;
     }
     if view.variable_search_active {
-        if close_button_hit(variable_browser_rect(area), x, y) {
-            return Command::Quit;
+        let popup = variable_browser_rect(area);
+        if clicked {
+            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
+                return Command::Quit;
+            }
         }
         return Command::Pointer { x, y };
     }
     if view.help_visible {
-        if close_button_hit(help_rect(area), x, y) {
-            return Command::ToggleHelp;
-        }
-        return Command::Pointer { x, y };
-    }
-    if let Some(overlay) = view.overlay
-        && close_button_hit(overlay_rect(area, overlay), x, y)
-    {
-        return Command::Quit;
-    }
-    if matches!(view.overlay, Some(Overlay::Limits | Overlay::Filter)) {
-        let width = area.width.saturating_mul(3) / 5;
-        let height = area.height.saturating_mul(2) / 5;
-        let popup_x = area.x + area.width.saturating_sub(width) / 2;
-        let popup_y = area.y + area.height.saturating_sub(height) / 2;
-        if x >= popup_x && x < popup_x.saturating_add(width) && y == popup_y.saturating_add(1) {
-            return Command::FocusLimitField(LimitField::Min);
-        }
-        if x >= popup_x && x < popup_x.saturating_add(width) && y == popup_y.saturating_add(2) {
-            return Command::FocusLimitField(LimitField::Max);
-        }
-        return Command::Pointer { x, y };
-    }
-    if matches!(view.overlay, Some(Overlay::Axis)) {
-        let width = area.width.saturating_mul(3) / 5;
-        let height = area.height.saturating_mul(2) / 5;
-        let popup_x = area.x + area.width.saturating_sub(width) / 2;
-        let popup_y = area.y + area.height.saturating_sub(height) / 2;
-        if x >= popup_x && x < popup_x.saturating_add(width) && y == popup_y.saturating_add(1) {
-            return Command::FocusAxisField(AxisField::X);
-        }
-        if x >= popup_x && x < popup_x.saturating_add(width) && y == popup_y.saturating_add(2) {
-            return Command::FocusAxisField(AxisField::Y);
-        }
-        return Command::Pointer { x, y };
-    }
-    if matches!(view.overlay, Some(Overlay::Plot)) {
-        let popup = overlay_rect(area, Overlay::Plot);
-        let content_x = popup.x.saturating_add(2);
-        let type_y = popup.y.saturating_add(2);
-        if y == type_y && x >= content_x && x < popup.right().saturating_sub(1) {
-            let relative = x.saturating_sub(content_x);
-            let fifth = (popup.width.saturating_sub(4) / 5).max(1);
-            return if relative < fifth {
-                Command::SetPlotKind(ncview_rs::app::PlotKind::TimeSeries)
-            } else if relative < fifth.saturating_mul(2) {
-                Command::SetPlotKind(ncview_rs::app::PlotKind::Scatter)
-            } else if relative < fifth.saturating_mul(3) {
-                Command::SetPlotKind(ncview_rs::app::PlotKind::Histogram)
-            } else if relative < fifth.saturating_mul(4) {
-                Command::SetPlotKind(ncview_rs::app::PlotKind::Cdf)
-            } else {
-                Command::SetPlotKind(ncview_rs::app::PlotKind::VerticalProfile)
-            };
-        }
-        if x >= popup.x && x < popup.right() {
-            if y == popup.y.saturating_add(4) {
-                return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::X);
+        let popup = help_rect(area);
+        if clicked {
+            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
+                return Command::ToggleHelp;
             }
-            if y == popup.y.saturating_add(5) {
-                return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::Y);
+        }
+        return Command::Pointer { x, y };
+    }
+    if let Some(overlay) = view.overlay {
+        let popup = overlay_rect(area, overlay);
+        if clicked {
+            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
+                return Command::Quit;
             }
+        }
+        if matches!(overlay, Overlay::Limits | Overlay::Filter) {
+            if clicked {
+                let popup_x = popup.x;
+                let popup_y = popup.y;
+                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(1) {
+                    return Command::FocusLimitField(LimitField::Min);
+                }
+                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(2) {
+                    return Command::FocusLimitField(LimitField::Max);
+                }
+            }
+            return Command::Pointer { x, y };
+        }
+        if matches!(overlay, Overlay::Axis) {
+            if clicked {
+                let popup_x = popup.x;
+                let popup_y = popup.y;
+                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(1) {
+                    return Command::FocusAxisField(AxisField::X);
+                }
+                if x >= popup_x && x < popup_x.saturating_add(popup.width) && y == popup_y.saturating_add(2) {
+                    return Command::FocusAxisField(AxisField::Y);
+                }
+            }
+            return Command::Pointer { x, y };
+        }
+        if matches!(overlay, Overlay::Plot) {
+            if clicked {
+                let content_x = popup.x.saturating_add(2);
+                let type_y = popup.y.saturating_add(2);
+                if y == type_y && x >= content_x && x < popup.right().saturating_sub(1) {
+                    let relative = x.saturating_sub(content_x);
+                    let fifth = (popup.width.saturating_sub(4) / 5).max(1);
+                    return if relative < fifth {
+                        Command::SetPlotKind(ncview_rs::app::PlotKind::TimeSeries)
+                    } else if relative < fifth.saturating_mul(2) {
+                        Command::SetPlotKind(ncview_rs::app::PlotKind::Scatter)
+                    } else if relative < fifth.saturating_mul(3) {
+                        Command::SetPlotKind(ncview_rs::app::PlotKind::Histogram)
+                    } else if relative < fifth.saturating_mul(4) {
+                        Command::SetPlotKind(ncview_rs::app::PlotKind::Cdf)
+                    } else {
+                        Command::SetPlotKind(ncview_rs::app::PlotKind::VerticalProfile)
+                    };
+                }
+                if x >= popup.x && x < popup.right() {
+                    if y == popup.y.saturating_add(4) {
+                        return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::X);
+                    }
+                    if y == popup.y.saturating_add(5) {
+                        return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::Y);
+                    }
+                }
+            }
+            return Command::Pointer { x, y };
         }
         return Command::Pointer { x, y };
     }
