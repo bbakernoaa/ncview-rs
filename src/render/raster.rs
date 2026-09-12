@@ -28,19 +28,17 @@ pub fn rgb_raster_with_limits(
     });
     let mapper =
         crate::render::colors::ColorMapper::new(&palette, stats, limits, ScaleMode::Linear);
-    let mut pixels = image.pixels_mut();
     if let (Some(v_slice), Some(m_slice)) = (slice.values.as_slice(), slice.validity.as_slice()) {
-        for (&value, &mask) in v_slice.iter().zip(m_slice.iter()) {
+        for ((&value, &mask), chunk) in v_slice.iter().zip(m_slice.iter()).zip(image.as_mut().chunks_exact_mut(3)) {
             let rgb = if mask == crate::data::slice::Validity::Finite && value.is_finite() {
                 mapper.map_value(value)
             } else {
                 [80, 80, 80]
             };
-            if let Some(pixel) = pixels.next() {
-                *pixel = Rgb(rgb);
-            }
+            chunk.copy_from_slice(&rgb);
         }
     } else {
+        let mut pixels = image.pixels_mut();
         for row in 0..rows {
             for col in 0..cols {
                 let rgb = color_for_with_limits(slice, row, col, &palette, limits);
@@ -146,11 +144,12 @@ fn rasterize(
     });
     let v_slice = slice.values.as_slice();
     let m_slice = slice.validity.as_slice();
-    let mut pixels = image.pixels_mut();
+    let raw_buf = image.as_mut();
 
     for output_row in 0..output_rows {
         let (row_start, row_end) = bin_range(output_row, rows, output_rows);
-        for output_col in 0..output_cols {
+        let row_bytes = &mut raw_buf[output_row * output_cols * 3..(output_row + 1) * output_cols * 3];
+        for (output_col, chunk) in row_bytes.chunks_exact_mut(3).enumerate() {
             let (col_start, col_end) = bin_range(output_col, cols, output_cols);
             let mut sum = 0.0;
             let mut count = 0_usize;
@@ -209,9 +208,7 @@ fn rasterize(
                 // preserving the scientific color ordering of the data layer.
                 rgb = blend_rgb(background_rgb, rgb, 0.82);
             }
-            if let Some(pixel) = pixels.next() {
-                *pixel = Rgb(rgb);
-            }
+            chunk.copy_from_slice(&rgb);
         }
     }
     if let Some(point) = selected_point {

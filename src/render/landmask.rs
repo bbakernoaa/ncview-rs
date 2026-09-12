@@ -599,14 +599,7 @@ fn close_ring(polygon: &mut Vec<(f64, f64)>) {
 }
 
 fn normalize_longitude(longitude: f64) -> f64 {
-    let mut normalized = longitude;
-    while normalized < -180.0 {
-        normalized += 360.0;
-    }
-    while normalized > 180.0 {
-        normalized -= 360.0;
-    }
-    normalized
+    (longitude + 180.0).rem_euclid(360.0) - 180.0
 }
 
 fn longitude_bin(longitude: f64) -> usize {
@@ -666,14 +659,12 @@ fn contains(polygon: &[(f64, f64)], latitude: f64, longitude: f64) -> bool {
 }
 
 fn unwrap_near(longitude: f64, anchor: f64) -> f64 {
-    let mut longitude = longitude;
-    while longitude - anchor > 180.0 {
-        longitude -= 360.0;
+    let diff = longitude - anchor;
+    if diff.abs() <= 180.0 {
+        longitude
+    } else {
+        longitude - 360.0 * (diff / 360.0).round()
     }
-    while longitude - anchor < -180.0 {
-        longitude += 360.0;
-    }
-    longitude
 }
 
 #[cfg(test)]
