@@ -226,7 +226,9 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let poll_timeout = if state.view.playing {
             let playback_interval = Duration::from_secs_f32(1.0 / state.view.playback_speed);
             let elapsed = last_playback_tick.elapsed();
-            playback_interval.saturating_sub(elapsed).min(Duration::from_millis(33))
+            playback_interval
+                .saturating_sub(elapsed)
+                .min(Duration::from_millis(33))
         } else if dirty {
             frame_budget.saturating_sub(last_render.elapsed())
         } else {
