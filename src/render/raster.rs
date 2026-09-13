@@ -168,12 +168,10 @@ fn rasterize(
             if let (Some(v_s), Some(m_s)) = (v_slice, m_slice) {
                 for row in row_start..row_end {
                     let row_offset = row * cols;
-                    let v_row = &v_s[row_offset..row_offset + cols];
-                    let m_row = &m_s[row_offset..row_offset + cols];
-                    for col in col_start..col_end {
-                        let value = v_row[col];
-                        if m_row[col] != crate::data::slice::Validity::Finite || !value.is_finite()
-                        {
+                    let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
+                    let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
+                    for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
+                        if mask != crate::data::slice::Validity::Finite || !value.is_finite() {
                             continue;
                         }
                         if filter.is_some_and(|(min, max)| value < min || value > max) {

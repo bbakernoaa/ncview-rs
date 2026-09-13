@@ -48,25 +48,30 @@ impl ProjectionIndex {
     pub fn nearest(&self, latitude: f64, longitude: f64) -> Option<SourceIndex> {
         let query = [latitude, normalize_longitude(longitude)];
         let count = NonZeroUsize::new(self.points.len().clamp(1, 16))?;
-        self.tree
+        let candidates = self
+            .tree
             .query(&query)
             .nearest_n::<SquaredEuclidean<f64>>(count)
-            .execute()
-            .into_iter()
-            .filter_map(|candidate| {
-                self.points
-                    .get(candidate.item as usize)
-                    .map(|(_, source)| (candidate.distance, *source))
-            })
-            .min_by(
-                |(distance_left, source_left), (distance_right, source_right)| {
-                    distance_left.total_cmp(distance_right).then_with(|| {
-                        (source_left.row, source_left.col)
-                            .cmp(&(source_right.row, source_right.col))
-                    })
-                },
-            )
-            .map(|(_, source)| source)
+            .execute();
+
+        let mut min_candidate: Option<(f64, SourceIndex)> = None;
+        for candidate in candidates {
+            if let Some((_, source)) = self.points.get(candidate.item as usize) {
+                let pair = (candidate.distance, *source);
+                match min_candidate {
+                    None => min_candidate = Some(pair),
+                    Some((best_dist, best_src)) => {
+                        let cmp = candidate.distance.total_cmp(&best_dist).then_with(|| {
+                            (source.row, source.col).cmp(&(best_src.row, best_src.col))
+                        });
+                        if cmp == std::cmp::Ordering::Less {
+                            min_candidate = Some(pair);
+                        }
+                    }
+                }
+            }
+        }
+        min_candidate.map(|(_, source)| source)
     }
 }
 
