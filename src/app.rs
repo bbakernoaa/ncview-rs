@@ -47,6 +47,7 @@ pub enum Command {
     OpenVariableSearch,
     SubmitVariableSearch,
     ExecuteCommandPalette,
+    ExecutePaletteChoice(usize),
     InputChar(char),
     DeleteInput,
     NextLimitField,
@@ -778,6 +779,17 @@ impl AppState {
                 self.view.palette_index = 0;
                 self.reduce(palette_command(choice))
             }
+            Command::ExecutePaletteChoice(index) => {
+                if !matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
+                    return None;
+                }
+                let choices = palette_matches(&self.view.palette_query);
+                let &choice = choices.get(index)?;
+                self.view.overlay = None;
+                self.view.palette_query.clear();
+                self.view.palette_index = 0;
+                self.reduce(palette_command(choice))
+            }
             Command::InputChar(character) => {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     if !character.is_control() && self.view.palette_query.len() < 64 {
@@ -1231,6 +1243,9 @@ impl AppState {
     }
 
     fn select_variable(&mut self, variable: String) -> Option<Effect> {
+        self.view.variable_search_active = false;
+        self.variable_query.clear();
+        self.view.variable_browser_index = 0;
         self.view.selected_variable = Some(variable.clone());
         if let Some(selected) = self.variables.iter().find(|item| item.name == variable) {
             self.view.axis_options = selected.dimensions.clone();

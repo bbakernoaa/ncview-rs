@@ -179,6 +179,8 @@ pub fn render_with_search_and_image(
                 drag.start.0, drag.start.1, drag.current.0, drag.current.1,
             )
         }
+    } else if (view.variable_search_active || view.overlay.is_some()) && !view.status.is_empty() {
+        view.status.clone()
     } else if let Some(point) = view.hover_point.as_ref() {
         let value = view
             .slice

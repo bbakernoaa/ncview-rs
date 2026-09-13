@@ -420,3 +420,15 @@ fn backspace_in_axis_draft_clears_or_pops_input() {
     state.reduce(Command::InputChar('y'));
     assert_eq!(state.view.axis_draft.as_ref().unwrap().x, "y");
 }
+
+#[test]
+fn execute_palette_choice_runs_specified_matching_entry() {
+    let mut state = AppState::default();
+    state.reduce(Command::OpenCommandPalette);
+    state.reduce(Command::ExecutePaletteChoice(1)); // 1 is "Cycle colormap"
+    assert_eq!(
+        state.view.palette,
+        ncview_rs::render::colors::Palette::Plasma
+    );
+    assert!(state.view.overlay.is_none());
+}
