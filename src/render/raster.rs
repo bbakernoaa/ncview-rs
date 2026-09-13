@@ -1,4 +1,5 @@
 use image::{Rgb, RgbImage};
+use rayon::prelude::*;
 
 use crate::{
     analysis::projection::ProjectionIndex,
@@ -30,14 +31,17 @@ pub fn rgb_raster_with_limits(
         crate::render::colors::ColorMapper::new(&palette, stats, limits, ScaleMode::Linear);
     if let (Some(v_slice), Some(m_slice)) = (slice.values.as_slice(), slice.validity.as_slice()) {
         let (chunks, _) = image.as_mut().as_chunks_mut::<3>();
-        for ((&value, &mask), chunk) in v_slice.iter().zip(m_slice.iter()).zip(chunks) {
-            let rgb = if mask == crate::data::slice::Validity::Finite && value.is_finite() {
-                mapper.map_value(value)
-            } else {
-                [80, 80, 80]
-            };
-            *chunk = rgb;
-        }
+        chunks
+            .par_iter_mut()
+            .zip(v_slice.par_iter().zip(m_slice.par_iter()))
+            .for_each(|(chunk, (&value, &mask))| {
+                let rgb = if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                    mapper.map_value(value)
+                } else {
+                    [80, 80, 80]
+                };
+                *chunk = rgb;
+            });
     } else {
         let mut pixels = image.pixels_mut();
         for row in 0..rows {
@@ -154,97 +158,99 @@ fn rasterize(
         .map(|c| bin_range(c, cols, output_cols))
         .collect();
 
-    for output_row in 0..output_rows {
-        let (row_start, row_end) = row_bins[output_row];
-        let row_bytes =
-            &mut raw_buf[output_row * output_cols * 3..(output_row + 1) * output_cols * 3];
-        let (row_chunks, _) = row_bytes.as_chunks_mut::<3>();
-        for (output_col, chunk) in row_chunks.iter_mut().enumerate() {
-            let (col_start, col_end) = col_bins[output_col];
-            let mut sum = 0.0;
-            let mut count = 0_usize;
-            let mut filtered = false;
+    let background_ref = background.as_ref();
 
-            if let (Some(v_s), Some(m_s)) = (v_slice, m_slice) {
-                if let Some((f_min, f_max)) = filter {
-                    for row in row_start..row_end {
-                        let row_offset = row * cols;
-                        let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
-                        let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
-                        for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
-                            if mask == crate::data::slice::Validity::Finite && value.is_finite() {
-                                if value < f_min || value > f_max {
-                                    filtered = true;
-                                } else {
+    raw_buf
+        .par_chunks_exact_mut(output_cols * 3)
+        .enumerate()
+        .for_each(|(output_row, row_bytes)| {
+            let (row_start, row_end) = row_bins[output_row];
+            let (row_chunks, _) = row_bytes.as_chunks_mut::<3>();
+            for (output_col, chunk) in row_chunks.iter_mut().enumerate() {
+                let (col_start, col_end) = col_bins[output_col];
+                let mut sum = 0.0;
+                let mut count = 0_usize;
+                let mut filtered = false;
+
+                if let (Some(v_s), Some(m_s)) = (v_slice, m_slice) {
+                    if let Some((f_min, f_max)) = filter {
+                        for row in row_start..row_end {
+                            let row_offset = row * cols;
+                            let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
+                            let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
+                            for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
+                                if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                                    if value < f_min || value > f_max {
+                                        filtered = true;
+                                    } else {
+                                        sum += value;
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        for row in row_start..row_end {
+                            let row_offset = row * cols;
+                            let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
+                            let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
+                            for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
+                                if mask == crate::data::slice::Validity::Finite && value.is_finite() {
                                     sum += value;
                                     count += 1;
                                 }
                             }
                         }
                     }
+                } else if let Some((f_min, f_max)) = filter {
+                    for row in row_start..row_end {
+                        for col in col_start..col_end {
+                            let value = slice.values[(row, col)];
+                            if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
+                                || !value.is_finite()
+                            {
+                                continue;
+                            }
+                            if value < f_min || value > f_max {
+                                filtered = true;
+                                continue;
+                            }
+                            sum += value;
+                            count += 1;
+                        }
+                    }
                 } else {
                     for row in row_start..row_end {
-                        let row_offset = row * cols;
-                        let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
-                        let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
-                        for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
-                            if mask == crate::data::slice::Validity::Finite && value.is_finite() {
-                                sum += value;
-                                count += 1;
+                        for col in col_start..col_end {
+                            let value = slice.values[(row, col)];
+                            if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
+                                || !value.is_finite()
+                            {
+                                continue;
                             }
+                            sum += value;
+                            count += 1;
                         }
                     }
                 }
-            } else if let Some((f_min, f_max)) = filter {
-                for row in row_start..row_end {
-                    for col in col_start..col_end {
-                        let value = slice.values[(row, col)];
-                        if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
-                            || !value.is_finite()
-                        {
-                            continue;
-                        }
-                        if value < f_min || value > f_max {
-                            filtered = true;
-                            continue;
-                        }
-                        sum += value;
-                        count += 1;
-                    }
-                }
-            } else {
-                for row in row_start..row_end {
-                    for col in col_start..col_end {
-                        let value = slice.values[(row, col)];
-                        if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
-                            || !value.is_finite()
-                        {
-                            continue;
-                        }
-                        sum += value;
-                        count += 1;
-                    }
-                }
-            }
 
-            let background_rgb = background
-                .as_ref()
-                .map(|bg| bg.get_pixel(output_col as u32, output_row as u32).0);
-            let mut rgb = if count == 0 {
-                background_rgb.unwrap_or(if filtered { [30, 30, 46] } else { [80, 80, 80] })
-            } else {
-                mapper.map_value(sum / count as f64)
-            };
-            if let Some(background_rgb) = background_rgb
-                && count > 0
-            {
-                // Keep geographic context visible beneath global fields while
-                // preserving the scientific color ordering of the data layer.
-                rgb = blend_rgb(background_rgb, rgb, 0.82);
+                let background_rgb = background_ref
+                    .map(|bg| bg.get_pixel(output_col as u32, output_row as u32).0);
+                let mut rgb = if count == 0 {
+                    background_rgb.unwrap_or(if filtered { [30, 30, 46] } else { [80, 80, 80] })
+                } else {
+                    mapper.map_value(sum / count as f64)
+                };
+                if let Some(background_rgb) = background_rgb
+                    && count > 0
+                {
+                    // Keep geographic context visible beneath global fields while
+                    // preserving the scientific color ordering of the data layer.
+                    rgb = blend_rgb(background_rgb, rgb, 0.82);
+                }
+                *chunk = rgb;
             }
-            *chunk = rgb;
-        }
-    }
+        });
     if let Some(point) = selected_point {
         mark_point(&mut image, slice, point, [255, 230, 160]);
     }
@@ -303,8 +309,9 @@ pub fn projected_lookup(
     index: &ProjectionIndex,
 ) -> Vec<Option<(usize, usize)>> {
     (0..rows)
+        .into_par_iter()
         .flat_map(|row| {
-            (0..cols).map(move |col| {
+            (0..cols).into_par_iter().map(move |col| {
                 let latitude = -90.0 + 180.0 * row as f64 / rows.max(1) as f64;
                 let longitude = -180.0 + 360.0 * col as f64 / cols.max(1) as f64;
                 index

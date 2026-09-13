@@ -87,6 +87,7 @@ fn setup_panic_hook() {
 
 fn main() -> ExitCode {
     setup_panic_hook();
+    ncview_rs::render::configure_thread_pool();
     let cli = Cli::parse();
     if let Some(CliCommand::Manifest {
         format,

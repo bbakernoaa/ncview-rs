@@ -3,8 +3,10 @@ use ncview_rs::{
     analysis::{mapping::screen_to_source, projection::ProjectionIndex},
     data::{fixtures::regular_values, slice::Bounds},
     render::{
-        colors::{Palette, normalize},
-        raster::rgb_raster,
+        colors::{Palette, ScaleMode, normalize},
+        landmask::Detail,
+        map_background,
+        raster::{rgb_raster, rgb_raster_with_options_for_view},
     },
 };
 use ratatui::layout::Rect;
@@ -18,11 +20,32 @@ fn startup_scaffold(criterion: &mut Criterion) {
 
 fn slice_and_raster(criterion: &mut Criterion) {
     let slice = regular_values(128, 128).unwrap();
+    let large_slice = regular_values(512, 512).unwrap();
     criterion.bench_function("slice_conversion", |bencher| {
         bencher.iter(|| black_box(slice.permuted_axes().unwrap()))
     });
     criterion.bench_function("rasterization", |bencher| {
         bencher.iter(|| black_box(rgb_raster(&slice, Palette::Viridis)))
+    });
+    criterion.bench_function("large_viewport_rasterization", |bencher| {
+        bencher.iter(|| {
+            black_box(rgb_raster_with_options_for_view(
+                &large_slice,
+                Palette::Viridis,
+                None,
+                None,
+                true,
+                ScaleMode::Linear,
+                160,
+                80,
+                None,
+            ))
+        })
+    });
+    criterion.bench_function("map_backdrop_rendering", |bencher| {
+        bencher.iter(|| {
+            black_box(map_background::render(160, 80, None, Detail::Global))
+        })
     });
     criterion.bench_function("normalization", |bencher| {
         bencher.iter(|| black_box(normalize(0.42, 0.0, 1.0)))
