@@ -166,15 +166,45 @@ fn rasterize(
             let mut filtered = false;
 
             if let (Some(v_s), Some(m_s)) = (v_slice, m_slice) {
+                if let Some((f_min, f_max)) = filter {
+                    for row in row_start..row_end {
+                        let row_offset = row * cols;
+                        let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
+                        let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
+                        for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
+                            if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                                if value < f_min || value > f_max {
+                                    filtered = true;
+                                } else {
+                                    sum += value;
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for row in row_start..row_end {
+                        let row_offset = row * cols;
+                        let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
+                        let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
+                        for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
+                            if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                                sum += value;
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            } else if let Some((f_min, f_max)) = filter {
                 for row in row_start..row_end {
-                    let row_offset = row * cols;
-                    let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
-                    let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
-                    for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
-                        if mask != crate::data::slice::Validity::Finite || !value.is_finite() {
+                    for col in col_start..col_end {
+                        let value = slice.values[(row, col)];
+                        if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
+                            || !value.is_finite()
+                        {
                             continue;
                         }
-                        if filter.is_some_and(|(min, max)| value < min || value > max) {
+                        if value < f_min || value > f_max {
                             filtered = true;
                             continue;
                         }
@@ -191,10 +221,6 @@ fn rasterize(
                         {
                             continue;
                         }
-                        if filter.is_some_and(|(min, max)| value < min || value > max) {
-                            filtered = true;
-                            continue;
-                        }
                         sum += value;
                         count += 1;
                     }
@@ -203,7 +229,7 @@ fn rasterize(
 
             let background_rgb = background
                 .as_ref()
-                .map(|background| background.get_pixel(output_col as u32, output_row as u32).0);
+                .map(|bg| bg.get_pixel(output_col as u32, output_row as u32).0);
             let mut rgb = if count == 0 {
                 background_rgb.unwrap_or(if filtered { [30, 30, 46] } else { [80, 80, 80] })
             } else {
@@ -216,7 +242,7 @@ fn rasterize(
                 // preserving the scientific color ordering of the data layer.
                 rgb = blend_rgb(background_rgb, rgb, 0.82);
             }
-            chunk.copy_from_slice(&rgb);
+            *chunk = rgb;
         }
     }
     if let Some(point) = selected_point {

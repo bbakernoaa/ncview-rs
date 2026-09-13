@@ -27,13 +27,17 @@ impl ProjectionIndex {
                 for longitude in [normalized, normalized - 360.0, normalized + 360.0] {
                     let coordinate = [latitude, longitude];
                     let key = (latitude.to_bits(), longitude.to_bits());
-                    if let Some(existing) = point_indices.get(&key).copied() {
-                        if source < points[existing].1 {
-                            points[existing].1 = source;
+                    match point_indices.entry(key) {
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            let existing = *entry.get();
+                            if source < points[existing].1 {
+                                points[existing].1 = source;
+                            }
                         }
-                    } else {
-                        point_indices.insert(key, points.len());
-                        points.push((coordinate, source));
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(points.len());
+                            points.push((coordinate, source));
+                        }
                     }
                 }
             }
