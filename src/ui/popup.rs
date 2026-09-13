@@ -251,13 +251,20 @@ fn render_plot(
         .len()
         .max(usize::from(view.selected_point.is_some()));
     let target_label = if selected_count == 0 {
-        "view domain summary"
+        "view domain summary".to_string()
+    } else if selected_count == 1
+        && let (Some(lat), Some(lon)) = (
+            view.selected_coordinates.latitude,
+            view.selected_coordinates.longitude,
+        )
+    {
+        format!("point at lat={lat:.2}°, lon={lon:.2}°")
     } else {
-        "selected points"
+        format!("{selected_count} selected point(s)")
     };
     let controls = format!(
         "type: [t] time series  [d] scatter  [h] histogram  [k] CDF  [u] profile   (current: {kind_label})\n\
-target: {target_label}   {selected_count} point(s)\n\
+target: {target_label}\n\
 {x_marker} X axis: {x_label}\n\
 {y_marker} Y axis: {y_label}\n\
 Tab switches axes  •  ↑↓/←→ changes the selected axis  •  m adds/removes points",

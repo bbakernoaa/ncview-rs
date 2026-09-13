@@ -6,6 +6,7 @@
 //! adds subtle graticules before the data raster is composited over the top.
 
 use image::RgbImage;
+use rayon::prelude::*;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::data::slice::CoordinateGrid;
@@ -51,16 +52,21 @@ pub fn render_with_palette(
     let extent = extent(coordinates);
     draw_graticule(&mut pixmap, extent, colors);
     for polygon in landmask::polygons_for_detail(detail) {
-        draw_polygon(&mut pixmap, polygon, extent, colors);
+        if polygon_intersects_extent(polygon, extent) {
+            draw_polygon(&mut pixmap, polygon, extent, colors);
+        }
     }
 
     let bytes = pixmap.data();
     let mut image = RgbImage::new(width as u32, height as u32);
     let (src_chunks, _) = bytes.as_chunks::<4>();
     let (dst_chunks, _) = image.as_mut().as_chunks_mut::<3>();
-    for (src, dst) in src_chunks.iter().zip(dst_chunks) {
-        *dst = [src[0], src[1], src[2]];
-    }
+    dst_chunks
+        .par_iter_mut()
+        .zip(src_chunks.par_iter())
+        .for_each(|(dst, src)| {
+            *dst = [src[0], src[1], src[2]];
+        });
     image
 }
 
@@ -214,6 +220,42 @@ fn draw_graticule(pixmap: &mut Pixmap, extent: Extent, colors: MapOverlayColors)
     }
 }
 
+fn polygon_intersects_extent(polygon: &[(f64, f64)], extent: Extent) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    let mut p_min_lat = f64::INFINITY;
+    let mut p_max_lat = f64::NEG_INFINITY;
+    let mut p_min_lon = f64::INFINITY;
+    let mut p_max_lon = f64::NEG_INFINITY;
+
+    for &(raw_lon, lat) in polygon {
+        p_min_lat = p_min_lat.min(lat);
+        p_max_lat = p_max_lat.max(lat);
+        let lon = display_longitude(raw_lon, extent.zero_to_360);
+        p_min_lon = p_min_lon.min(lon);
+        p_max_lon = p_max_lon.max(lon);
+    }
+
+    if p_max_lat < extent.min_lat || p_min_lat > extent.max_lat {
+        return false;
+    }
+
+    if (extent.max_lon - extent.min_lon) >= 350.0 {
+        return true;
+    }
+
+    if (p_max_lon - p_min_lon) > 180.0 {
+        return true;
+    }
+
+    if p_max_lon < extent.min_lon || p_min_lon > extent.max_lon {
+        return false;
+    }
+
+    true
+}
+
 fn draw_polygon(
     pixmap: &mut Pixmap,
     polygon: &[(f64, f64)],
@@ -310,6 +352,29 @@ mod tests {
     use crate::render::colors::Palette;
     use crate::render::landmask::Detail;
     use ndarray::array;
+
+    #[test]
+    fn polygon_intersects_extent_skips_offscreen_polygons() {
+        let extent = Extent {
+            min_lon: 0.0,
+            max_lon: 10.0,
+            min_lat: 0.0,
+            max_lat: 10.0,
+            lat_increases_down: false,
+            zero_to_360: false,
+        };
+        // Inside
+        let inside = vec![(2.0, 2.0), (8.0, 2.0), (5.0, 8.0)];
+        assert!(super::polygon_intersects_extent(&inside, extent));
+
+        // Completely outside in latitude
+        let far_north = vec![(2.0, 20.0), (8.0, 20.0), (5.0, 25.0)];
+        assert!(!super::polygon_intersects_extent(&far_north, extent));
+
+        // Completely outside in longitude
+        let far_east = vec![(50.0, 2.0), (58.0, 2.0), (55.0, 8.0)];
+        assert!(!super::polygon_intersects_extent(&far_east, extent));
+    }
 
     #[test]
     fn backdrop_has_requested_dimensions_and_layers() {
