@@ -262,9 +262,23 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 _ => None,
             };
             if let Some(delta) = file_delta {
+                let palette = state.view.palette.clone();
+                let scale_mode = state.view.scale_mode;
+                let color_scale_scope = state.view.color_scale_scope;
+                let grid_mode = state.view.grid_mode;
+                let show_land_borders = state.view.show_land_borders;
+                let playback_speed = state.view.playback_speed;
+
                 active_file = bounded_file_index(active_file, delta, sources.len());
                 let source = sources[active_file].as_ref();
                 state = state_for_source(source);
+                state.view.palette = palette;
+                state.view.scale_mode = scale_mode;
+                state.view.color_scale_scope = color_scale_scope;
+                state.view.grid_mode = grid_mode;
+                state.view.show_land_borders = show_land_borders;
+                state.view.playback_speed = playback_speed;
+
                 select_initial_variable(&mut state, source.metadata());
                 configure_timeline(&mut state, &sources, active_file);
                 load_selected(&mut state, &sources, active_file);
@@ -609,8 +623,24 @@ fn translate_mouse(
     }
     if view.variable_search_active {
         let popup = variable_browser_rect(area);
-        if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
-            return Command::Quit;
+        if clicked {
+            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
+                return Command::Quit;
+            }
+            let inner_top = popup.y.saturating_add(3);
+            if y >= inner_top {
+                let index = usize::from(y - inner_top);
+                let plottable = metadata
+                    .variables
+                    .iter()
+                    .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let visible = ncview_rs::ui::sidebar::filter_variables(&plottable, variable_query);
+                if index < visible.len() {
+                    return Command::SelectVariableAt(index);
+                }
+            }
         }
         return Command::Pointer { x, y };
     }
@@ -625,6 +655,19 @@ fn translate_mouse(
         let popup = overlay_rect(area, overlay);
         if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
             return Command::Quit;
+        }
+        if matches!(overlay, Overlay::CommandPalette) {
+            if clicked {
+                let inner_top = popup.y.saturating_add(3);
+                if y >= inner_top {
+                    let index = usize::from(y - inner_top);
+                    let matches = ncview_rs::app::palette_matches(&view.palette_query);
+                    if index < matches.len() {
+                        return Command::ExecutePaletteChoice(index);
+                    }
+                }
+            }
+            return Command::Pointer { x, y };
         }
         if matches!(overlay, Overlay::Limits | Overlay::Filter) {
             if clicked {
@@ -810,15 +853,29 @@ fn translate_mouse(
     let dimensions = metadata.dimensions.iter().take(8).count();
     let colormap_heading = areas.sidebar.y.saturating_add(2);
     let palette_row = colormap_heading.saturating_add(1);
+    let scale_row = colormap_heading.saturating_add(2);
     let dimensions_heading =
         variable_start + u16::try_from(plottable.len()).unwrap_or(u16::MAX) + 1;
     let dimensions_end = dimensions_heading
         .saturating_add(1)
         .saturating_add(u16::try_from(dimensions).unwrap_or(u16::MAX));
     let limits_row = dimensions_end.saturating_add(1);
+    let filter_row = dimensions_end.saturating_add(2);
+    let scope_row = dimensions_end.saturating_add(4);
+    let reverse_row = dimensions_end.saturating_add(5);
     match y {
         value if value == palette_row => Command::CyclePalette,
+        value if value == scale_row => Command::ToggleScale,
         value if value == limits_row => Command::OpenLimits,
+        value if value == filter_row => Command::OpenFilter,
+        value if value == scope_row => Command::ToggleColorScaleScope,
+        value if value == reverse_row => {
+            if x >= areas.sidebar.x.saturating_add(18) {
+                Command::ToggleLandBorders
+            } else {
+                Command::TogglePaletteReverse
+            }
+        }
         _ => Command::Pointer { x, y },
     }
 }
