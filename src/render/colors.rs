@@ -204,12 +204,13 @@ impl Palette {
 
 #[derive(Clone, Copy)]
 pub struct ColorMapper<'a> {
-    sampler: PaletteSampler<'a>,
+    _phantom: std::marker::PhantomData<&'a ()>,
     min: f64,
     inv_range: f64,
     scale: ScaleMode,
     raw_min: f64,
     raw_max: f64,
+    lut: [[u8; 3]; 256],
 }
 
 impl<'a> ColorMapper<'a> {
@@ -236,29 +237,39 @@ impl<'a> ColorMapper<'a> {
         } else {
             0.0
         };
+
+        let mut lut = [[0u8; 3]; 256];
+        for (i, entry) in lut.iter_mut().enumerate() {
+            let pos = i as f64 / 255.0;
+            *entry = sampler.sample(pos);
+        }
+
         Self {
-            sampler,
+            _phantom: std::marker::PhantomData,
             min,
             inv_range,
             scale,
             raw_min,
             raw_max,
+            lut,
         }
     }
 
     #[inline]
     pub fn map_value(&self, value: f64) -> [u8; 3] {
-        if self.scale == ScaleMode::Log {
+        let norm = if self.scale == ScaleMode::Log {
             if value <= 0.0 || self.raw_min <= 0.0 || self.raw_max <= 0.0 {
                 return [80, 80, 80];
             }
             let val = value.log10();
-            self.sampler
-                .sample(normalize_fast(val, self.min, self.inv_range))
+            normalize_fast(val, self.min, self.inv_range)
         } else {
-            self.sampler
-                .sample(normalize_fast(value, self.min, self.inv_range))
-        }
+            normalize_fast(value, self.min, self.inv_range)
+        };
+
+        let idx = (norm * 255.0).round() as usize;
+        let idx = idx.min(255);
+        self.lut[idx]
     }
 }
 

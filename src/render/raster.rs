@@ -147,13 +147,20 @@ fn rasterize(
     let m_slice = slice.validity.as_slice();
     let raw_buf = image.as_mut();
 
+    let row_bins: Vec<(usize, usize)> = (0..output_rows)
+        .map(|r| bin_range(r, rows, output_rows))
+        .collect();
+    let col_bins: Vec<(usize, usize)> = (0..output_cols)
+        .map(|c| bin_range(c, cols, output_cols))
+        .collect();
+
     for output_row in 0..output_rows {
-        let (row_start, row_end) = bin_range(output_row, rows, output_rows);
+        let (row_start, row_end) = row_bins[output_row];
         let row_bytes =
             &mut raw_buf[output_row * output_cols * 3..(output_row + 1) * output_cols * 3];
         let (row_chunks, _) = row_bytes.as_chunks_mut::<3>();
         for (output_col, chunk) in row_chunks.iter_mut().enumerate() {
-            let (col_start, col_end) = bin_range(output_col, cols, output_cols);
+            let (col_start, col_end) = col_bins[output_col];
             let mut sum = 0.0;
             let mut count = 0_usize;
             let mut filtered = false;
