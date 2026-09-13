@@ -257,19 +257,19 @@ impl<'a> ColorMapper<'a> {
 
     #[inline]
     pub fn map_value(&self, value: f64) -> [u8; 3] {
-        let norm = if self.scale == ScaleMode::Log {
+        if self.scale == ScaleMode::Log {
             if value <= 0.0 || self.raw_min <= 0.0 || self.raw_max <= 0.0 {
                 return [80, 80, 80];
             }
             let val = value.log10();
-            normalize_fast(val, self.min, self.inv_range)
+            let norm = normalize_fast(val, self.min, self.inv_range);
+            let idx = (norm * 255.0).round() as usize;
+            self.lut[idx.min(255)]
         } else {
-            normalize_fast(value, self.min, self.inv_range)
-        };
-
-        let idx = (norm * 255.0).round() as usize;
-        let idx = idx.min(255);
-        self.lut[idx]
+            let norm = normalize_fast(value, self.min, self.inv_range);
+            let idx = (norm * 255.0).round() as usize;
+            self.lut[idx.min(255)]
+        }
     }
 }
 
