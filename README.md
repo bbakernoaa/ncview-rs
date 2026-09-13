@@ -13,7 +13,7 @@ terminal.
 
 ## Quick start
 
-Download a platform archive from the repository's GitHub Releases page, unpack it, and put `ncv`
+Download a platform archive from the repository's [GitHub Releases](https://github.com/bbakernoaa/ncview-rs/releases) page, unpack it, and put `ncv`
 on your `PATH`:
 
 ```bash
@@ -146,6 +146,7 @@ The most useful runtime settings are environment variables:
 
 | Variable | Values | Purpose |
 | --- | --- | --- |
+| `NCVIEW_THREADS` / `RAYON_NUM_THREADS` | integer (e.g. `4`) | Set parallel rasterization threads (defaults conservatively to `min(CPUs, 8)` to avoid hogging HPC head node resources) |
 | `NCVIEW_IMAGE_PROTOCOL` | `kitty`, `sixel`, `iterm2`, `cells` | Override graphics capability detection |
 | `NCVIEW_SCIENTIFIC_RENDERING` | `1`/`0` | Keep scientific nearest-neighbor rendering enabled or allow interpolation |
 | `NCVIEW_IMAGE_FILTER` | `nearest`, `lanczos3`, `catmull-rom`, `triangle`, `gaussian` | Select the unlocked image filter |
@@ -225,6 +226,11 @@ cargo build --locked --release
 The repository keeps the NetCDF/HDF5 parser patch under `vendor/` and embeds the selected
 scientific colour maps and world-atlas coastline assets at build time. Large local datasets and
 generated exports are ignored by Git; they should not be committed to the repository.
+
+## Releases and Versioning
+
+This project strictly adheres to [Semantic Versioning 2.0.0](https://semver.org/).
+Cross-platform binary archives (Linux x86_64, macOS arm64, Windows x86_64) and SHA256 checksums are automatically built and published via GitHub Actions whenever a Git tag following the `v*` pattern (e.g. `v0.1.0`) is pushed to the repository. The latest pre-built releases are accessible on the [GitHub Releases Page](https://github.com/bbakernoaa/ncview-rs/releases).
 
 ## License
 

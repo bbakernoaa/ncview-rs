@@ -43,9 +43,7 @@ fn slice_and_raster(criterion: &mut Criterion) {
         })
     });
     criterion.bench_function("map_backdrop_rendering", |bencher| {
-        bencher.iter(|| {
-            black_box(map_background::render(160, 80, None, Detail::Global))
-        })
+        bencher.iter(|| black_box(map_background::render(160, 80, None, Detail::Global)))
     });
     criterion.bench_function("normalization", |bencher| {
         bencher.iter(|| black_box(normalize(0.42, 0.0, 1.0)))
