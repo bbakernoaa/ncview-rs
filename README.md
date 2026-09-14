@@ -210,7 +210,7 @@ pre-commit install
 The hooks reject raw GRIB/IDX datasets and large files, then run `cargo fmt`,
 Clippy, and the full test suite before each commit. CI remains the final check.
 
-Plotter chart labels use the embedded JetBrainsMono Nerd Font so Linux builds do
+Plotter chart labels use the embedded Fira Code font so Linux builds do
 not depend on a system `fontconfig` installation. Its SIL Open Font License is
 included at `assets/fonts/OFL.txt`.
 
