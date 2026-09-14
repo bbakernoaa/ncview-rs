@@ -7,4 +7,5 @@ pub mod error;
 pub mod events;
 pub mod export;
 pub mod render;
+pub mod storage;
 pub mod ui;

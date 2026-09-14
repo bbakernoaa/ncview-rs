@@ -72,6 +72,156 @@ pub fn parse_fixed_array_v4_with_dataset_dims(
     )
 }
 
+/// Source-backed counterpart to [`parse_fixed_array_v4_with_dataset_dims`].
+///
+/// Fixed-array headers and records are read from their absolute file
+/// addresses, so a caller can keep only the object header in memory while
+/// fetching the index itself on demand.
+pub fn parse_fixed_array_v4_with_reader<F>(
+    reader: &F,
+    file_len: u64,
+    header_address: u64,
+    ndims: usize,
+    chunk_dims: &[u64],
+    dataset_dims: &[u64],
+    uncompressed_chunk_bytes: usize,
+) -> Result<Vec<ChunkRecord>, OxiH5Error>
+where
+    F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+{
+    let header = read_range(reader, header_address, 28, "FA header")?;
+    if &header[..4] != b"FAHD" {
+        return Err(OxiH5Error::Format(format!(
+            "FA: bad signature {:?} at {header_address:#x}",
+            &header[..4]
+        )));
+    }
+    if header[4] != 0 {
+        return Err(OxiH5Error::Format(format!(
+            "FA: unsupported version {}",
+            header[4]
+        )));
+    }
+
+    let element_size = header[6] as usize;
+    if element_size < 8 {
+        return Err(OxiH5Error::Format(format!(
+            "FA: invalid element size {element_size}"
+        )));
+    }
+    let max_nelmts = u64::from_le_bytes(header[8..16].try_into().unwrap());
+    let data_block_addr = u64::from_le_bytes(header[16..24].try_into().unwrap());
+    if data_block_addr == u64::MAX {
+        return Ok(Vec::new());
+    }
+
+    let data_block_header = read_range(reader, data_block_addr, 14, "FA data block header")?;
+    if &data_block_header[..4] != b"FADB" {
+        return Err(OxiH5Error::Format(format!(
+            "FA: bad data block signature {:?} at {data_block_addr:#x}",
+            &data_block_header[..4]
+        )));
+    }
+    if data_block_header[4] != 0 {
+        return Err(OxiH5Error::Format(format!(
+            "FA: unsupported data block version {}",
+            data_block_header[4]
+        )));
+    }
+
+    const FA_MAX_ELEMENTS: u64 = 1 << 24;
+    let elem_start = data_block_addr
+        .checked_add(14)
+        .ok_or_else(|| OxiH5Error::Format("FA: data block address overflow".into()))?;
+    let max_possible = file_len.saturating_sub(elem_start) / element_size as u64;
+    if max_nelmts > FA_MAX_ELEMENTS || max_nelmts > max_possible {
+        return Err(OxiH5Error::Format(format!(
+            "FA: implausible element count {max_nelmts} (element_size={element_size}, remaining data={})",
+            file_len.saturating_sub(elem_start)
+        )));
+    }
+    let element_bytes_len = usize::try_from(max_nelmts)
+        .ok()
+        .and_then(|n| n.checked_mul(element_size))
+        .ok_or_else(|| OxiH5Error::Format("FA: element area is too large".into()))?;
+    let element_bytes = read_range(reader, elem_start, element_bytes_len, "FA elements")?;
+
+    let grid_dims = if !chunk_dims.is_empty() && ndims == chunk_dims.len() {
+        compute_grid_dims(max_nelmts, ndims, chunk_dims, dataset_dims)
+    } else {
+        vec![]
+    };
+    let grid_strides = if !grid_dims.is_empty() {
+        let mut strides = vec![1u64; ndims];
+        for d in (0..ndims.saturating_sub(1)).rev() {
+            strides[d] = strides[d + 1] * grid_dims[d + 1];
+        }
+        strides
+    } else {
+        vec![]
+    };
+    let client_id = data_block_header[5];
+    let n = usize::try_from(max_nelmts).unwrap();
+    let mut records = Vec::with_capacity(n);
+    for i in 0..n {
+        let e = i * element_size;
+        let record = &element_bytes[e..e + element_size];
+        let addr = u64::from_le_bytes(record[..8].try_into().unwrap());
+        if addr == u64::MAX {
+            continue;
+        }
+        let (size, filter_mask) = if client_id == 0 {
+            (u32::try_from(uncompressed_chunk_bytes).map_err(|_| {
+                OxiH5Error::Format("FA: uncompressed chunk size exceeds u32".into())
+            })?, 0)
+        } else if element_size >= 20 {
+            (
+                u64::from_le_bytes(record[8..16].try_into().unwrap())
+                    .try_into()
+                    .map_err(|_| OxiH5Error::Format("FA: chunk size exceeds u32".into()))?,
+                u32::from_le_bytes(record[16..20].try_into().unwrap()),
+            )
+        } else if element_size >= 16 {
+            (
+                u32::from_le_bytes(record[8..12].try_into().unwrap()),
+                u32::from_le_bytes(record[12..16].try_into().unwrap()),
+            )
+        } else {
+            (0, 0)
+        };
+        let offsets = if !grid_strides.is_empty() {
+            let mut rem = i as u64;
+            let mut offsets = vec![0u64; ndims];
+            for d in 0..ndims {
+                let grid_coord = rem / grid_strides[d].max(1);
+                rem %= grid_strides[d].max(1);
+                offsets[d] = grid_coord * chunk_dims[d];
+            }
+            offsets
+        } else if element_size >= 16 {
+            parse_offsets(&record[16..], ndims, (element_size - 16) / ndims.max(1))?
+        } else {
+            vec![]
+        };
+        records.push(ChunkRecord { address: addr, size, filter_mask, offsets });
+    }
+    Ok(records)
+}
+
+fn read_range<F>(reader: &F, offset: u64, length: usize, what: &str) -> Result<Vec<u8>, OxiH5Error>
+where
+    F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+{
+    let bytes = reader(offset, length)?;
+    if bytes.len() != length {
+        return Err(OxiH5Error::Format(format!(
+            "{what}: source returned {} bytes, expected {length}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
 fn parse_fixed_array_inner(
     file_data: &[u8],
     header_address: u64,

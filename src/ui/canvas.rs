@@ -185,8 +185,6 @@ fn render_content(
 ) {
     let message = if constrained {
         Some(Paragraph::new("terminal too small; resize to view"))
-    } else if loading {
-        Some(Paragraph::new("loading slice…"))
     } else if slice.is_none() {
         Some(Paragraph::new("no plottable slice selected"))
     } else {
@@ -204,7 +202,8 @@ fn render_content(
     let block = theme::panel(&title, theme::TEAL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if let Some(message) = message {
+    if constrained || slice.is_none() {
+        let Some(message) = message else { return };
         frame.render_widget(message, inner);
         return;
     }
@@ -242,6 +241,7 @@ fn render_content(
         let image_area = graphics.drawable_area(inner);
         if graphics.render(frame, inner, image.into()) {
             render_drag_box(frame, image_area, drag, zoom_active);
+            render_loading_badge(frame, inner, loading);
             return;
         }
     }
@@ -339,6 +339,18 @@ fn render_content(
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), inner);
     render_drag_box(frame, inner, drag, zoom_active);
+    render_loading_badge(frame, inner, loading);
+}
+
+fn render_loading_badge(frame: &mut Frame, area: Rect, loading: bool) {
+    if !loading || area.width < 10 || area.height == 0 {
+        return;
+    }
+    let badge = Rect::new(area.x.saturating_add(1), area.y, area.width.min(22), 1);
+    frame.render_widget(
+        Paragraph::new(" loading next frame… ").style(theme::muted_style()),
+        badge,
+    );
 }
 
 fn render_drag_box(frame: &mut Frame, area: Rect, drag: Option<DragState>, zoom_active: bool) {

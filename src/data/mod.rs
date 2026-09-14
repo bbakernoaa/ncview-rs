@@ -9,11 +9,22 @@ pub mod grib2_index;
 pub mod grib2_manifest;
 pub mod grib2_types;
 pub mod netcdf4;
+pub mod remote;
+pub mod remote_grib2;
+pub mod remote_hdf5;
+pub mod remote_netcdf4;
 pub mod slice;
+pub mod virtual_dataset;
 
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::File,
+    io::Read,
+    path::Path,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use crate::error::Result;
+use crate::storage::location::SourceLocation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatasetFormat {
@@ -76,6 +87,19 @@ pub trait DataSource: Send + Sync {
     fn metadata(&self) -> &DatasetMetadata;
     fn read_slice(&self, request: &slice::SliceRequest) -> Result<slice::Slice2D>;
 
+    fn is_remote(&self) -> bool {
+        false
+    }
+
+    /// Stable source-version token for remote collection diagnostics and cache identity.
+    fn source_identity(&self) -> Option<&str> {
+        None
+    }
+
+    fn remote_capabilities(&self) -> Option<remote::AccessCapabilities> {
+        None
+    }
+
     fn read_slice_on_axes(
         &self,
         request: &slice::SliceRequest,
@@ -84,6 +108,20 @@ pub trait DataSource: Send + Sync {
         _fixed_axes: &[(String, usize)],
     ) -> Result<slice::Slice2D> {
         self.read_slice(request)
+    }
+
+    /// Variant used by interactive workers that may supersede an in-flight
+    /// provider operation. Format adapters that can propagate cancellation
+    /// override this; local sources retain the ordinary synchronous behavior.
+    fn read_slice_on_axes_cancellable(
+        &self,
+        request: &slice::SliceRequest,
+        row_axis: Option<&str>,
+        col_axis: Option<&str>,
+        fixed_axes: &[(String, usize)],
+        _cancelled: Arc<AtomicBool>,
+    ) -> Result<slice::Slice2D> {
+        self.read_slice_on_axes(request, row_axis, col_axis, fixed_axes)
     }
 
     fn time_label(&self, _index: usize) -> Option<String> {
@@ -131,5 +169,22 @@ pub fn open(path: impl AsRef<Path>) -> Result<Box<dyn DataSource>> {
         grib2::Grib2Source::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
     } else {
         netcdf4::NetCdf4Source::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
+    }
+}
+
+/// Open either a local path or an explicit cloud object location.
+pub fn open_location(location: impl AsRef<str>) -> Result<Box<dyn DataSource>> {
+    open_location_with_progress(location, &|_| true)
+}
+
+pub fn open_location_with_progress(
+    location: impl AsRef<str>,
+    progress: &dyn Fn(&str) -> bool,
+) -> Result<Box<dyn DataSource>> {
+    let source = SourceLocation::parse(location.as_ref())?;
+    if source.is_remote() {
+        remote::open_remote_with_progress(source, progress)
+    } else {
+        open(source.local_path().expect("local source has a path"))
     }
 }

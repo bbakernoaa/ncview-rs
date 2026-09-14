@@ -342,10 +342,176 @@ impl BTreeV2 {
         Ok(Self { records })
     }
 
+    /// Source-backed counterpart to [`BTreeV2::parse`]. The header and each
+    /// tree node are fetched independently, so the index does not need to be
+    /// contained in the caller's metadata window.
+    pub fn parse_with_reader<F>(
+        reader: &F,
+        header_address: u64,
+        ndims: usize,
+    ) -> Result<Self, OxiH5Error>
+    where
+        F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+    {
+        let header = read_range(reader, header_address, 38, "BTHD")?;
+        if &header[..4] != b"BTHD" {
+            return Err(OxiH5Error::Format(format!(
+                "BTHD: bad signature {:?} at {header_address:#x}",
+                &header[..4]
+            )));
+        }
+        if header[4] != 0 {
+            return Err(OxiH5Error::Format(format!(
+                "BTHD: unsupported version {}",
+                header[4]
+            )));
+        }
+        let btree_type = header[5];
+        if btree_type != 10 && btree_type != 11 {
+            return Err(OxiH5Error::NotImplemented(format!(
+                "BTHD: unsupported record type {btree_type} (expected 10 or 11)"
+            )));
+        }
+        let node_size = u32::from_le_bytes(header[6..10].try_into().unwrap());
+        let record_size = u16::from_le_bytes(header[10..12].try_into().unwrap());
+        let tree_depth = u16::from_le_bytes(header[12..14].try_into().unwrap());
+        if tree_depth > MAX_DEPTH {
+            return Err(OxiH5Error::Format(format!(
+                "BTHD: tree depth {tree_depth} exceeds maximum {MAX_DEPTH}"
+            )));
+        }
+        let root_addr = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        let root_nrecords = u16::from_le_bytes(header[24..26].try_into().unwrap());
+        if root_addr == UNDEF {
+            return Ok(Self { records: Vec::new() });
+        }
+        let node_size = usize::try_from(node_size)
+            .map_err(|_| OxiH5Error::Format("BTHD: node size exceeds usize".into()))?;
+        if node_size < 10 {
+            return Err(OxiH5Error::Format(format!(
+                "BTHD: invalid node size {node_size}"
+            )));
+        }
+        let mut records = Vec::new();
+        parse_node_with_reader(
+            reader,
+            root_addr,
+            node_size,
+            tree_depth,
+            root_nrecords,
+            record_size,
+            btree_type,
+            ndims,
+            &mut records,
+            0,
+        )?;
+        Ok(Self { records })
+    }
+
     /// Return all chunk records collected from this tree.
     pub fn records(&self) -> &[ChunkRecord] {
         &self.records
     }
+}
+
+fn read_range<F>(reader: &F, offset: u64, length: usize, what: &str) -> Result<Vec<u8>, OxiH5Error>
+where
+    F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+{
+    let bytes = reader(offset, length)?;
+    if bytes.len() != length {
+        return Err(OxiH5Error::Format(format!(
+            "{what}: source returned {} bytes, expected {length}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_node_with_reader<F>(
+    reader: &F,
+    node_addr: u64,
+    node_size: usize,
+    depth: u16,
+    num_records: u16,
+    record_size: u16,
+    btree_type: u8,
+    ndims: usize,
+    records: &mut Vec<ChunkRecord>,
+    recursion: u16,
+) -> Result<(), OxiH5Error>
+where
+    F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+{
+    if recursion > MAX_DEPTH {
+        return Err(OxiH5Error::Format(
+            "BTreeV2: recursion limit reached".into(),
+        ));
+    }
+    if node_addr == UNDEF {
+        return Ok(());
+    }
+    let node = read_range(reader, node_addr, node_size, "B-tree node")?;
+    let expected_sig: &[u8] = if depth == 0 { b"BTLF" } else { b"BTIN" };
+    if &node[..4] != expected_sig {
+        return Err(OxiH5Error::Format(format!(
+            "BTreeV2 node at {node_addr:#x} depth={depth}: expected {expected_sig:?}, got {:?}",
+            &node[..4]
+        )));
+    }
+    if node[4] != 0 {
+        return Err(OxiH5Error::Format(format!(
+            "BTreeV2 node: unsupported version {}",
+            node[4]
+        )));
+    }
+    let records_start = 6usize;
+    let record_count = num_records as usize;
+    let rs = record_size as usize;
+    let records_end = records_start
+        .checked_add(record_count.checked_mul(rs).ok_or_else(|| {
+            OxiH5Error::Format("BTreeV2: record range overflow".into())
+        })?)
+        .ok_or_else(|| OxiH5Error::Format("BTreeV2: record range overflow".into()))?;
+    if depth == 0 {
+        if records_end > node.len() {
+            return Err(OxiH5Error::Format("BTLF: record data truncated".into()));
+        }
+        for i in 0..record_count {
+            let start = records_start + i * rs;
+            records.push(parse_chunk_record(&node[start..start + rs], btree_type, ndims)?);
+        }
+        return Ok(());
+    }
+
+    let child_count = record_count + 1;
+    let children_end = records_end
+        .checked_add(child_count.checked_mul(10).ok_or_else(|| {
+            OxiH5Error::Format("BTIN: child range overflow".into())
+        })?)
+        .ok_or_else(|| OxiH5Error::Format("BTIN: child range overflow".into()))?;
+    if children_end > node.len() {
+        return Err(OxiH5Error::Format("BTIN: node data truncated".into()));
+    }
+    for c in 0..child_count {
+        let ptr = records_end + c * 10;
+        let child_addr = u64::from_le_bytes(node[ptr..ptr + 8].try_into().unwrap());
+        let child_nrecords = u16::from_le_bytes(node[ptr + 8..ptr + 10].try_into().unwrap());
+        parse_node_with_reader(
+            reader,
+            child_addr,
+            node_size,
+            depth - 1,
+            child_nrecords,
+            record_size,
+            btree_type,
+            ndims,
+            records,
+            recursion + 1,
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

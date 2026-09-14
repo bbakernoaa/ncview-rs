@@ -25,6 +25,9 @@ pub mod values;
 pub mod vds;
 
 pub use chunked::ChunkIndexCache;
-pub use chunked_hyperslab::{gather_hyperslab_contiguous, read_chunked_hyperslab};
+pub use chunked_hyperslab::{
+    gather_hyperslab_contiguous, gather_hyperslab_contiguous_with_reader,
+    read_chunked_hyperslab,
+};
 pub use global_heap_writer::{GlobalHeapRef, GlobalHeapWriter};
 pub use hyperslab::{DimSelection, Hyperslab};

@@ -435,6 +435,45 @@ pub fn read_chunked_slice(
     ranges: &[std::ops::Range<u64>],
     cache: Option<&ChunkIndexCache>,
 ) -> Result<Vec<u8>, OxiH5Error> {
+    read_chunked_slice_with_reader(
+        file_data,
+        layout,
+        pipeline,
+        dataset_dims,
+        params,
+        ranges,
+        cache,
+        file_data.len() as u64,
+        |offset, length| {
+            let end = offset
+                .checked_add(length as u64)
+                .ok_or_else(|| OxiH5Error::Format("chunk-index range overflow".into()))?;
+            let bytes = file_data.get(offset as usize..end as usize).ok_or_else(|| {
+                OxiH5Error::Format("chunk-index range outside local file".into())
+            })?;
+            Ok(bytes.to_vec())
+        },
+        |record| Ok(read_chunk_bytes(file_data, record)?.to_vec()),
+    )
+}
+
+/// Read only the chunks that overlap `ranges`, obtaining each compressed chunk
+/// through the supplied callback.
+///
+/// Metadata comes from `file_data`; chunk-index and payload bytes are obtained
+/// through callbacks. The callbacks must return exactly the requested bytes.
+pub fn read_chunked_slice_with_reader(
+    file_data: &[u8],
+    layout: &LayoutInfo,
+    pipeline: &FilterPipeline,
+    dataset_dims: &[u64],
+    params: ChunkSliceParams<'_>,
+    ranges: &[std::ops::Range<u64>],
+    cache: Option<&ChunkIndexCache>,
+    source_len: u64,
+    read_index: impl Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error> + Send + Sync,
+    read_raw_chunk: impl Fn(&ChunkRecord) -> Result<Vec<u8>, OxiH5Error> + Send + Sync,
+) -> Result<Vec<u8>, OxiH5Error> {
     let elem_size = params.elem_size;
     let fill_value = params.fill_value;
     let LayoutInfo::Chunked {
@@ -516,13 +555,29 @@ pub fn read_chunked_slice(
         let dataset_dims_clone = dataset_dims.to_vec();
         c.get_or_insert((*data_address, ndims), move || {
             if index == ChunkIndex::FixedArray {
-                crate::fa_index::parse_fixed_array_v4_with_dataset_dims(
-                    file_data,
+                crate::fa_index::parse_fixed_array_v4_with_reader(
+                    &read_index,
+                    source_len,
                     *data_address,
                     ndims,
                     &real_chunk_dims_clone,
                     &dataset_dims_clone,
                     uncompressed_for_fa,
+                )
+            } else if index == ChunkIndex::BTreeV2 {
+                Ok(crate::btree_v2::BTreeV2::parse_with_reader(
+                    &read_index,
+                    *data_address,
+                    ndims,
+                )?
+                .records()
+                .to_vec())
+            } else if index == ChunkIndex::BTreeV1 {
+                crate::btree_v1_chunk::parse_with_reader(
+                    &read_index,
+                    source_len,
+                    *data_address,
+                    ndims,
                 )
             } else {
                 resolve_chunk_index(file_data, index, *data_address, ndims)
@@ -531,13 +586,25 @@ pub fn read_chunked_slice(
     } else {
         let records = if index == ChunkIndex::FixedArray {
             let uncompressed = real_chunk_dims.iter().product::<u64>() as usize * elem_size;
-            crate::fa_index::parse_fixed_array_v4_with_dataset_dims(
-                file_data,
+            crate::fa_index::parse_fixed_array_v4_with_reader(
+                &read_index,
+                source_len,
                 *data_address,
                 ndims,
                 &real_chunk_dims,
                 dataset_dims,
                 uncompressed,
+            )?
+        } else if index == ChunkIndex::BTreeV2 {
+            crate::btree_v2::BTreeV2::parse_with_reader(&read_index, *data_address, ndims)?
+                .records()
+                .to_vec()
+        } else if index == ChunkIndex::BTreeV1 {
+            crate::btree_v1_chunk::parse_with_reader(
+                &read_index,
+                source_len,
+                *data_address,
+                ndims,
             )?
         } else {
             resolve_chunk_index(file_data, index, *data_address, ndims)?
@@ -613,7 +680,7 @@ pub fn read_chunked_slice(
                 |(origin, offsets)| -> Result<(Vec<u64>, Vec<u8>), OxiH5Error> {
                     let rec_idx = *chunk_map.get(&origin).expect("origin in map");
                     let rec = &chunks_arc[rec_idx];
-                    let raw = read_chunk_bytes(file_data, rec)?;
+                    let raw = read_raw_chunk(rec)?;
                     let data = apply_filters_to_chunk(
                         raw,
                         rec.filter_mask,
@@ -656,7 +723,7 @@ pub fn read_chunked_slice(
     }
 
     #[cfg(not(feature = "parallel"))]
-    assemble_chunks_slice(
+    assemble_chunks_slice_with_reader(
         &chunks_arc,
         file_data,
         &real_chunk_dims,
@@ -679,6 +746,7 @@ pub fn read_chunked_slice(
                 )
             }
         },
+        read_raw_chunk,
     )
 }
 
@@ -789,6 +857,7 @@ struct SliceElemConfig<'a> {
 ///
 /// Used by the sequential (non-parallel) code path in [`read_chunked_slice`].
 #[cfg(any(not(feature = "parallel"), test))]
+#[allow(dead_code)]
 fn assemble_chunks_slice(
     chunks: &[ChunkRecord],
     file_data: &[u8],
@@ -797,6 +866,29 @@ fn assemble_chunks_slice(
     ranges: &[std::ops::Range<u64>],
     cfg: SliceElemConfig<'_>,
     apply_filters: impl Fn(&[u8], u32) -> Result<Vec<u8>, OxiH5Error>,
+) -> Result<Vec<u8>, OxiH5Error> {
+    assemble_chunks_slice_with_reader(
+        chunks,
+        file_data,
+        chunk_dims,
+        dataset_dims,
+        ranges,
+        cfg,
+        apply_filters,
+        |chunk| Ok(read_chunk_bytes(file_data, chunk)?.to_vec()),
+    )
+}
+
+#[cfg(any(not(feature = "parallel"), test))]
+fn assemble_chunks_slice_with_reader(
+    chunks: &[ChunkRecord],
+    _file_data: &[u8],
+    chunk_dims: &[u64],
+    dataset_dims: &[u64],
+    ranges: &[std::ops::Range<u64>],
+    cfg: SliceElemConfig<'_>,
+    apply_filters: impl Fn(&[u8], u32) -> Result<Vec<u8>, OxiH5Error>,
+    read_raw_chunk: impl Fn(&ChunkRecord) -> Result<Vec<u8>, OxiH5Error>,
 ) -> Result<Vec<u8>, OxiH5Error> {
     let elem_size = cfg.elem_size;
     let fill_value = cfg.fill_value;
@@ -879,17 +971,8 @@ fn assemble_chunks_slice(
         // Decompress (or create fill-value buffer for sparse chunks).
         let chunk_data: Vec<u8> = if let Some(&rec_idx) = maybe_record {
             let cr = &chunks[rec_idx];
-            let addr = cr.address as usize;
-            let sz = cr.size as usize;
-            let raw = file_data.get(addr..addr + sz).ok_or_else(|| {
-                OxiH5Error::Format(format!(
-                    "chunk at {:#x} size {} extends beyond file ({} bytes)",
-                    addr,
-                    sz,
-                    file_data.len()
-                ))
-            })?;
-            apply_filters(raw, cr.filter_mask)?
+            let raw = read_raw_chunk(cr)?;
+            apply_filters(&raw, cr.filter_mask)?
         } else {
             let n_elems = chunk_volume as usize;
             match fill_value {

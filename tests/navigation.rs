@@ -1,11 +1,52 @@
 use ncview_rs::{
     app::{
-        AppState, Command, Effect, GridMode, LimitField, Overlay, PlotAxisField, PlotKind,
-        PlotYAxis,
+        AppState, Command, Effect, Generation, GridMode, LimitField, Overlay, PlotAxisField,
+        PlotKind, PlotSeries, PlotYAxis,
     },
-    data::Variable,
+    data::{
+        Variable,
+        slice::{Bounds, Slice2D, Validity},
+    },
     ui::sidebar::filter_variables,
 };
+use ndarray::{Array2, arr2};
+
+#[test]
+fn superseded_map_and_plot_results_cannot_replace_last_valid_results() {
+    let mut state = AppState::default();
+    let previous = Slice2D::new(
+        arr2(&[[1.0, 2.0], [3.0, 4.0]]),
+        Array2::from_elem((2, 2), Validity::Finite),
+        Bounds::new(0, 2, 0, 2).unwrap(),
+    )
+    .unwrap();
+    state.set_slice(previous.clone());
+    assert_eq!(state.view.decoded_bytes, previous.memory_bytes());
+    state.view.generation = Generation(4);
+    state.view.plot_generation = Generation(7);
+    state.view.plot_series = vec![PlotSeries {
+        point: (0, 0),
+        label: "previous".into(),
+        data: vec![(0.0, 1.0)],
+        labels: vec!["t0".into()],
+    }];
+
+    assert!(!state.accept_slice(Generation(3), previous));
+    assert_eq!(state.view.slice.as_ref().unwrap().values[[0, 0]], 1.0);
+    assert!(!state.accept_plot(
+        Generation(6),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        "stale".into(),
+    ));
+    assert_eq!(state.view.plot_series[0].label, "previous");
+
+    let next = state.next_generation();
+    assert_eq!(next, Generation(5));
+    let next_plot = state.next_plot_generation();
+    assert_eq!(next_plot, Generation(8));
+}
 
 #[test]
 fn variable_selection_advances_generation_and_emits_read_effect() {
@@ -431,4 +472,17 @@ fn execute_palette_choice_runs_specified_matching_entry() {
         ncview_rs::render::colors::Palette::Plasma
     );
     assert!(state.view.overlay.is_none());
+}
+
+#[test]
+fn time_navigation_does_not_change_automatic_limits() {
+    let mut state = AppState::default();
+    state.view.time_length = 3;
+    state.view.limits = Some((1.0, 4.0));
+    state.view.limits_manual = false;
+
+    state.reduce(Command::MoveTime(1));
+
+    assert_eq!(state.view.time_index, 1);
+    assert_eq!(state.view.limits, Some((1.0, 4.0)));
 }

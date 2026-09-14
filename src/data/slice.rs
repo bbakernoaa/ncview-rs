@@ -151,6 +151,27 @@ pub fn classify_packed(values: &[f64], attributes: PackedAttributes) -> (Vec<f64
 }
 
 impl Slice2D {
+    /// Approximate resident bytes owned by the decoded scientific result.
+    /// This counts the value, validity, and optional coordinate arrays that
+    /// remain live while an asynchronous replacement is prepared.
+    pub fn memory_bytes(&self) -> usize {
+        let values = self.values.len().saturating_mul(std::mem::size_of::<f64>());
+        let validity = self
+            .validity
+            .len()
+            .saturating_mul(std::mem::size_of::<Validity>());
+        let coordinates = self.coordinates.as_ref().map_or(0, |grid| {
+            let latitude = grid.latitude.as_ref().map_or(0, |values| {
+                values.len().saturating_mul(std::mem::size_of::<f64>())
+            });
+            let longitude = grid.longitude.as_ref().map_or(0, |values| {
+                values.len().saturating_mul(std::mem::size_of::<f64>())
+            });
+            latitude.saturating_add(longitude)
+        });
+        values.saturating_add(validity).saturating_add(coordinates)
+    }
+
     pub fn with_statistics(
         values: Array2<f64>,
         validity: Array2<Validity>,

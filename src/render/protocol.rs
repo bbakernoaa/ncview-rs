@@ -1,6 +1,7 @@
 use std::{
     env,
     hash::{Hash, Hasher},
+    sync::mpsc::{self, Receiver},
 };
 
 use image::DynamicImage;
@@ -11,7 +12,7 @@ use ratatui::{
 };
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{FontSize, Resize, ResizeEncodeRender, StatefulImage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageProtocol {
@@ -32,9 +33,17 @@ pub struct GraphicsRenderer {
     state: ProtocolState,
     image: Option<StatefulProtocol>,
     image_hash: Option<u64>,
+    pending: Option<PendingImage>,
+    image_bytes: usize,
     resize_filter: FilterType,
     scientific_mode: bool,
     disabled: bool,
+}
+
+struct PendingImage {
+    hash: u64,
+    bytes: usize,
+    receiver: Receiver<Result<StatefulProtocol, String>>,
 }
 
 impl GraphicsRenderer {
@@ -44,6 +53,8 @@ impl GraphicsRenderer {
             state: ProtocolState::probe(),
             image: None,
             image_hash: None,
+            pending: None,
+            image_bytes: 0,
             resize_filter: if scientific_mode {
                 FilterType::Nearest
             } else {
@@ -66,6 +77,8 @@ impl GraphicsRenderer {
             },
             image: None,
             image_hash: None,
+            pending: None,
+            image_bytes: 0,
             resize_filter: self.resize_filter,
             scientific_mode: self.scientific_mode,
             disabled: self.disabled,
@@ -130,6 +143,8 @@ impl GraphicsRenderer {
         // fresh encoding when the interpolation mode changes.
         self.image = None;
         self.image_hash = None;
+        self.pending = None;
+        self.image_bytes = 0;
         true
     }
 
@@ -152,12 +167,21 @@ impl GraphicsRenderer {
             return false;
         }
         let hash = image_hash(&image);
-        if self.image_hash != Some(hash) {
-            self.image = Some(self.state.picker.new_resize_protocol(image));
-            self.image_hash = Some(hash);
+        self.finish_pending(hash);
+        if !self.supports_graphics() {
+            return false;
+        }
+        // Keep at most one encoder in flight. If playback advances while that
+        // encoder is busy, the completed frame is discarded and the current
+        // slice is queued on the next draw.
+        if self.image_hash != Some(hash) && self.pending.is_none() {
+            self.start_encoding(hash, image, area);
         }
         let Some(protocol) = self.image.as_mut() else {
-            return false;
+            // Keep the map stable until the first protocol image has finished
+            // encoding. Falling through to cell rendering here would produce
+            // a one-frame flash when the protocol image arrives.
+            return true;
         };
         frame.render_stateful_widget(
             // Nearest-neighbor is the default for scientific rasters: it
@@ -179,6 +203,72 @@ impl GraphicsRenderer {
             return false;
         }
         true
+    }
+
+    /// Whether a replacement image is being prepared. The event loop uses
+    /// this to keep rendering while the old image remains on screen.
+    pub fn has_pending_image(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Bytes retained by the current encoded image and the replacement being
+    /// prepared. The input raster is viewport-bounded, so this is the useful
+    /// accounting boundary for rendered transport buffers.
+    pub fn working_set_bytes(&self) -> usize {
+        self.image_bytes
+            .saturating_add(self.pending.as_ref().map_or(0, |pending| pending.bytes))
+    }
+
+    fn start_encoding(&mut self, hash: u64, image: DynamicImage, area: Rect) {
+        let picker = self.state.picker.clone();
+        let resize = Resize::Scale(Some(self.resize_filter));
+        let size = Size::new(area.width, area.height);
+        let bytes = image.as_bytes().len();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut protocol = picker.new_resize_protocol(image);
+            protocol.resize_encode(&resize, size);
+            let result = match protocol.last_encoding_result() {
+                Some(Ok(())) => Ok(protocol),
+                Some(Err(_)) => Err("image protocol encoding failed".to_string()),
+                None => Err("image protocol did not encode".to_string()),
+            };
+            let _ = sender.send(result);
+        });
+        self.pending = Some(PendingImage {
+            hash,
+            bytes,
+            receiver,
+        });
+    }
+
+    fn finish_pending(&mut self, current_hash: u64) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        match pending.receiver.try_recv() {
+            Ok(Ok(protocol)) if pending.hash == current_hash => {
+                self.image_bytes = pending.bytes;
+                self.image = Some(protocol);
+                self.image_hash = Some(current_hash);
+            }
+            Ok(Err(_)) if pending.hash == current_hash => {
+                self.image_bytes = 0;
+                self.disabled = true;
+            }
+            Ok(_) => {
+                // A newer time slice is already being rendered. Discard this
+                // completed frame; render() will queue the current one below.
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.pending = Some(pending);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if pending.hash == current_hash {
+                    self.disabled = true;
+                }
+            }
+        }
     }
 }
 
@@ -233,14 +323,11 @@ impl ProtocolState {
         }
     }
     pub fn probe() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let p = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-            let _ = tx.send(p);
-        });
-        let mut picker = rx
-            .recv_timeout(std::time::Duration::from_millis(50))
-            .unwrap_or_else(|_| Picker::halfblocks());
+        // Terminal capability queries can block for seconds when stdout is
+        // redirected, SSH is involved, or a multiplexer swallows the reply.
+        // Startup must never depend on that round trip, so use the
+        // deterministic fallback and rely on explicit environment hints.
+        let mut picker = picker_with_terminal_cell_size();
         // `from_query_stdio` can time out when iTerm2 is behind SSH or a
         // multiplexer. Preserve the terminal's environment hint in that
         // error path instead of silently falling back to half-block cells.
@@ -269,6 +356,22 @@ impl ProtocolState {
             _ => ImageProtocol::Halfblocks,
         };
         Self { picker, protocol }
+    }
+}
+
+fn picker_with_terminal_cell_size() -> Picker {
+    let font_size = crossterm::terminal::window_size().ok().and_then(|size| {
+        let width = size.width.checked_div(size.columns)?;
+        let height = size.height.checked_div(size.rows)?;
+        (width > 0 && height > 0).then_some(FontSize::new(width, height))
+    });
+    match font_size {
+        // This constructor is deprecated in favor of an active terminal
+        // query. The query can hang at startup; window_size provides the same
+        // geometry without terminal I/O.
+        #[allow(deprecated)]
+        Some(font_size) => Picker::from_fontsize(font_size),
+        None => Picker::halfblocks(),
     }
 }
 

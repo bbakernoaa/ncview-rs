@@ -96,13 +96,11 @@ pub fn command_from_key_with_mode(key: KeyEvent, mode: InputMode) -> Option<Comm
             }
             match key.code {
                 KeyCode::Esc => Some(Command::Quit),
-                KeyCode::Enter => {
-                    if overlay == Overlay::CommandPalette {
-                        Some(Command::ExecuteCommandPalette)
-                    } else {
-                        Some(Command::ActivatePoint)
-                    }
-                }
+                KeyCode::Enter => match overlay {
+                    Overlay::CommandPalette => Some(Command::ExecuteCommandPalette),
+                    Overlay::Limits | Overlay::Filter => Some(Command::ApplyLimitDraft),
+                    _ => Some(Command::ActivatePoint),
+                },
                 KeyCode::Tab => Some(Command::NextLimitField),
                 KeyCode::Backspace => Some(Command::DeleteInput),
                 KeyCode::Up => match overlay {
@@ -204,8 +202,8 @@ pub fn command_from_key_with_mode(key: KeyEvent, mode: InputMode) -> Option<Comm
 
 #[cfg(test)]
 mod tests {
-    use super::{command_from_key, command_from_key_with_search};
-    use crate::app::Command;
+    use super::{command_from_key, command_from_key_with_mode, command_from_key_with_search};
+    use crate::app::{Command, InputMode, Overlay};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
@@ -256,6 +254,19 @@ mod tests {
         assert_eq!(
             command_from_key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE)),
             Some(Command::NextFile)
+        );
+    }
+
+    #[test]
+    fn enter_submits_numeric_overlays_without_becoming_plot_activation() {
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            command_from_key_with_mode(enter, InputMode::TextOverlay(Overlay::Limits)),
+            Some(Command::ApplyLimitDraft)
+        );
+        assert_eq!(
+            command_from_key_with_mode(enter, InputMode::TextOverlay(Overlay::Filter)),
+            Some(Command::ApplyLimitDraft)
         );
     }
 }

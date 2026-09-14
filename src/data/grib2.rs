@@ -6,6 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use chrono::{SecondsFormat, TimeDelta, TimeZone, Utc};
 use grib::{Grib2SubmessageDecoder, LatLons};
 use ndarray::Array2;
 
@@ -42,6 +43,14 @@ impl Grib2Source {
             path: path.to_path_buf(),
             source,
         })?;
+        Self::open_bytes(path, bytes)
+    }
+
+    /// Open one complete GRIB2 object already obtained by a caller.
+    ///
+    /// Remote adapters use this only for an exact message range, never for an
+    /// implicit unbounded object download.
+    pub(crate) fn open_bytes(path: &Path, bytes: Vec<u8>) -> Result<Self> {
         if bytes.len() < 16 || &bytes[..4] != b"GRIB" {
             return Err(NcvError::UnsupportedFormat {
                 path: path.to_path_buf(),
@@ -113,15 +122,25 @@ impl Grib2Source {
                 resolution.push(catalog.resolve("4.233", u64::from(aerosol_code)));
             }
             let description = parameter_label.unwrap_or_else(|| message.describe());
-            let time_label = if supported_product_template(product_template) {
-                catch_unwind(AssertUnwindSafe(|| message.temporal_info()))
-                    .ok()
+            // The timeline represents when the field is valid, not when the
+            // GRIB message was produced. Read the forecast offset from the
+            // original Section 4 payload because `parsed` uses a normalized
+            // template number for newer templates such as 4.48. Calling the
+            // decoder's temporal helper after that normalization can read the
+            // wrong offset and produce dates centuries in the future.
+            let time_label = valid_time_label(
+                product_template,
+                &product_definition_payload,
+                &section1.payload.ref_time,
+            )
+            .or_else(|| {
+                supported_product_template(product_template)
+                    .then(|| catch_unwind(AssertUnwindSafe(|| message.temporal_info())).ok())
+                    .flatten()
                     .and_then(|temporal| temporal.forecast_time_target.or(temporal.ref_time))
-                    .map(|time| time.to_rfc3339())
-                    .unwrap_or_else(|| iso_datetime(&section1.payload.ref_time))
-            } else {
-                iso_datetime(&section1.payload.ref_time)
-            };
+                    .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+            })
+            .unwrap_or_else(|| iso_datetime(&section1.payload.ref_time));
             let header = Grib2MessageHeader {
                 location: Grib2SourceLocation {
                     path: path.display().to_string(),
@@ -492,6 +511,57 @@ fn supported_product_template(template: u16) -> bool {
     matches!(template, 0 | 1 | 2 | 5 | 6)
 }
 
+fn valid_time_label(
+    product_template: u16,
+    payload: &[u8],
+    reference_time: &grib::def::grib2::template::param_set::DateTime,
+) -> Option<String> {
+    let forecast_offset = match product_template {
+        0..=15 | 32..=34 | 51 | 60..=61 | 86..=87 | 91 | 1000..=1101 => 8,
+        40..=43 => 10,
+        44..=47 | 85 => 21,
+        48..=49 => 32,
+        55..=56 | 59 | 62..=63 => 14,
+        70..=73 => 13,
+        76..=79 => 11,
+        80..=81 => 33,
+        82..=84 => 22,
+        88 => 26,
+        _ => return None,
+    };
+    let unit = *payload.get(4 + forecast_offset)?;
+    let value = u32::from_be_bytes(
+        payload
+            .get(5 + forecast_offset..9 + forecast_offset)?
+            .try_into()
+            .ok()?,
+    );
+    let reference = Utc
+        .with_ymd_and_hms(
+            i32::from(reference_time.year),
+            u32::from(reference_time.month),
+            u32::from(reference_time.day),
+            u32::from(reference_time.hour),
+            u32::from(reference_time.minute),
+            u32::from(reference_time.second),
+        )
+        .single()?;
+    let value = i64::from(value);
+    let delta = match unit {
+        0 => TimeDelta::try_minutes(value),
+        1 => TimeDelta::try_hours(value),
+        2 => TimeDelta::try_days(value),
+        10 => TimeDelta::try_hours(value.checked_mul(3)?),
+        11 => TimeDelta::try_hours(value.checked_mul(6)?),
+        12 => TimeDelta::try_hours(value.checked_mul(12)?),
+        13 => TimeDelta::try_seconds(value),
+        _ => None,
+    }?;
+    reference
+        .checked_add_signed(delta)
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
 fn unique_variable_name(
     preferred: &str,
     time_label: &str,
@@ -704,12 +774,26 @@ impl DataSource for Grib2Source {
 
 #[cfg(test)]
 mod tests {
-    use super::{iso_datetime, normalize_grib2_longitude_order, normalized_grib_bytes};
+    use super::{
+        iso_datetime, normalize_grib2_longitude_order, normalized_grib_bytes, valid_time_label,
+    };
 
     #[test]
     fn formats_grib_reference_time_as_iso8601() {
         let value = grib::def::grib2::template::param_set::DateTime::new(2023, 7, 9, 4, 5, 6);
         assert_eq!(iso_datetime(&value), "2023-07-09T04:05:06Z");
+    }
+
+    #[test]
+    fn calculates_valid_time_for_aerosol_template() {
+        let reference = grib::def::grib2::template::param_set::DateTime::new(2026, 9, 7, 12, 0, 0);
+        let mut payload = vec![0_u8; 41];
+        payload[36] = 1; // hours
+        payload[37..41].copy_from_slice(&3_u32.to_be_bytes());
+        assert_eq!(
+            valid_time_label(48, &payload, &reference).as_deref(),
+            Some("2026-09-07T15:00:00Z")
+        );
     }
 
     #[test]

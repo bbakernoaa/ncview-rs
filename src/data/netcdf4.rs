@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use ndarray::Array2;
@@ -55,6 +55,41 @@ impl NetCdf4Source {
             path: path.to_path_buf(),
             reason: error.to_string(),
         })?;
+        Self::from_file(path, file)
+    }
+
+    /// Open a bounded complete object supplied by a remote adapter.
+    ///
+    /// This is intentionally only used for explicitly bounded fallback objects. Large remote
+    /// NetCDF-4 objects still require the source-backed OxiH5 reader seam.
+    pub(crate) fn open_bytes(path: &Path, bytes: &[u8]) -> Result<Self> {
+        validate_signature(path, bytes)?;
+        let file = NcFile::open_from_bytes(bytes).map_err(|error| NcvError::InvalidDataset {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+        Self::from_file(path, file)
+    }
+
+    /// Open a source-backed NetCDF-4 object. `metadata` must contain the
+    /// bounded HDF5 metadata window; payload and chunk-index reads are served
+    /// through OxiH5's random-access source.
+    pub(crate) fn open_source(
+        path: &Path,
+        metadata: Vec<u8>,
+        source: Arc<dyn oxih5::ByteSource>,
+    ) -> Result<Self> {
+        validate_signature(path, &metadata)?;
+        let file = NcFile::open_with_source(metadata, source).map_err(|error| {
+            NcvError::InvalidDataset {
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            }
+        })?;
+        Self::from_file(path, file)
+    }
+
+    fn from_file(path: &Path, file: NcFile) -> Result<Self> {
         let root = file
             .root_group()
             .map_err(|error| NcvError::InvalidDataset {
@@ -144,6 +179,28 @@ impl NetCdf4Source {
             coord_cache: Mutex::new(std::collections::HashMap::new()),
         })
     }
+}
+
+fn validate_signature(path: &Path, bytes: &[u8]) -> Result<()> {
+    if bytes.len() < HDF5_SIGNATURE.len() {
+        return Err(NcvError::UnsupportedFormat {
+            path: path.to_path_buf(),
+            reason: "object is too small to contain a NetCDF-4/HDF5 signature".into(),
+        });
+    }
+    if &bytes[0..3] == b"CDF" {
+        return Err(NcvError::UnsupportedFormat {
+            path: path.to_path_buf(),
+            reason: "NetCDF-3 is unsupported in v0.1; convert to NetCDF-4".into(),
+        });
+    }
+    if &bytes[..HDF5_SIGNATURE.len()] != HDF5_SIGNATURE {
+        return Err(NcvError::UnsupportedFormat {
+            path: path.to_path_buf(),
+            reason: "expected a NetCDF-4/HDF5 file".into(),
+        });
+    }
+    Ok(())
 }
 
 impl DataSource for NetCdf4Source {

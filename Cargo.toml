@@ -11,6 +11,11 @@ description = "Terminal-native NetCDF scientific data viewer"
 # upstream parser otherwise shifts datatype bodies by two bytes in common
 # libnetcdf-generated COARDS files.
 oxih5-format = { path = "vendor/oxih5-format" }
+# Local forks are kept at the reader boundary while the source-backed HDF5
+# API is developed. They currently preserve the upstream behavior; remote
+# NetCDF-4 must not be enabled until these forks consume ByteSource ranges.
+oxih5 = { path = "vendor/oxih5" }
+oxinetcdf = { path = "vendor/oxinetcdf" }
 
 [[bin]]
 name = "ncv"
@@ -18,6 +23,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64-simd = "0.8"
+chrono = { version = "0.4.45", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 color-eyre = "0.6"
 colorous = "1.0.16"
@@ -27,15 +33,22 @@ grib = { version = "0.18.4", default-features = false, features = ["jpeg2000-unp
 image = { version = "0.25.10", default-features = false }
 kiddo = { version = "6.3", default-features = false }
 ndarray = "0.17.2"
+object_store = { version = "=0.14.1", default-features = false, features = ["aws-base", "azure-base", "gcp-base", "reqwest", "ring"] }
+oxih5 = "0.1"
 oxinetcdf = "0.1"
 ab_glyph = "0.2"
+bytes = "=1.12.1"
 plotters = { version = "0.3.7", default-features = false, features = ["ab_glyph", "bitmap_backend", "line_series", "point_series"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm"] }
 rayon = "1.12"
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "stream"] }
+rustls = { version = "=0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = "1"
 thiserror = "2"
 tiny-skia = "0.11"
+tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
+url = { version = "=2.5.8", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -47,6 +60,10 @@ serde_json = "1"
 
 [[bench]]
 name = "interactive_paths"
+harness = false
+
+[[bench]]
+name = "remote_streaming"
 harness = false
 
 [profile.release]

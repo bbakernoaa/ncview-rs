@@ -355,6 +355,114 @@ pub fn gather_hyperslab_contiguous(
     Ok(output)
 }
 
+/// Gather a contiguous rectangular selection from a source-backed dataset.
+///
+/// Only the selected row runs are fetched. This is deliberately separate from
+/// [`gather_hyperslab_contiguous`], whose input contract requires the complete
+/// dataset buffer and is therefore unsuitable for large remote objects.
+pub fn gather_hyperslab_contiguous_with_reader<F>(
+    reader: &F,
+    data_address: u64,
+    dataset_dims: &[u64],
+    selection: &Hyperslab,
+    elem_size: usize,
+) -> Result<Vec<u8>, OxiH5Error>
+where
+    F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+{
+    let ndims = dataset_dims.len();
+    if selection.dims.len() != ndims {
+        return Err(OxiH5Error::Format(format!(
+            "gather_hyperslab_contiguous_with_reader: selection has {} dims but dataset has {}",
+            selection.dims.len(), ndims
+        )));
+    }
+    if selection.is_empty() {
+        return Ok(vec![]);
+    }
+    if selection
+        .dims
+        .iter()
+        .any(|dim| dim.stride != 1 || dim.block != 1)
+    {
+        return Err(OxiH5Error::NotImplemented(
+            "source-backed contiguous reads require unit-stride, unit-block selections".into(),
+        ));
+    }
+    for (d, (dim, &dataset_dim)) in selection.dims.iter().zip(dataset_dims).enumerate() {
+        let end = dim
+            .start
+            .checked_add(dim.count)
+            .ok_or_else(|| OxiH5Error::Format("contiguous selection range overflow".into()))?;
+        if end > dataset_dim {
+            return Err(OxiH5Error::Format(format!(
+                "contiguous selection dim {d} ends at {end}, dataset dimension is {dataset_dim}"
+            )));
+        }
+    }
+
+    let out_shape = selection.output_shape();
+    let out_elems = out_shape.iter().try_fold(1usize, |acc, &dim| {
+        acc.checked_mul(usize::try_from(dim).map_err(|_| {
+            OxiH5Error::Format("contiguous selection exceeds addressable memory".into())
+        })?)
+        .ok_or_else(|| OxiH5Error::Format("contiguous selection is too large".into()))
+    })?;
+    let output_bytes = out_elems
+        .checked_mul(elem_size)
+        .ok_or_else(|| OxiH5Error::Format("contiguous selection byte size overflow".into()))?;
+    let mut output = vec![0u8; output_bytes];
+
+    if ndims == 0 {
+        let bytes = reader(data_address, elem_size)?;
+        if bytes.len() != elem_size {
+            return Err(OxiH5Error::Format("source returned a short scalar read".into()));
+        }
+        output.copy_from_slice(&bytes);
+        return Ok(output);
+    }
+
+    let dataset_strides = row_major_strides(dataset_dims);
+    let row_len = usize::try_from(selection.dims[ndims - 1].count)
+        .map_err(|_| OxiH5Error::Format("contiguous row is too large".into()))?;
+    let row_bytes = row_len
+        .checked_mul(elem_size)
+        .ok_or_else(|| OxiH5Error::Format("contiguous row byte size overflow".into()))?;
+    let prefix_shape = &out_shape[..ndims - 1];
+    let prefix_count = prefix_shape.iter().product::<u64>();
+    let prefix_strides = row_major_strides(prefix_shape);
+
+    for prefix_flat in 0..prefix_count as usize {
+        let prefix_coords = flat_to_coords(prefix_flat, &prefix_strides, ndims - 1);
+        let mut src_flat = 0u64;
+        for d in 0..ndims - 1 {
+            let global = selection.dims[d].start + prefix_coords[d];
+            src_flat = src_flat
+                .checked_add(global * dataset_strides[d] as u64)
+                .ok_or_else(|| OxiH5Error::Format("contiguous source offset overflow".into()))?;
+        }
+        src_flat = src_flat
+            .checked_add(selection.dims[ndims - 1].start)
+            .ok_or_else(|| OxiH5Error::Format("contiguous source offset overflow".into()))?;
+        let src_byte_offset = src_flat
+            .checked_mul(elem_size as u64)
+            .and_then(|offset| data_address.checked_add(offset))
+            .ok_or_else(|| OxiH5Error::Format("contiguous source byte offset overflow".into()))?;
+        let row = reader(src_byte_offset, row_bytes)?;
+        if row.len() != row_bytes {
+            return Err(OxiH5Error::Format(format!(
+                "source returned {} bytes for contiguous row, expected {row_bytes}",
+                row.len()
+            )));
+        }
+        let dst_offset = prefix_flat
+            .checked_mul(row_bytes)
+            .ok_or_else(|| OxiH5Error::Format("contiguous destination offset overflow".into()))?;
+        output[dst_offset..dst_offset + row_bytes].copy_from_slice(&row);
+    }
+    Ok(output)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

@@ -1,7 +1,12 @@
 use std::{
     env, fs, io,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -15,17 +20,19 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use ncview_rs::{
     analysis::mapping::screen_to_source,
     app::{
-        AppState, AxisField, ColorScaleScope, Command, LimitField, Overlay, PlotSeries,
+        AppState, AxisField, ColorScaleScope, Command, Generation, LimitField, Overlay, PlotSeries,
         TimelinePoint,
     },
     data::{
         self, AxisRole, DatasetFormat, DatasetMetadata, Variable,
         grib2_manifest::{self, ManifestFormat},
-        slice::{Bounds, SliceRequest},
+        slice::{Bounds, Slice2D, SliceRequest},
+        virtual_dataset::VirtualDatasetManifest,
     },
     events::input,
     render::protocol::GraphicsRenderer,
-    ui::{dashboard, layout as dashboard_layout},
+    storage::operation::OperationPhase,
+    ui::{dashboard, layout as dashboard_layout, status},
 };
 
 #[derive(Debug, Parser)]
@@ -124,6 +131,12 @@ fn main() -> ExitCode {
         println!();
         return ExitCode::SUCCESS;
     }
+    for dataset in &cli.dataset {
+        if let Err(error) = ncview_rs::storage::location::SourceLocation::parse(dataset) {
+            eprintln!("ncv: {dataset}: {error}");
+            return ExitCode::from(2);
+        }
+    }
     if let Err(error) = run(&cli.dataset) {
         eprintln!("ncv: {error}");
         return ExitCode::from(2);
@@ -132,18 +145,15 @@ fn main() -> ExitCode {
 }
 
 fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let sources = datasets
-        .iter()
-        .map(|dataset| data::open(dataset).map_err(|error| format!("{dataset}: {error}")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut active_file = 0usize;
-    let initial_source = sources[active_file].as_ref();
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
         use std::io::Write;
         while let Ok(bytes) = stdout_rx.recv() {
+            // Do not retain this lock while waiting for the next frame:
+            // TerminalSession needs stdout to enter and leave the alternate
+            // screen, and holding it here deadlocks startup.
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
             let _ = handle.write_all(&bytes);
             let _ = handle.flush();
         }
@@ -178,10 +188,166 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     let mut graphics = GraphicsRenderer::probe();
     let mut chart_graphics = graphics.secondary();
+
+    let (load_tx, load_rx) = std::sync::mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    for (index, dataset) in datasets.iter().cloned().enumerate() {
+        let load_tx = load_tx.clone();
+        let worker_cancelled = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            if worker_cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            if load_tx
+                .send(SourceLoadMessage::Started(index, OperationPhase::Queued))
+                .is_err()
+            {
+                return;
+            }
+            let progress_tx = load_tx.clone();
+            let progress_cancelled = Arc::clone(&worker_cancelled);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                data::open_location_with_progress(&dataset, &|message| {
+                    if progress_cancelled.load(Ordering::Relaxed) {
+                        return false;
+                    }
+                    progress_tx
+                        .send(SourceLoadMessage::Progress(
+                            index,
+                            loading_phase(message),
+                            message.to_owned(),
+                        ))
+                        .is_ok()
+                })
+            }))
+            .map_err(|_| format!("{dataset}: loader panicked"))
+            .and_then(|result| result.map_err(|error| format!("{dataset}: {error}")));
+            let _ = load_tx.send(SourceLoadMessage::Finished(index, result));
+        });
+    }
+    drop(load_tx);
+
+    let mut pending_sources: Vec<Option<Arc<dyn data::DataSource>>> =
+        (0..datasets.len()).map(|_| None).collect();
+    let mut loaded = 0usize;
+    let mut finished = 0usize;
+    let mut load_errors = Vec::new();
+    let mut current_dataset = None;
+    let mut loading_status = None;
+    loop {
+        while let Ok(message) = load_rx.try_recv() {
+            match message {
+                SourceLoadMessage::Started(index, phase) => {
+                    current_dataset = datasets.get(index).cloned();
+                    loading_status = Some(phase_label(phase).to_owned());
+                }
+                SourceLoadMessage::Progress(index, phase, message) => {
+                    current_dataset = datasets.get(index).cloned();
+                    loading_status = Some(format!("{}: {message}", phase_label(phase)));
+                }
+                SourceLoadMessage::Finished(index, result) => match result {
+                    Ok(source) => {
+                        pending_sources[index] = Some(Arc::from(source));
+                        loaded += 1;
+                        finished += 1;
+                        loading_status = Some("metadata ready".to_owned());
+                    }
+                    Err(error) => {
+                        finished += 1;
+                        load_errors.push((index, error));
+                        loading_status =
+                            Some("input failed; continuing with other sources".to_owned());
+                    }
+                },
+            }
+        }
+        terminal.draw(|frame| {
+            status::render_loading(
+                frame,
+                frame.area(),
+                datasets,
+                loaded,
+                current_dataset.as_deref(),
+                loading_status.as_deref(),
+            );
+        })?;
+        if loaded > 0 {
+            break;
+        }
+        if finished == datasets.len() {
+            cancelled.store(true, Ordering::Relaxed);
+            let details = load_errors
+                .into_iter()
+                .map(|(index, error)| format!("{}: {error}", datasets[index]))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(details.into());
+        }
+        if event::poll(Duration::from_millis(50))?
+            && let event::Event::Key(key) = event::read()?
+            && matches!(key.code, crossterm::event::KeyCode::Char('q'))
+        {
+            cancelled.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+    }
+
+    let first_loaded = pending_sources
+        .iter()
+        .position(Option::is_some)
+        .ok_or("no dataset finished loading")?;
+    let mut sources = pending_sources
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| {
+            source.unwrap_or_else(|| placeholder_source(datasets[index].clone()))
+        })
+        .collect::<Vec<Arc<dyn data::DataSource>>>();
+    let source_refs = sources
+        .iter()
+        .map(|source| source.as_ref())
+        .collect::<Vec<_>>();
+    let mut manifest = VirtualDatasetManifest::from_sources(&source_refs);
+    let mut active_file = first_loaded;
+    let initial_source = sources[active_file].as_ref();
     let mut state = state_for_source(initial_source);
+    state.view.collection_diagnostics = manifest.diagnostics().to_vec();
+    state.view.collection_progress = Some((finished, datasets.len()));
+    state.view.collection_diagnostics.extend(
+        load_errors
+            .iter()
+            .map(|(index, error)| format!("{}: {error}", datasets[*index])),
+    );
+    if finished < datasets.len() {
+        state.view.collection_diagnostics.push(format!(
+            "opening {}/{} sources; remaining inputs continue in the background",
+            loaded,
+            datasets.len()
+        ));
+    }
+    let (slice_tx, slice_rx) = std::sync::mpsc::channel::<RemoteSliceMessage>();
+    let mut slice_cancelled = Arc::new(AtomicBool::new(false));
+    let (plot_tx, plot_rx) = std::sync::mpsc::channel::<RemotePlotMessage>();
+    let mut plot_cancelled = Arc::new(AtomicBool::new(false));
     select_initial_variable(&mut state, initial_source.metadata());
-    configure_timeline(&mut state, &sources, active_file);
-    load_selected(&mut state, &sources, active_file);
+    configure_timeline(&mut state, &sources, &manifest, active_file);
+    terminal.draw(|frame| {
+        status::render_loading(
+            frame,
+            frame.area(),
+            datasets,
+            loaded,
+            Some("preparing initial field"),
+            None,
+        );
+    })?;
+    load_selected(
+        &mut state,
+        &sources,
+        active_file,
+        &slice_tx,
+        &mut slice_cancelled,
+    );
     if state.view.slice.is_none() {
         state.view.status = format!(
             "opened {} variable(s); no plottable data",
@@ -194,18 +360,86 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_playback_tick = Instant::now();
 
     loop {
+        while let Ok(message) = load_rx.try_recv() {
+            match message {
+                SourceLoadMessage::Started(_, _) | SourceLoadMessage::Progress(_, _, _) => {}
+                SourceLoadMessage::Finished(index, result) => match result {
+                    Ok(source) => {
+                        sources[index] = Arc::from(source);
+                        loaded += 1;
+                        finished += 1;
+                        state.view.collection_progress = Some((finished, datasets.len()));
+                        manifest = VirtualDatasetManifest::from_sources(
+                            &sources
+                                .iter()
+                                .map(|source| source.as_ref())
+                                .collect::<Vec<_>>(),
+                        );
+                        state.variables = collection_variables(&sources);
+                        state.view.collection_diagnostics = manifest.diagnostics().to_vec();
+                        if loaded < datasets.len() {
+                            state.view.collection_diagnostics.push(format!(
+                                "opening {}/{} sources in background",
+                                loaded,
+                                datasets.len()
+                            ));
+                        }
+                        if finished == datasets.len() {
+                            state.view.status = format!(
+                                "opened {}/{} sources; collection loading complete",
+                                loaded,
+                                datasets.len()
+                            );
+                        }
+                        configure_timeline(&mut state, &sources, &manifest, active_file);
+                    }
+                    Err(error) => {
+                        finished += 1;
+                        state.view.collection_progress = Some((finished, datasets.len()));
+                        state
+                            .view
+                            .collection_diagnostics
+                            .push(format!("{}: {error}", datasets[index]));
+                        if finished == datasets.len() {
+                            state.view.status = format!(
+                                "opened {}/{} sources; collection loading complete",
+                                loaded,
+                                datasets.len()
+                            );
+                        }
+                    }
+                },
+            }
+            dirty = true;
+        }
+        while let Ok(message) = slice_rx.try_recv() {
+            apply_remote_slice(&mut state, &sources, message);
+            dirty = true;
+        }
+        while let Ok(message) = plot_rx.try_recv() {
+            apply_remote_plot(&mut state, message);
+            dirty = true;
+        }
         let source = sources[active_file].as_ref();
         if state.view.playing
             && last_playback_tick.elapsed()
                 >= Duration::from_secs_f32(1.0 / state.view.playback_speed)
         {
             state.reduce(Command::TickPlayback);
-            load_selected(&mut state, &sources, active_file);
+            load_selected(
+                &mut state,
+                &sources,
+                active_file,
+                &slice_tx,
+                &mut slice_cancelled,
+            );
             last_playback_tick = Instant::now();
             dirty = true;
         }
 
-        if dirty && last_render.elapsed() >= frame_budget {
+        if (dirty || graphics.has_pending_image() || chart_graphics.has_pending_image())
+            && last_render.elapsed() >= frame_budget
+        {
             terminal.draw(|frame| {
                 dashboard::render_with_search_and_image(
                     frame,
@@ -230,7 +464,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             playback_interval
                 .saturating_sub(elapsed)
                 .min(Duration::from_millis(33))
-        } else if dirty {
+        } else if dirty || graphics.has_pending_image() || chart_graphics.has_pending_image() {
             frame_budget.saturating_sub(last_render.elapsed())
         } else {
             Duration::from_millis(100)
@@ -269,20 +503,30 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 let grid_mode = state.view.grid_mode;
                 let show_land_borders = state.view.show_land_borders;
                 let playback_speed = state.view.playback_speed;
+                let plot_generation = state.view.plot_generation;
 
                 active_file = bounded_file_index(active_file, delta, sources.len());
                 let source = sources[active_file].as_ref();
                 state = state_for_source(source);
+                state.view.collection_diagnostics = manifest.diagnostics().to_vec();
+                state.view.collection_progress = Some((finished, datasets.len()));
                 state.view.palette = palette;
                 state.view.scale_mode = scale_mode;
                 state.view.color_scale_scope = color_scale_scope;
                 state.view.grid_mode = grid_mode;
                 state.view.show_land_borders = show_land_borders;
                 state.view.playback_speed = playback_speed;
+                state.view.plot_generation = plot_generation;
 
                 select_initial_variable(&mut state, source.metadata());
-                configure_timeline(&mut state, &sources, active_file);
-                load_selected(&mut state, &sources, active_file);
+                configure_timeline(&mut state, &sources, &manifest, active_file);
+                load_selected(
+                    &mut state,
+                    &sources,
+                    active_file,
+                    &slice_tx,
+                    &mut slice_cancelled,
+                );
                 state.view.status = format!(
                     "opened file {}/{}: {}",
                     active_file + 1,
@@ -384,9 +628,15 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             if reload || axis_submit {
                 if reconfigure_timeline {
-                    configure_timeline(&mut state, &sources, active_file);
+                    configure_timeline(&mut state, &sources, &manifest, active_file);
                 }
-                load_selected(&mut state, &sources, active_file);
+                load_selected(
+                    &mut state,
+                    &sources,
+                    active_file,
+                    &slice_tx,
+                    &mut slice_cancelled,
+                );
             }
             if refresh_time_series
                 && matches!(
@@ -394,17 +644,127 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     Some(Overlay::TimeSeries | Overlay::Plot)
                 )
             {
-                load_time_series(&mut state, &sources, active_file);
+                load_time_series(
+                    &mut state,
+                    &sources,
+                    active_file,
+                    &plot_tx,
+                    &mut plot_cancelled,
+                );
             }
             if let Some(point) = state.view.timeline.get(state.view.time_index) {
                 active_file = point.source_index;
             }
         }
     }
+    cancelled.store(true, Ordering::Release);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     session.restore()?;
     Ok(())
+}
+
+enum SourceLoadMessage {
+    Started(usize, OperationPhase),
+    Progress(usize, OperationPhase, String),
+    Finished(usize, Result<Box<dyn data::DataSource>, String>),
+}
+
+struct PlaceholderSource {
+    metadata: DatasetMetadata,
+}
+
+fn placeholder_source(path: String) -> Arc<dyn data::DataSource> {
+    Arc::new(PlaceholderSource {
+        metadata: DatasetMetadata {
+            path,
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        },
+    })
+}
+
+impl data::DataSource for PlaceholderSource {
+    fn metadata(&self) -> &DatasetMetadata {
+        &self.metadata
+    }
+
+    fn read_slice(&self, _request: &SliceRequest) -> ncview_rs::error::Result<Slice2D> {
+        Err(ncview_rs::error::NcvError::InvalidDataset {
+            path: PathBuf::from(&self.metadata.path),
+            reason: "source metadata is still loading".into(),
+        })
+    }
+}
+
+fn collection_variables(sources: &[Arc<dyn data::DataSource>]) -> Vec<Variable> {
+    let mut variables = Vec::new();
+    for source in sources {
+        for variable in source
+            .metadata()
+            .variables
+            .iter()
+            .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+        {
+            if !variables
+                .iter()
+                .any(|candidate: &Variable| candidate.name == variable.name)
+            {
+                variables.push(variable.clone());
+            }
+        }
+    }
+    variables
+}
+
+fn loading_phase(message: &str) -> OperationPhase {
+    let message = message.to_ascii_lowercase();
+    if message.contains("connect") || message.contains("remote object") {
+        OperationPhase::Head
+    } else if message.contains("index") || message.contains("discover") {
+        OperationPhase::Discovering
+    } else if message.contains("fetch") {
+        OperationPhase::Fetching
+    } else if message.contains("decod") {
+        OperationPhase::Decoding
+    } else {
+        OperationPhase::Queued
+    }
+}
+
+fn phase_label(phase: OperationPhase) -> &'static str {
+    match phase {
+        OperationPhase::Queued => "queued",
+        OperationPhase::Head => "opening object",
+        OperationPhase::Discovering => "discovering metadata",
+        OperationPhase::Fetching => "fetching data",
+        OperationPhase::Decoding => "decoding data",
+        OperationPhase::Rendering => "rendering",
+        OperationPhase::Complete => "complete",
+        OperationPhase::Failed => "failed",
+        OperationPhase::Cancelled => "cancelled",
+    }
+}
+
+struct RemoteSliceMessage {
+    generation: Generation,
+    source_index: usize,
+    variable: String,
+    full_view: bool,
+    result: Result<(Slice2D, Option<(f64, f64)>), String>,
+}
+
+struct RemotePlotMessage {
+    generation: Generation,
+    result: Result<RemotePlotResult, String>,
+}
+
+struct RemotePlotResult {
+    plot_series: Vec<PlotSeries>,
+    time_series: Vec<(f64, f64)>,
+    time_series_labels: Vec<String>,
+    status: String,
 }
 
 fn state_for_source(source: &dyn data::DataSource) -> AppState {
@@ -1011,7 +1371,8 @@ fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
 
 fn configure_timeline(
     state: &mut AppState,
-    sources: &[Box<dyn data::DataSource>],
+    sources: &[Arc<dyn data::DataSource>],
+    manifest: &VirtualDatasetManifest,
     active_file: usize,
 ) {
     state.view.timeline.clear();
@@ -1021,27 +1382,44 @@ fn configure_timeline(
         state.view.time_label = None;
         return;
     };
-    for (source_index, source) in sources.iter().enumerate() {
-        let Some(variable) = source
+    for frame in manifest
+        .frames_for_variable(variable_name)
+        .into_iter()
+        .flatten()
+    {
+        let source_index = frame.source_index;
+        let local_index = frame.local_index;
+        if manifest
+            .variable(variable_name)
+            .is_some_and(|variable| !variable.compatible && source_index != active_file)
+        {
+            // A source with incompatible schema or coordinates is isolated to
+            // its explicitly selected file. The manifest retains the reason
+            // so the UI can expose it without combining unsafe frames.
+            continue;
+        }
+        let Some(source) = sources.get(source_index) else {
+            continue;
+        };
+        if !source
             .metadata()
             .variables
             .iter()
-            .find(|variable| variable.name == variable_name)
-        else {
+            .any(|variable| variable.name == variable_name)
+        {
             continue;
-        };
-        let (time_length, _) = leading_lengths(source.metadata(), variable);
-        for local_index in 0..time_length.max(1) {
-            let global_index = state.view.timeline.len();
-            let label = source
-                .time_label_for_variable(variable_name, local_index)
-                .unwrap_or_else(|| format!("t={global_index}"));
-            state.view.timeline.push(TimelinePoint {
-                source_index,
-                local_index,
-                label,
-            });
         }
+        let global_index = state.view.timeline.len();
+        let label = frame
+            .label
+            .clone()
+            .or_else(|| source.time_label_for_variable(variable_name, local_index))
+            .unwrap_or_else(|| format!("t={global_index}"));
+        state.view.timeline.push(TimelinePoint {
+            source_index,
+            local_index,
+            label,
+        });
     }
     if state.view.timeline.is_empty()
         && let Some(source) = sources.get(active_file)
@@ -1069,7 +1447,19 @@ fn configure_timeline(
         .map(|point| point.label.clone());
 }
 
-fn load_selected(state: &mut AppState, sources: &[Box<dyn data::DataSource>], active_file: usize) {
+fn load_selected(
+    state: &mut AppState,
+    sources: &[Arc<dyn data::DataSource>],
+    active_file: usize,
+    slice_tx: &std::sync::mpsc::Sender<RemoteSliceMessage>,
+    slice_cancelled: &mut Arc<AtomicBool>,
+) {
+    // Every new navigation request supersedes the previous read. Local files
+    // can be just as expensive as remote objects (metadata-backed NetCDF
+    // hyperslabs and GRIB decoding both touch a lot of bytes), so all slice
+    // work stays behind the worker boundary. The generation check below keeps
+    // an older worker from replacing the last accepted image.
+    slice_cancelled.store(true, Ordering::Release);
     let Some(variable_name) = state.view.selected_variable.clone() else {
         return;
     };
@@ -1124,43 +1514,105 @@ fn load_selected(state: &mut AppState, sources: &[Box<dyn data::DataSource>], ac
         depth: state.view.depth_index,
         bounds,
     };
-    match source.read_slice_on_axes(
-        &request,
-        state.view.y_axis.as_deref(),
-        state.view.x_axis.as_deref(),
-        &fixed_axes,
-    ) {
-        Ok(slice) => {
-            let current_limits = slice_limits(&slice, state.view.scale_mode);
-            let full_limits = if bounds == full_bounds {
-                current_limits
-            } else if state.view.color_scale_scope == ColorScaleScope::GlobalView {
-                let full_request = SliceRequest {
-                    variable: variable_name.clone(),
-                    time: timeline_point.local_index,
-                    depth: state.view.depth_index,
-                    bounds: full_bounds,
-                };
+    let request_cancelled = Arc::new(AtomicBool::new(false));
+    *slice_cancelled = Arc::clone(&request_cancelled);
+    let generation = state.next_generation();
+    state.view.loading = ncview_rs::app::LoadingState::Loading;
+    state.view.status = format!("{variable_name}: loading slice…");
+    let source = Arc::clone(source);
+    let tx = slice_tx.clone();
+    let variable = variable_name.clone();
+    let row_axis = state.view.y_axis.clone();
+    let col_axis = state.view.x_axis.clone();
+    let fixed_axes_for_read = fixed_axes;
+    let full_request = SliceRequest {
+        variable: variable_name.clone(),
+        time: timeline_point.local_index,
+        depth: state.view.depth_index,
+        bounds: full_bounds,
+    };
+    let full_view = bounds == full_bounds;
+    let global_view = state.view.color_scale_scope == ColorScaleScope::GlobalView;
+    let scale_mode = state.view.scale_mode;
+    let source_index = timeline_point.source_index;
+    std::thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            if request_cancelled.load(Ordering::Acquire) {
+                return Err("slice superseded before read".to_owned());
+            }
+            let slice = source
+                .read_slice_on_axes_cancellable(
+                    &request,
+                    row_axis.as_deref(),
+                    col_axis.as_deref(),
+                    &fixed_axes_for_read,
+                    Arc::clone(&request_cancelled),
+                )
+                .map_err(|error| error.to_string())?;
+            if request_cancelled.load(Ordering::Acquire) {
+                return Err("slice superseded".to_owned());
+            }
+            let full_limits = if !full_view && global_view {
+                if request_cancelled.load(Ordering::Acquire) {
+                    return Err("slice superseded before limit read".to_owned());
+                }
                 source
-                    .read_slice_on_axes(
+                    .read_slice_on_axes_cancellable(
                         &full_request,
-                        state.view.y_axis.as_deref(),
-                        state.view.x_axis.as_deref(),
-                        &fixed_axes,
+                        row_axis.as_deref(),
+                        col_axis.as_deref(),
+                        &fixed_axes_for_read,
+                        Arc::clone(&request_cancelled),
                     )
                     .ok()
-                    .and_then(|full_slice| slice_limits(&full_slice, state.view.scale_mode))
+                    .and_then(|full_slice| slice_limits(&full_slice, scale_mode))
             } else {
                 None
             };
-            if bounds == full_bounds {
+            Ok::<_, String>((slice, full_limits))
+        }))
+        .map_err(|_| format!("{variable}: slice worker panicked"))
+        .and_then(|result| result);
+        let _ = tx.send(RemoteSliceMessage {
+            generation,
+            source_index,
+            variable,
+            full_view,
+            result,
+        });
+    });
+}
+
+fn apply_remote_slice(
+    state: &mut AppState,
+    sources: &[Arc<dyn data::DataSource>],
+    message: RemoteSliceMessage,
+) {
+    if message.generation != state.view.generation {
+        return;
+    }
+    let Some(source) = sources.get(message.source_index) else {
+        return;
+    };
+    match message.result {
+        Ok((slice, full_limits)) => {
+            if slice.memory_bytes() > state.view.decoded_limit {
+                state.view.loading = ncview_rs::app::LoadingState::Error;
+                state.view.status = format!(
+                    "{}: decoded slice exceeds working-set limit ({} bytes)",
+                    message.variable, state.view.decoded_limit
+                );
+                return;
+            }
+            let current_limits = slice_limits(&slice, state.view.scale_mode);
+            if message.full_view {
                 state.view.global_limits = current_limits;
             } else if state.view.color_scale_scope == ColorScaleScope::GlobalView
                 && let Some(full_limits) = full_limits
             {
                 state.view.global_limits = Some(full_limits);
             }
-            if !state.view.limits_manual {
+            if !state.view.limits_manual && state.view.limits.is_none() {
                 state.view.limits = match state.view.color_scale_scope {
                     ColorScaleScope::CurrentView => current_limits,
                     ColorScaleScope::GlobalView => {
@@ -1168,7 +1620,9 @@ fn load_selected(state: &mut AppState, sources: &[Box<dyn data::DataSource>], ac
                     }
                 };
             }
-            state.view.slice = Some(slice);
+            if !state.accept_slice(message.generation, slice) {
+                return;
+            }
             if let Some(point) = state.view.hover_point.as_mut()
                 && let Some(value) = state
                     .view
@@ -1178,7 +1632,6 @@ fn load_selected(state: &mut AppState, sources: &[Box<dyn data::DataSource>], ac
             {
                 point.value = Some(value);
             }
-            state.view.loading = ncview_rs::app::LoadingState::Ready;
             let time_text = state
                 .view
                 .time_label
@@ -1188,14 +1641,37 @@ fn load_selected(state: &mut AppState, sources: &[Box<dyn data::DataSource>], ac
                 .view
                 .level_label
                 .as_deref()
-                .map(|label| format!("  level={label}"))
-                .unwrap_or_default();
-            state.view.status = format!("{variable_name}  time={time_text}{level_text}  ready");
+                .map_or_else(String::new, |label| format!("  level={label}"));
+            state.view.status =
+                format!("{}  time={time_text}{level_text}  ready", message.variable);
         }
         Err(error) => {
-            state.view.slice = None;
+            // Keep the last valid slice visible while the remote request fails.
             state.view.loading = ncview_rs::app::LoadingState::Error;
-            state.view.status = format!("{variable_name}: {error}");
+            state.view.status = format!("{}: {error}", message.variable);
+            let _ = source;
+        }
+    }
+}
+
+fn apply_remote_plot(state: &mut AppState, message: RemotePlotMessage) {
+    if message.generation != state.view.plot_generation {
+        return;
+    }
+    match message.result {
+        Ok(result) => {
+            let _ = state.accept_plot(
+                message.generation,
+                result.plot_series,
+                result.time_series,
+                result.time_series_labels,
+                result.status,
+            );
+        }
+        Err(error) => {
+            // Keep the previous valid plot visible while a replacement is
+            // cancelled or fails, matching the map's last-valid-frame policy.
+            state.view.status = format!("plot: {error}");
         }
     }
 }
@@ -1213,8 +1689,70 @@ fn slice_limits(
 
 fn load_time_series(
     state: &mut AppState,
-    sources: &[Box<dyn data::DataSource>],
+    sources: &[Arc<dyn data::DataSource>],
     active_file: usize,
+    plot_tx: &std::sync::mpsc::Sender<RemotePlotMessage>,
+    plot_cancelled: &mut Arc<AtomicBool>,
+) {
+    plot_cancelled.store(true, Ordering::Release);
+    let request_cancelled = Arc::new(AtomicBool::new(false));
+    *plot_cancelled = Arc::clone(&request_cancelled);
+    let generation = state.next_plot_generation();
+    state.view.status = "loading plot data…".into();
+    let mut working_state = plot_worker_state(state);
+    let sources = sources.to_vec();
+    let tx = plot_tx.clone();
+    std::thread::spawn(move || {
+        if request_cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            compute_time_series(
+                &mut working_state,
+                &sources,
+                active_file,
+                Some(&request_cancelled),
+            );
+            RemotePlotResult {
+                plot_series: working_state.view.plot_series,
+                time_series: working_state.view.time_series,
+                time_series_labels: working_state.view.time_series_labels,
+                status: working_state.view.status,
+            }
+        }))
+        .map_err(|_| "plot worker panicked".to_owned())
+        .and_then(|result| {
+            if request_cancelled.load(Ordering::Acquire) {
+                Err("plot request superseded".to_owned())
+            } else {
+                Ok(result)
+            }
+        });
+        let _ = tx.send(RemotePlotMessage { generation, result });
+    });
+}
+
+fn plot_worker_state(state: &AppState) -> AppState {
+    let mut worker = AppState::default();
+    worker.view.selected_variable = state.view.selected_variable.clone();
+    worker.view.selected_point = state.view.selected_point;
+    worker.view.selected_points = state.view.selected_points.clone();
+    worker.view.plot_draft = state.view.plot_draft;
+    worker.view.timeline = state.view.timeline.clone();
+    worker.view.depth_index = state.view.depth_index;
+    worker.view.time_index = state.view.time_index;
+    worker.view.level_label = state.view.level_label.clone();
+    worker.view.zoom_bounds = state.view.zoom_bounds;
+    worker.view.x_axis = state.view.x_axis.clone();
+    worker.view.y_axis = state.view.y_axis.clone();
+    worker
+}
+
+fn compute_time_series(
+    state: &mut AppState,
+    sources: &[Arc<dyn data::DataSource>],
+    active_file: usize,
+    cancelled: Option<&AtomicBool>,
 ) {
     state.view.time_series.clear();
     state.view.time_series_labels.clear();
@@ -1225,7 +1763,7 @@ fn load_time_series(
         state.view.selected_points.clone()
     };
     if selected_points.is_empty() {
-        load_domain_summary(state, sources);
+        load_domain_summary(state, sources, cancelled);
         return;
     }
     if matches!(
@@ -1234,7 +1772,7 @@ fn load_time_series(
             | ncview_rs::app::PlotXAxis::Latitude
             | ncview_rs::app::PlotXAxis::Dimension(_)
     ) {
-        load_cross_section(state, sources, &selected_points);
+        load_cross_section(state, sources, &selected_points, cancelled);
         return;
     }
     let Some(variable_name) = state.view.selected_variable.clone() else {
@@ -1253,6 +1791,9 @@ fn load_time_series(
         let mut labels = Vec::with_capacity(timeline.len());
         let mut finite_samples = 0;
         for (time_index, point) in timeline.iter().enumerate() {
+            if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
+                return;
+            }
             let Some(source) = sources.get(point.source_index) else {
                 data.push((time_index as f64, f64::NAN));
                 labels.push(point.label.clone());
@@ -1334,8 +1875,9 @@ fn load_time_series(
 
 fn load_cross_section(
     state: &mut AppState,
-    sources: &[Box<dyn data::DataSource>],
+    sources: &[Arc<dyn data::DataSource>],
     selected_points: &[(usize, usize)],
+    cancelled: Option<&AtomicBool>,
 ) {
     let Some(variable_name) = state.view.selected_variable.clone() else {
         return;
@@ -1395,6 +1937,9 @@ fn load_cross_section(
         .unwrap_or_else(|| format!("depth={depth}"));
 
     for (point_number, &(row, col)) in selected_points.iter().enumerate() {
+        if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
+            return;
+        }
         let x_is_grib = source.metadata().format == DatasetFormat::Grib2;
         let latitude_dimension = plot_dimension_name(
             source.metadata(),
@@ -1493,6 +2038,9 @@ fn load_cross_section(
         };
         let mut data = Vec::with_capacity(count);
         for offset in 0..count {
+            if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
+                return;
+            }
             let (sample_row, sample_col) = if x_is_grib {
                 if x_on_row {
                     (source_bounds.row_start + offset, col)
@@ -1643,7 +2191,11 @@ fn point_label(
     }
 }
 
-fn load_domain_summary(state: &mut AppState, sources: &[Box<dyn data::DataSource>]) {
+fn load_domain_summary(
+    state: &mut AppState,
+    sources: &[Arc<dyn data::DataSource>],
+    cancelled: Option<&AtomicBool>,
+) {
     let Some(variable_name) = state.view.selected_variable.clone() else {
         return;
     };
@@ -1657,6 +2209,9 @@ fn load_domain_summary(state: &mut AppState, sources: &[Box<dyn data::DataSource
     let mut finite_samples = 0;
 
     for point in &timeline {
+        if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
+            return;
+        }
         let Some(source) = sources.get(point.source_index) else {
             continue;
         };

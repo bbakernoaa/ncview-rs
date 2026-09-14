@@ -227,6 +227,17 @@ pub fn render_with_search_and_image(
     } else {
         view.status.clone()
     };
+    let status =
+        if let Some((finished, total)) = view.collection_progress.filter(|(_, total)| *total > 1) {
+            format!("{status}  |  sources {finished}/{total}")
+        } else {
+            status
+        };
+    let status = if let Some(diagnostic) = view.collection_diagnostics.first() {
+        format!("{status}  |  collection: {diagnostic}")
+    } else {
+        status
+    };
     status::render(frame, areas.status, &status);
     popup::render(frame, area, view, metadata, variable_query, chart_graphics);
     if view.help_visible {

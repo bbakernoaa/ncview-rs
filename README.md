@@ -127,6 +127,22 @@ set; `.grib`, `.grib2`, `.grb`, `.grb2`, and GRIB-magic files are detected autom
 files are never modified. NetCDF-3 and arbitrary HDF5 files are rejected before terminal entry
 with an actionable diagnostic.
 
+### Remote object access
+
+Explicit S3, GCS, and Azure Blob locations are accepted with the forms
+`s3://bucket/key`, `gs://bucket/key`, `az://container/key`, and
+`abfs[s]://container@account.endpoint/key`. Provider credentials are read from the ambient
+provider configuration; secrets are not accepted in arguments or persisted. The terminal starts
+before remote opening completes, and remote GRIB2 objects use bounded `HEAD`/range requests plus
+an optional colocated `.idx` sidecar. A large unindexed GRIB2 object is refused rather than
+silently downloaded in full.
+
+Remote NetCDF-4 objects up to 64 MiB use a bounded fallback through the existing OxiH5/OxiNetCDF
+byte reader. Larger objects use a bounded metadata window and source-backed HDF5 range reads for
+chunk indexes, compressed chunks, masks, coordinates, and selected contiguous rows; the complete
+object is never materialized. Metadata windows grow only to 64 MiB, and unsupported HDF5 layouts
+or non-unit-stride contiguous hyperslabs fail explicitly with an actionable diagnostic.
+
 GRIB2 `.idx` sidecars can also be turned into deterministic Kerchunk-compatible reference JSON:
 
 ```bash

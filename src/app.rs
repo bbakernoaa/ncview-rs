@@ -8,6 +8,8 @@ use crate::render::colors::{Palette, discover_colormaps};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(pub u64);
 
+pub const DEFAULT_DECODED_WORKING_SET_LIMIT: usize = 512 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadingState {
     Idle,
@@ -50,6 +52,7 @@ pub enum Command {
     ExecutePaletteChoice(usize),
     InputChar(char),
     DeleteInput,
+    ApplyLimitDraft,
     NextLimitField,
     FocusLimitField(LimitField),
     FocusAxisField(AxisField),
@@ -130,8 +133,16 @@ pub enum Effect {
 #[derive(Debug, Clone)]
 pub struct ViewModel {
     pub generation: Generation,
+    /// Independent generation for plot/time-series work. Plot reads may run
+    /// concurrently with map-slice reads and must not invalidate a slice that
+    /// is still being loaded.
+    pub plot_generation: Generation,
     pub loading: LoadingState,
     pub slice: Option<Slice2D>,
+    pub decoded_bytes: usize,
+    pub decoded_limit: usize,
+    pub collection_diagnostics: Vec<String>,
+    pub collection_progress: Option<(usize, usize)>,
     pub status: String,
     pub selected_variable: Option<String>,
     pub time_index: usize,
@@ -346,8 +357,13 @@ impl Default for ViewModel {
     fn default() -> Self {
         Self {
             generation: Generation(0),
+            plot_generation: Generation(0),
             loading: LoadingState::Idle,
             slice: None,
+            decoded_bytes: 0,
+            decoded_limit: DEFAULT_DECODED_WORKING_SET_LIMIT,
+            collection_diagnostics: Vec::new(),
+            collection_progress: None,
             status: String::new(),
             selected_variable: None,
             time_index: 0,
@@ -399,7 +415,7 @@ impl Default for ViewModel {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AppState {
     pub view: ViewModel,
     pub pending: VecDeque<Effect>,
@@ -413,13 +429,41 @@ impl AppState {
         self.view.generation
     }
 
-    pub fn accept_slice(&mut self, generation: Generation, slice: Slice2D) -> bool {
-        if generation != self.view.generation {
+    pub fn next_plot_generation(&mut self) -> Generation {
+        self.view.plot_generation = Generation(self.view.plot_generation.0.saturating_add(1));
+        self.view.plot_generation
+    }
+
+    pub fn accept_plot(
+        &mut self,
+        generation: Generation,
+        plot_series: Vec<PlotSeries>,
+        time_series: Vec<(f64, f64)>,
+        time_series_labels: Vec<String>,
+        status: String,
+    ) -> bool {
+        if generation != self.view.plot_generation {
             return false;
         }
-        self.view.slice = Some(slice);
+        self.view.plot_series = plot_series;
+        self.view.time_series = time_series;
+        self.view.time_series_labels = time_series_labels;
+        self.view.status = status;
+        true
+    }
+
+    pub fn accept_slice(&mut self, generation: Generation, slice: Slice2D) -> bool {
+        if generation != self.view.generation || slice.memory_bytes() > self.view.decoded_limit {
+            return false;
+        }
+        self.set_slice(slice);
         self.view.loading = LoadingState::Ready;
         true
+    }
+
+    pub fn set_slice(&mut self, slice: Slice2D) {
+        self.view.decoded_bytes = slice.memory_bytes();
+        self.view.slice = Some(slice);
     }
 
     pub fn reduce(&mut self, command: Command) -> Option<Effect> {
@@ -1022,6 +1066,22 @@ impl AppState {
                 }
                 None
             }
+            Command::ApplyLimitDraft => {
+                if !matches!(self.view.overlay, Some(Overlay::Limits | Overlay::Filter)) {
+                    return None;
+                }
+                let draft = self.view.limit_draft.clone()?;
+                let min = draft.min.parse::<f64>();
+                let max = draft.max.parse::<f64>();
+                match (min, max) {
+                    (Ok(min), Ok(max)) if self.view.overlay == Some(Overlay::Filter) => {
+                        self.apply_filter(min, max)
+                    }
+                    (Ok(min), Ok(max)) => self.apply_manual_limits(min, max),
+                    _ => self.view.status = "limits must be valid numbers".into(),
+                }
+                None
+            }
             Command::ActivatePoint => {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     return self.reduce(Command::ExecuteCommandPalette);
@@ -1036,32 +1096,21 @@ impl AppState {
                 if matches!(self.view.overlay, Some(Overlay::Plot)) {
                     return None;
                 }
-                if let Some(draft) = self.view.limit_draft.as_ref()
-                    && matches!(self.view.overlay, Some(Overlay::Limits | Overlay::Filter))
-                {
-                    let min = draft.min.parse::<f64>();
-                    let max = draft.max.parse::<f64>();
-                    match (min, max) {
-                        (Ok(min), Ok(max)) if self.view.overlay == Some(Overlay::Filter) => {
-                            self.apply_filter(min, max)
-                        }
-                        (Ok(min), Ok(max)) => self.apply_manual_limits(min, max),
-                        _ => self.view.status = "limits must be valid numbers".into(),
-                    }
-                } else {
-                    if self.view.selected_point.is_none()
-                        && let Some(point) = self.view.hover_point.as_ref()
-                    {
-                        self.view.selected_point = Some((point.row, point.col));
-                        self.view.selected_points = vec![(point.row, point.col)];
-                        self.view.selected_coordinates = PointCoordinates {
-                            latitude: point.latitude,
-                            longitude: point.longitude,
-                        };
-                    }
-                    self.view.plot_draft = PlotDraft::default();
-                    self.view.overlay = Some(Overlay::Plot);
+                if matches!(self.view.overlay, Some(Overlay::Limits | Overlay::Filter)) {
+                    return self.reduce(Command::ApplyLimitDraft);
                 }
+                if self.view.selected_point.is_none()
+                    && let Some(point) = self.view.hover_point.as_ref()
+                {
+                    self.view.selected_point = Some((point.row, point.col));
+                    self.view.selected_points = vec![(point.row, point.col)];
+                    self.view.selected_coordinates = PointCoordinates {
+                        latitude: point.latitude,
+                        longitude: point.longitude,
+                    };
+                }
+                self.view.plot_draft = PlotDraft::default();
+                self.view.overlay = Some(Overlay::Plot);
                 None
             }
             Command::Pointer { x, y } => {
@@ -1193,7 +1242,7 @@ impl AppState {
                     self.view.full_bounds = None;
                     if swap && let Some(slice) = self.view.slice.take() {
                         match slice.permuted_axes() {
-                            Ok(permuted) => self.view.slice = Some(permuted),
+                            Ok(permuted) => self.set_slice(permuted),
                             Err(error) => self.view.status = error.to_string(),
                         }
                     }
@@ -1216,6 +1265,12 @@ impl AppState {
                     ColorScaleScope::CurrentView => ColorScaleScope::GlobalView,
                     ColorScaleScope::GlobalView => ColorScaleScope::CurrentView,
                 };
+                if !self.view.limits_manual {
+                    // Changing the scope is an explicit request for a new
+                    // automatic range. Once recomputed, time navigation keeps
+                    // that range stable until another explicit limits action.
+                    self.view.limits = None;
+                }
                 None
             }
             Command::ToggleScale => {

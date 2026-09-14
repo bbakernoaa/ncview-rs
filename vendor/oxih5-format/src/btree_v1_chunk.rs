@@ -53,6 +53,92 @@ pub fn parse(
     Ok(records)
 }
 
+/// Source-backed counterpart to [`parse`]. B-tree v1 nodes have no explicit
+/// node-size field, so each node is fetched with a bounded probe large enough
+/// for the supported HDF5 chunk-tree layout and parsed locally.
+pub fn parse_with_reader<F>(
+    reader: &F,
+    file_len: u64,
+    btree_address: u64,
+    ndims: usize,
+) -> Result<Vec<ChunkRecord>, OxiH5Error>
+where
+    F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+{
+    let mut records = Vec::new();
+    collect_with_reader(reader, file_len, btree_address, ndims, &mut records, 0)?;
+    Ok(records)
+}
+
+fn collect_with_reader<F>(
+    reader: &F,
+    file_len: u64,
+    node_address: u64,
+    ndims: usize,
+    out: &mut Vec<ChunkRecord>,
+    depth: usize,
+) -> Result<(), OxiH5Error>
+where
+    F: Fn(u64, usize) -> Result<Vec<u8>, OxiH5Error>,
+{
+    if node_address == UNDEF {
+        return Ok(());
+    }
+    if depth > MAX_DEPTH {
+        return Err(OxiH5Error::Format(
+            "chunk B-tree v1 depth exceeds 64 (possible cycle)".into(),
+        ));
+    }
+    const NODE_PROBE: u64 = 64 * 1024;
+    let length = NODE_PROBE.min(file_len.saturating_sub(node_address));
+    let node = reader(
+        node_address,
+        usize::try_from(length)
+            .map_err(|_| OxiH5Error::Format("chunk B-tree node is too large".into()))?,
+    )?;
+    if node.len() < 24 || &node[..4] != b"TREE" {
+        return Err(OxiH5Error::Format(format!(
+            "chunk B-tree: invalid node at {node_address:#x}"
+        )));
+    }
+    if node[4] != 1 {
+        return Err(OxiH5Error::Format(format!(
+            "chunk B-tree: expected node type 1 (raw chunks), got {}",
+            node[4]
+        )));
+    }
+    let level = node[5];
+    let entries_used = u16::from_le_bytes([node[6], node[7]]) as usize;
+    let key_size = 8 + (ndims + 1) * 8;
+    let entry_size = key_size + 8;
+    let needed = 24usize
+        .checked_add(entries_used.checked_mul(entry_size).ok_or_else(|| {
+            OxiH5Error::Format("chunk B-tree node entry range overflow".into())
+        })?)
+        .and_then(|end| end.checked_add(key_size))
+        .ok_or_else(|| OxiH5Error::Format("chunk B-tree node range overflow".into()))?;
+    if needed > node.len() {
+        return Err(OxiH5Error::Format(format!(
+            "chunk B-tree node at {node_address:#x}: truncated (need {needed}, have {})",
+            node.len()
+        )));
+    }
+    for i in 0..entries_used {
+        let key_off = 24 + i * entry_size;
+        let child_off = key_off + key_size;
+        let child_addr = u64::from_le_bytes(node[child_off..child_off + 8].try_into().unwrap());
+        if level == 0 {
+            let record = parse_chunk_key(&node, key_off, ndims, child_addr)?;
+            if record.address != UNDEF {
+                out.push(record);
+            }
+        } else {
+            collect_with_reader(reader, file_len, child_addr, ndims, out, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
 fn collect(
     file_data: &[u8],
     node_address: u64,
