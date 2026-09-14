@@ -30,10 +30,10 @@ pub struct ParsedLinkInfo {
 ///  1   1   flags
 ///            bit 0: creation-order tracked
 ///            bit 1: creation-order indexed
-/// [2   8]  creation-order value (only if bit 0 set)
-/// [*   soo] B-tree v2 by creation order (only if bit 1 set)
+/// [2   8]  maximum creation index (only if bit 0 set)
+/// [*   soo] fractal heap address (u64::MAX = absent)
 ///  *   soo  B-tree v2 by name (u64::MAX = absent)
-///  *   soo  fractal heap address (u64::MAX = absent)
+///  *   soo  B-tree v2 by creation order (only if bit 1 set)
 /// ```
 pub fn parse_link_info(body: &[u8], ctx: &ParseContext) -> Result<ParsedLinkInfo, OxiH5Error> {
     if body.len() < 2 {
@@ -49,25 +49,13 @@ pub fn parse_link_info(body: &[u8], ctx: &ParseContext) -> Result<ParsedLinkInfo
 
     let mut pos = 2usize;
 
-    // Optional 8-byte creation order value (present if bit 0 is set).
+    // Optional maximum creation index (present if bit 0 is set).
     if creation_order_tracked {
         pos += 8;
     }
 
-    // Optional B-tree v2 address indexed by creation order (present if bit 1 is set).
-    let creation_order_index_address = if creation_order_indexed {
-        let addr = ctx.read_offset(body, pos)?;
-        pos += ctx.size_of_offsets as usize;
-        if addr == u64::MAX {
-            None
-        } else {
-            Some(addr)
-        }
-    } else {
-        None
-    };
-
-    // Fractal heap address is always present (comes before name index per HDF5 spec §IV.A.2.a).
+    // The fractal heap and name index addresses precede the optional creation
+    // order index (HDF5 File Format Specification, IV.A.3.c).
     let heap_raw = ctx.read_offset(body, pos)?;
     pos += ctx.size_of_offsets as usize;
     let fractal_heap_address = if heap_raw == u64::MAX {
@@ -78,10 +66,23 @@ pub fn parse_link_info(body: &[u8], ctx: &ParseContext) -> Result<ParsedLinkInfo
 
     // B-tree v2 index by name is always present (follows the fractal heap address).
     let name_index_raw = ctx.read_offset(body, pos)?;
+    pos += ctx.size_of_offsets as usize;
     let name_index_address = if name_index_raw == u64::MAX {
         None
     } else {
         Some(name_index_raw)
+    };
+
+    // Optional B-tree v2 address indexed by creation order (present if bit 1 is set).
+    let creation_order_index_address = if creation_order_indexed {
+        let addr = ctx.read_offset(body, pos)?;
+        if addr == u64::MAX {
+            None
+        } else {
+            Some(addr)
+        }
+    } else {
+        None
     };
 
     Ok(ParsedLinkInfo {
@@ -372,7 +373,7 @@ mod tests {
         let ctx = ParseContext::default_v0();
         // flags = 0: no creation-order tracking, no creation-order index
         // body: version(1) + flags(1) + heap_addr(8) + name_index_addr(8) = 18 bytes
-        // (HDF5 spec §IV.A.2.a: fractal heap address comes before name-order btree address)
+        // (HDF5 spec §IV.A.3.c: fractal heap address comes before name-order btree address)
         let mut body = vec![0u8, 0u8]; // version, flags
         let heap_addr: u64 = 0x3000;
         let name_index: u64 = 0x2000;
@@ -390,8 +391,8 @@ mod tests {
     fn test_parse_link_info_with_creation_order() {
         let ctx = ParseContext::default_v0();
         // flags = 0b01: creation order tracked (but not indexed)
-        // body: version(1) + flags(1) + creation_order_val(8) + heap(8) + name_index(8)
-        // (HDF5 spec §IV.A.2.a: fractal heap address comes before name-order btree address)
+        // body: version(1) + flags(1) + maximum_creation_index(8) + heap(8) + name_index(8)
+        // (HDF5 spec §IV.A.3.c: fractal heap address comes before name-order btree address)
         let mut body = vec![0u8, 0b01u8]; // version=0, flags=0x01
         body.extend_from_slice(&42u64.to_le_bytes()); // creation order value
         let heap_addr: u64 = 0x5000;
@@ -404,6 +405,24 @@ mod tests {
         assert!(info.creation_order_index_address.is_none()); // bit 1 not set
         assert_eq!(info.fractal_heap_address, Some(0x5000));
         assert_eq!(info.name_index_address, Some(0x4000));
+    }
+
+    #[test]
+    fn test_parse_link_info_with_creation_order_index() {
+        let ctx = ParseContext::default_v0();
+        // flags = 0b11: track and index creation order. The creation-order
+        // index follows the heap and name index addresses.
+        let mut body = vec![0u8, 0b11u8];
+        body.extend_from_slice(&19u64.to_le_bytes()); // maximum creation index
+        body.extend_from_slice(&0x44a2u64.to_le_bytes()); // fractal heap
+        body.extend_from_slice(&0x4534u64.to_le_bytes()); // name index
+        body.extend_from_slice(&0x455au64.to_le_bytes()); // creation-order index
+
+        let info = parse_link_info(&body, &ctx).unwrap();
+        assert!(info.creation_order_tracked);
+        assert_eq!(info.fractal_heap_address, Some(0x44a2));
+        assert_eq!(info.name_index_address, Some(0x4534));
+        assert_eq!(info.creation_order_index_address, Some(0x455a));
     }
 
     #[test]

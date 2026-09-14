@@ -140,6 +140,7 @@ pub fn render_with_search_and_image(
         view.selected_point,
         view.drag,
         view.zoom_bounds.is_some(),
+        view.generation.0,
         graphics,
     );
     let selected_metadata = metadata

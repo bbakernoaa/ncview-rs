@@ -305,31 +305,46 @@ impl<'a> FractalHeap<'a> {
             return Err(OxiH5Error::NotFound("fractal heap: heap is empty".into()));
         }
 
-        let num_direct_rows = self.num_direct_rows();
+        // The root block is self-describing.  `current_rows` is the number of
+        // rows in an indirect root, not a reliable direct/indirect discriminator:
+        // a one-row indirect root is common in dense groups.
+        let root_base = usize::try_from(self.root_block_address).map_err(|_| {
+            OxiH5Error::Corrupted("FractalHeap: root block address out of range".into())
+        })?;
+        let root_signature = self
+            .file_data
+            .get(root_base..root_base.saturating_add(4))
+            .ok_or_else(|| OxiH5Error::Format("FractalHeap: truncated root block".into()))?;
 
-        if self.current_rows == 0 || self.current_rows <= num_direct_rows {
-            // Root is a single direct block.  When the heap declares I/O filters,
-            // that root direct block is stored filtered (e.g. deflate) on disk.
-            if let Some(filt) = &self.io_filter {
-                return self.read_from_filtered_root_block(filt, heap_offset, object_size);
+        match root_signature {
+            b"FHDB" => {
+                // When the heap declares I/O filters, the root direct block is
+                // stored filtered (e.g. deflate) on disk.
+                if let Some(filt) = &self.io_filter {
+                    self.read_from_filtered_root_block(filt, heap_offset, object_size)
+                } else {
+                    self.read_from_direct_block(self.root_block_address, heap_offset, object_size)
+                }
             }
-            self.read_from_direct_block(self.root_block_address, heap_offset, object_size)
-        } else {
-            // Root is an indirect block.  Filtered indirect heaps store a
-            // per-block filtered size in each indirect-block entry, which is not
-            // yet decoded.
-            if self.io_filter.is_some() {
-                return Err(OxiH5Error::NotImplemented(
-                    "FractalHeap: I/O filters with an indirect root block are not yet supported"
-                        .into(),
-                ));
+            b"FHIB" => {
+                // Filtered indirect heaps store a per-block filtered size in
+                // each indirect-block entry, which is not yet decoded.
+                if self.io_filter.is_some() {
+                    return Err(OxiH5Error::NotImplemented(
+                        "FractalHeap: I/O filters with an indirect root block are not yet supported"
+                            .into(),
+                    ));
+                }
+                self.read_from_indirect_block(
+                    self.root_block_address,
+                    self.current_rows,
+                    heap_offset,
+                    object_size,
+                )
             }
-            self.read_from_indirect_block(
-                self.root_block_address,
-                self.current_rows,
-                heap_offset,
-                object_size,
-            )
+            signature => Err(OxiH5Error::Format(format!(
+                "FractalHeap: unknown root block signature {signature:?} at {root_base:#x}"
+            ))),
         }
     }
 
@@ -427,11 +442,11 @@ impl<'a> FractalHeap<'a> {
 
     /// Number of bytes used to encode the "Block Offset" field in FHDB and FHIB nodes.
     ///
-    /// Per empirical analysis of h5py-generated HDF5 files, the block offset is
-    /// stored in `soo` (size_of_offsets) bytes — not in `ceil(max_heap_size_bits/8)` bytes
-    /// as the spec excerpt suggests.  Using `soo` gives the correct data-region start offset.
+    /// Block offsets are heap virtual addresses, so their width is determined
+    /// by the heap's maximum-size bit count, not by the file-wide object
+    /// address width (`size_of_offsets`).
     fn block_offset_size(&self) -> usize {
-        self.size_of_offsets as usize
+        (self.max_heap_size_bits as usize).div_ceil(8).max(1)
     }
 
     /// Read `object_size` bytes starting at `heap_offset` from a direct block
@@ -480,7 +495,8 @@ impl<'a> FractalHeap<'a> {
 
     /// Traverse an indirect block (FHIB) to find the object at `target_heap_offset`.
     ///
-    /// The FHIB byte layout (soo=8):
+    /// The FHIB byte layout (heap address width = `size_of_offsets`, block
+    /// offset width = `ceil(max_heap_size_bits / 8)`):
     /// ```text
     /// base + 0..4:           "FHIB" signature
     /// base + 4:              version byte = 0
@@ -911,14 +927,14 @@ mod tests {
 
     #[test]
     fn test_indirect_block_single_level() {
-        // Layout (soo=8, bos=soo=8):
+        // Layout (soo=8, bos=ceil(16/8)=2):
         //   FRHP at offset 0   (256+ bytes header)
         //   FHIB at offset 300
         //   FHDB_0_0 at offset 600   (row 0, col 0: heap range 0..512)
         //   FHDB_0_1 at offset 1200  (row 0, col 1: heap range 512..1024)
         //
         // table_width=2, starting_block_size=512, max_direct_block_size=65536
-        // size_of_offsets=8, so block_offset in FHIB/FHDB = 8 bytes
+        // File addresses are 8 bytes, while heap block offsets are 2 bytes.
         //
         // Target: heap_offset=600, size=4
         //   row=0 (cumulative=0), col=1 (600 >= 512, 600 < 1024)
@@ -931,7 +947,8 @@ mod tests {
         let sbs: u64 = 512;
         let max_heap_size_bits: u16 = 16;
         let max_direct_block_size: u64 = 65536;
-        let soo: usize = 8; // size_of_offsets
+        let soo: usize = 8; // size_of_offsets for block addresses
+        let bos: usize = 2; // ceil(max_heap_size_bits / 8)
 
         let obj = [0xDE_u8, 0xAD, 0xBE, 0xEF];
 
@@ -958,13 +975,13 @@ mod tests {
         buf[..frhp.len()].copy_from_slice(&frhp);
 
         // FHIB at offset 300
-        // Header: "FHIB"(4) + ver(1) + heap_hdr_addr(soo=8) + block_offset(soo=8) = 21 bytes
+        // Header: "FHIB"(4) + ver(1) + heap_hdr_addr(soo=8) + block_offset(bos=2) = 15 bytes
         let fhib_base = fhib_addr as usize;
         buf[fhib_base..fhib_base + 4].copy_from_slice(b"FHIB");
         buf[fhib_base + 4] = 0; // version
                                 // heap_hdr_addr at fhib_base+5..+13 = 0 (points to FRHP)
-                                // block_offset at fhib_base+13..21 = 0 (8 bytes)
-        let entries_start = fhib_base + 4 + 1 + soo + soo; // = fhib_base + 21
+                                // block_offset at fhib_base+13..15 = 0 (2 bytes)
+        let entries_start = fhib_base + 4 + 1 + soo + bos; // = fhib_base + 15
                                                            // Row 0, col 0: fhdb_0_0_addr
         buf[entries_start..entries_start + soo].copy_from_slice(&fhdb_0_0_addr.to_le_bytes());
         // Row 0, col 1: fhdb_0_1_addr
@@ -994,5 +1011,10 @@ mod tests {
             .expect("indirect traversal");
 
         assert_eq!(&result, &obj, "object bytes should match");
+
+        let result = heap
+            .read_object(heap_offset, 4)
+            .expect("root indirect traversal");
+        assert_eq!(&result, &obj, "root block type should be detected from its signature");
     }
 }

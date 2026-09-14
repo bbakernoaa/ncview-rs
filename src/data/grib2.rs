@@ -1,10 +1,10 @@
 //! Read-only GRIB2 data source backed by the pure-Rust `grib` decoder.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{SecondsFormat, TimeDelta, TimeZone, Utc};
 use grib::{Grib2SubmessageDecoder, LatLons};
@@ -34,7 +34,80 @@ pub struct Grib2Source {
     parsed_bytes: Vec<u8>,
     metadata: DatasetMetadata,
     messages: Vec<MessageDescriptor>,
-    decoded_cache: Mutex<std::collections::HashMap<usize, (Vec<f64>, CoordinateGrid)>>,
+    decoded_cache: Mutex<DecodedCache>,
+}
+
+type DecodedField = (Vec<f64>, CoordinateGrid);
+
+const DECODED_CACHE_LIMIT: usize = 256 * 1024 * 1024;
+
+struct DecodedCache {
+    limit: usize,
+    used: usize,
+    entries: HashMap<usize, Arc<DecodedField>>,
+    lru: VecDeque<usize>,
+}
+
+impl DecodedCache {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: 0,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: usize) -> Option<Arc<DecodedField>> {
+        let value = self.entries.get(&key).cloned()?;
+        self.touch(key);
+        Some(value)
+    }
+
+    fn insert(&mut self, key: usize, value: Arc<DecodedField>) {
+        let bytes = decoded_field_bytes(&value);
+        if bytes > self.limit {
+            return;
+        }
+        self.remove(key);
+        while self.used.saturating_add(bytes) > self.limit {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(value) = self.entries.remove(&oldest) {
+                self.used = self.used.saturating_sub(decoded_field_bytes(&value));
+            }
+        }
+        self.used = self.used.saturating_add(bytes);
+        self.lru.push_back(key);
+        self.entries.insert(key, value);
+    }
+
+    fn touch(&mut self, key: usize) {
+        if let Some(position) = self.lru.iter().position(|candidate| *candidate == key) {
+            self.lru.remove(position);
+        }
+        self.lru.push_back(key);
+    }
+
+    fn remove(&mut self, key: usize) {
+        if let Some(value) = self.entries.remove(&key) {
+            self.used = self.used.saturating_sub(decoded_field_bytes(&value));
+        }
+        if let Some(position) = self.lru.iter().position(|candidate| *candidate == key) {
+            self.lru.remove(position);
+        }
+    }
+}
+
+fn decoded_field_bytes(field: &DecodedField) -> usize {
+    let values = field.0.len().saturating_mul(std::mem::size_of::<f64>());
+    let coordinates = field.1.latitude.as_ref().map_or(0, |grid| {
+        grid.len().saturating_mul(std::mem::size_of::<f64>())
+    }) + field.1.longitude.as_ref().map_or(0, |grid| {
+        grid.len().saturating_mul(std::mem::size_of::<f64>())
+    });
+    values.saturating_add(coordinates)
 }
 
 impl Grib2Source {
@@ -228,7 +301,7 @@ impl Grib2Source {
             parsed_bytes,
             metadata,
             messages,
-            decoded_cache: Mutex::new(std::collections::HashMap::new()),
+            decoded_cache: Mutex::new(DecodedCache::new(DECODED_CACHE_LIMIT)),
         })
     }
 
@@ -242,12 +315,12 @@ impl Grib2Source {
             })
     }
 
-    fn decode(&self, descriptor: &MessageDescriptor) -> Result<(Vec<f64>, CoordinateGrid)> {
+    fn decode(&self, descriptor: &MessageDescriptor) -> Result<Arc<DecodedField>> {
         let message_idx = descriptor.header.location.message;
-        if let Ok(cache) = self.decoded_cache.lock()
-            && let Some(cached) = cache.get(&message_idx)
+        if let Ok(mut cache) = self.decoded_cache.lock()
+            && let Some(cached) = cache.get(message_idx)
         {
-            return Ok(cached.clone());
+            return Ok(cached);
         }
 
         let parsed = catch_unwind(AssertUnwindSafe(|| grib::from_bytes(&self.parsed_bytes)))
@@ -322,15 +395,17 @@ impl Grib2Source {
             path: self.path.clone(),
             reason: format!("longitude grid: {error}"),
         })?;
-        let result = (
+        let result = Arc::new((
             values,
             CoordinateGrid {
                 latitude: Some(latitude),
                 longitude: Some(longitude),
+                latitude_axis: None,
+                longitude_axis: None,
             },
-        );
+        ));
         if let Ok(mut cache) = self.decoded_cache.lock() {
-            cache.insert(message_idx, result.clone());
+            cache.insert(message_idx, Arc::clone(&result));
         }
         Ok(result)
     }
@@ -696,7 +771,8 @@ impl DataSource for Grib2Source {
             });
         }
         let descriptor = self.message(&request.variable)?.clone();
-        let (values, coordinates) = self.decode(&descriptor)?;
+        let decoded = self.decode(&descriptor)?;
+        let (values, coordinates) = decoded.as_ref();
         if request.bounds.row_end > descriptor.rows || request.bounds.col_end > descriptor.cols {
             return Err(NcvError::InvalidSlice(
                 "slice bounds exceed GRIB2 grid shape".into(),
@@ -724,20 +800,22 @@ impl DataSource for Grib2Source {
             }
         }
         let coordinate_slice = CoordinateGrid {
-            latitude: coordinates.latitude.map(|grid| {
+            latitude: coordinates.latitude.as_ref().map(|grid| {
                 grid.slice(ndarray::s![
                     request.bounds.row_start..request.bounds.row_end,
                     request.bounds.col_start..request.bounds.col_end
                 ])
                 .to_owned()
             }),
-            longitude: coordinates.longitude.map(|grid| {
+            longitude: coordinates.longitude.as_ref().map(|grid| {
                 grid.slice(ndarray::s![
                     request.bounds.row_start..request.bounds.row_end,
                     request.bounds.col_start..request.bounds.col_end
                 ])
                 .to_owned()
             }),
+            latitude_axis: None,
+            longitude_axis: None,
         };
         Ok(Slice2D::new(selected, validity, request.bounds)?.with_coordinates(coordinate_slice))
     }
@@ -758,15 +836,18 @@ impl DataSource for Grib2Source {
         let Ok(descriptor) = self.message(variable) else {
             return PointCoordinates::default();
         };
-        let Ok((_, coordinates)) = self.decode(descriptor) else {
+        let Ok(decoded) = self.decode(descriptor) else {
             return PointCoordinates::default();
         };
+        let coordinates = &decoded.1;
         PointCoordinates {
             latitude: coordinates
                 .latitude
+                .as_ref()
                 .and_then(|grid| grid.get((row, col)).copied()),
             longitude: coordinates
                 .longitude
+                .as_ref()
                 .and_then(|grid| grid.get((row, col)).copied()),
         }
     }

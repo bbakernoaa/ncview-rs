@@ -383,6 +383,8 @@ impl DataSource for NetCdf4Source {
             CoordinateGrid {
                 latitude: None,
                 longitude: None,
+                latitude_axis: None,
+                longitude_axis: None,
             }
         };
         Ok(slice.with_coordinates(coordinates))
@@ -461,9 +463,16 @@ impl NetCdf4Source {
     ) -> CoordinateGrid {
         let grid_shape = (data_shape[row_axis], data_shape[col_axis]);
         let declared = self.root.coordinates_of(&variable.name).unwrap_or_default();
-        CoordinateGrid {
-            latitude: self
-                .read_coordinate_plane(
+        // Preserve the historical 2-D representation for small slices while
+        // avoiding hundreds of MiB of duplicated coordinate data for large
+        // regular rasters.
+        let compact_axes = grid_shape
+            .0
+            .checked_mul(grid_shape.1)
+            .is_some_and(|elements| elements > 1_000_000);
+        let latitude_axis = compact_axes
+            .then(|| {
+                self.read_coordinate_axis(
                     &declared,
                     data_names,
                     data_shape,
@@ -472,9 +481,12 @@ impl NetCdf4Source {
                     grid_shape,
                     bounds,
                 )
-                .ok(),
-            longitude: self
-                .read_coordinate_plane(
+                .ok()
+            })
+            .flatten();
+        let longitude_axis = compact_axes
+            .then(|| {
+                self.read_coordinate_axis(
                     &declared,
                     data_names,
                     data_shape,
@@ -483,8 +495,71 @@ impl NetCdf4Source {
                     grid_shape,
                     bounds,
                 )
-                .ok(),
+                .ok()
+            })
+            .flatten();
+        CoordinateGrid {
+            latitude: if latitude_axis.is_none() {
+                self.read_coordinate_plane(
+                    &declared,
+                    data_names,
+                    data_shape,
+                    AxisRole::Latitude,
+                    row_axis,
+                    grid_shape,
+                    bounds,
+                )
+                .ok()
+            } else {
+                None
+            },
+            longitude: if longitude_axis.is_none() {
+                self.read_coordinate_plane(
+                    &declared,
+                    data_names,
+                    data_shape,
+                    AxisRole::Longitude,
+                    col_axis,
+                    grid_shape,
+                    bounds,
+                )
+                .ok()
+            } else {
+                None
+            },
+            latitude_axis,
+            longitude_axis,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_coordinate_axis(
+        &self,
+        declared: &[String],
+        data_names: &[&str],
+        data_shape: &[usize],
+        role: AxisRole,
+        axis: usize,
+        grid_shape: (usize, usize),
+        bounds: super::slice::Bounds,
+    ) -> Result<Vec<f64>> {
+        let coordinate =
+            self.coordinate_variable(declared, data_names, data_shape, role, axis, grid_shape)?;
+        if coordinate.shape.len() != 1 {
+            return Err(NcvError::UnsupportedVariable {
+                variable: coordinate.name.clone(),
+                reason: "coordinate variable is not a 1-D axis".into(),
+            });
+        }
+        let values = self.read_coordinate_values_cached(coordinate)?;
+        let (start, end) = if role == AxisRole::Latitude {
+            (bounds.row_start, bounds.row_end)
+        } else {
+            (bounds.col_start, bounds.col_end)
+        };
+        values.get(start..end).map(<[f64]>::to_vec).ok_or_else(|| {
+            NcvError::InvalidSlice("coordinate bounds exceed coordinate length".into())
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1164,10 +1239,20 @@ fn decode_coordinate_values(
 
 fn packed_attributes(variable: &oxinetcdf::NcVariable) -> PackedAttributes {
     let read = |name: &str| {
-        variable
-            .attr(name)
-            .and_then(|attribute| attribute.as_f64().ok())
-            .and_then(|values| values.first().copied())
+        variable.attr(name).and_then(|attribute| {
+            attribute
+                .as_f64()
+                .ok()
+                .and_then(|values| values.first().copied())
+                .or_else(|| {
+                    attribute
+                        .as_i64()
+                        .ok()
+                        .and_then(|values| values.first().copied())
+                        .map(|value| value as f64)
+                })
+                .or_else(|| attribute.raw().as_u64().map(|value| value as f64))
+        })
     };
     PackedAttributes {
         fill: read("_FillValue"),

@@ -5,6 +5,11 @@
 //! the same Natural Earth rings as the coastline overlay, but fills them and
 //! adds subtle graticules before the data raster is composited over the top.
 
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use image::RgbImage;
 use rayon::prelude::*;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
@@ -37,9 +42,33 @@ pub fn render_with_palette(
     detail: Detail,
     palette: &Palette,
 ) -> RgbImage {
+    render_with_palette_cached(width, height, coordinates, detail, palette)
+        .as_ref()
+        .clone()
+}
+
+pub fn render_with_palette_cached(
+    width: usize,
+    height: usize,
+    coordinates: Option<&CoordinateGrid>,
+    detail: Detail,
+    palette: &Palette,
+) -> Arc<RgbImage> {
     let width = width.max(1);
     let height = height.max(1);
     let colors = palette.map_overlay_colors();
+    let extent = extent(coordinates);
+    let key = BackdropKey::new(width, height, detail, colors, extent);
+    if let Ok(mut cache) = backdrop_cache().lock()
+        && let Some(position) = cache.iter().position(|(candidate, _)| *candidate == key)
+    {
+        let (_, image) = cache
+            .remove(position)
+            .expect("backdrop cache position exists");
+        cache.push_back((key, Arc::clone(&image)));
+        return image;
+    }
+
     let mut pixmap = Pixmap::new(width as u32, height as u32)
         .expect("non-zero map backdrop dimensions should allocate");
     pixmap.fill(Color::from_rgba8(
@@ -49,7 +78,6 @@ pub fn render_with_palette(
         255,
     ));
 
-    let extent = extent(coordinates);
     draw_graticule(&mut pixmap, extent, colors);
     for polygon in landmask::polygons_for_detail(detail) {
         if polygon_intersects_extent(polygon, extent) {
@@ -67,7 +95,65 @@ pub fn render_with_palette(
         .for_each(|(dst, src)| {
             *dst = [src[0], src[1], src[2]];
         });
+    let image = Arc::new(image);
+    if let Ok(mut cache) = backdrop_cache().lock() {
+        cache.push_back((key, Arc::clone(&image)));
+        while cache.len() > 8 {
+            cache.pop_front();
+        }
+    }
     image
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExtentKey {
+    min_lon: u64,
+    max_lon: u64,
+    min_lat: u64,
+    max_lat: u64,
+    lat_increases_down: bool,
+    zero_to_360: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackdropKey {
+    width: usize,
+    height: usize,
+    detail: Detail,
+    colors: super::colors::MapOverlayColors,
+    extent: ExtentKey,
+}
+
+type BackdropCache = VecDeque<(BackdropKey, Arc<RgbImage>)>;
+
+impl BackdropKey {
+    fn new(
+        width: usize,
+        height: usize,
+        detail: Detail,
+        colors: super::colors::MapOverlayColors,
+        extent: Extent,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            detail,
+            colors,
+            extent: ExtentKey {
+                min_lon: extent.min_lon.to_bits(),
+                max_lon: extent.max_lon.to_bits(),
+                min_lat: extent.min_lat.to_bits(),
+                max_lat: extent.max_lat.to_bits(),
+                lat_increases_down: extent.lat_increases_down,
+                zero_to_360: extent.zero_to_360,
+            },
+        }
+    }
+}
+
+fn backdrop_cache() -> &'static Mutex<BackdropCache> {
+    static CACHE: OnceLock<Mutex<BackdropCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(8)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,8 +199,20 @@ fn extent(coordinates: Option<&CoordinateGrid>) -> Extent {
             .and_then(|row| latitude.get((row, cols / 2)))
             .copied()
             .filter(|v| v.is_finite());
+    } else if let Some(latitude) = grid.latitude_axis.as_ref() {
+        for value in latitude.iter().copied().filter(|value| value.is_finite()) {
+            min_lat = min_lat.min(value);
+            max_lat = max_lat.max(value);
+        }
+        first_lat = latitude.first().copied().filter(|v| v.is_finite());
+        last_lat = latitude.last().copied().filter(|v| v.is_finite());
     }
     if let Some(longitude) = grid.longitude.as_ref() {
+        for value in longitude.iter().copied().filter(|value| value.is_finite()) {
+            min_lon = min_lon.min(value);
+            max_lon = max_lon.max(value);
+        }
+    } else if let Some(longitude) = grid.longitude_axis.as_ref() {
         for value in longitude.iter().copied().filter(|value| value.is_finite()) {
             min_lon = min_lon.min(value);
             max_lon = max_lon.max(value);
@@ -395,6 +493,8 @@ mod tests {
                 [90.0, 90.0, 90.0, 90.0]
             ]),
             longitude: Some(array![[0.0, 90.0, 180.0, 270.0], [0.0, 90.0, 180.0, 270.0]]),
+            latitude_axis: None,
+            longitude_axis: None,
         };
         let actual = extent(Some(&coordinates));
         let expected = Extent {

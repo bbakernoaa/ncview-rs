@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use ratatui::{
     Frame,
     layout::Rect,
@@ -110,6 +112,7 @@ pub fn render_with_points_and_image(
     selected_point: Option<(usize, usize)>,
     drag: Option<DragState>,
     zoom_active: bool,
+    render_generation: u64,
     graphics: Option<&mut GraphicsRenderer>,
 ) {
     render_content(
@@ -127,6 +130,7 @@ pub fn render_with_points_and_image(
         selected_point,
         drag,
         zoom_active,
+        render_generation,
         graphics,
     );
 }
@@ -161,6 +165,7 @@ pub fn render_with_points(
         selected_point,
         None,
         false,
+        0,
         None,
     );
 }
@@ -181,6 +186,7 @@ fn render_content(
     selected_point: Option<(usize, usize)>,
     drag: Option<DragState>,
     zoom_active: bool,
+    render_generation: u64,
     graphics: Option<&mut GraphicsRenderer>,
 ) {
     let message = if constrained {
@@ -221,25 +227,38 @@ fn render_content(
         // cells into this bounded canvas before the protocol encoder runs.
         let target_width = usize::from(inner.width).saturating_mul(4).max(1);
         let target_height = usize::from(inner.height).saturating_mul(8).max(1);
-        let image = rgb_raster_with_options_for_view(
-            slice,
-            palette.clone(),
+        let image_palette = palette.clone();
+        let render_key = map_render_key(
+            render_generation,
+            inner,
+            rows,
+            cols,
+            &palette,
             limits,
             filter,
             show_land_borders,
             scale,
-            // Keep the transient hover cursor out of the protocol image.
-            // iTerm2 encodes the complete PNG whenever the image bytes
-            // change; embedding the hover point therefore retransmitted the
-            // whole map for every mouse-motion event. The status bar still
-            // reports the exact hovered coordinate/value, while the pinned
-            // point remains part of the image and only changes on click.
-            target_width,
-            target_height,
             selected_point,
         );
         let image_area = graphics.drawable_area(inner);
-        if graphics.render(frame, inner, image.into()) {
+        if graphics.render_with_key(frame, inner, render_key, || {
+            rgb_raster_with_options_for_view(
+                slice,
+                image_palette,
+                limits,
+                filter,
+                show_land_borders,
+                scale,
+                // Keep the transient hover cursor out of the protocol image.
+                // The status bar still reports the exact hovered
+                // coordinate/value, while the pinned point remains part of
+                // the image and only changes on click.
+                target_width,
+                target_height,
+                selected_point,
+            )
+            .into()
+        }) {
             render_drag_box(frame, image_area, drag, zoom_active);
             render_loading_badge(frame, inner, loading);
             return;
@@ -248,7 +267,7 @@ fn render_content(
     let width = usize::from(inner.width).min(cols);
     let height = usize::from(inner.height).min(rows);
     let background = show_land_borders.then(|| {
-        map_background::render_with_palette(
+        map_background::render_with_palette_cached(
             width,
             height,
             slice.coordinates.as_ref(),
@@ -340,6 +359,40 @@ fn render_content(
     frame.render_widget(Paragraph::new(lines), inner);
     render_drag_box(frame, inner, drag, zoom_active);
     render_loading_badge(frame, inner, loading);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_render_key(
+    generation: u64,
+    area: Rect,
+    rows: usize,
+    cols: usize,
+    palette: &Palette,
+    limits: Option<(f64, f64)>,
+    filter: Option<(f64, f64)>,
+    show_land_borders: bool,
+    scale: ScaleMode,
+    selected_point: Option<(usize, usize)>,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    generation.hash(&mut hasher);
+    area.width.hash(&mut hasher);
+    area.height.hash(&mut hasher);
+    rows.hash(&mut hasher);
+    cols.hash(&mut hasher);
+    palette.hash(&mut hasher);
+    hash_limits(&mut hasher, limits);
+    hash_limits(&mut hasher, filter);
+    show_land_borders.hash(&mut hasher);
+    scale.hash(&mut hasher);
+    selected_point.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_limits(hasher: &mut impl Hasher, limits: Option<(f64, f64)>) {
+    limits
+        .map(|(min, max)| (min.to_bits(), max.to_bits()))
+        .hash(hasher);
 }
 
 fn render_loading_badge(frame: &mut Frame, area: Rect, loading: bool) {

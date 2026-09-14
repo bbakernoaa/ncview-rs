@@ -64,7 +64,10 @@ use links::{
     resolve_soft_link_to_header,
 };
 
-use oxih5_format::{btree, group, header, heap, message, snod, superblock, ChunkIndexCache};
+use oxih5_format::{
+    btree, btree_v2, fractal_heap, group, header, heap, message, snod, superblock,
+    ChunkIndexCache,
+};
 
 // ---------------------------------------------------------------------------
 // ObjectKind — returned by File::object_at
@@ -2112,10 +2115,42 @@ fn read_attributes_from_header(
 ) -> Result<Vec<Attribute>, OxiH5Error> {
     let messages = header::parse_messages(file_data, header_address)?;
     let mut attrs = Vec::new();
+    let mut dense_info = None;
     for msg in &messages {
-        if msg.msg_type == 0x000C {
-            if let Ok(attr) = message::parse_attribute(&msg.data) {
-                attrs.push(attr);
+        match msg.msg_type {
+            0x000C => {
+                if let Ok(attr) = message::parse_attribute(&msg.data) {
+                    attrs.push(attr);
+                }
+            }
+            0x0015 => dense_info = message::parse_attribute_info(&msg.data).ok(),
+            _ => {}
+        }
+    }
+
+    if let Some(info) = dense_info {
+        if info.fractal_heap_address != u64::MAX && info.name_index_address != u64::MAX {
+            let size_of_offsets = superblock::parse(file_data)?.size_of_offsets;
+            let heap = fractal_heap::FractalHeap::parse(
+                file_data,
+                info.fractal_heap_address,
+                size_of_offsets,
+            )?;
+            let heap_ids = btree_v2::parse_attribute_name_index(
+                file_data,
+                info.name_index_address,
+                heap.heap_id_len(),
+            )?;
+            for heap_id in heap_ids {
+                let Ok((heap_offset, object_size)) = heap.parse_heap_id(&heap_id) else {
+                    continue;
+                };
+                let Ok(attribute_body) = heap.read_object(heap_offset, object_size) else {
+                    continue;
+                };
+                if let Ok(attribute) = message::parse_attribute(&attribute_body) {
+                    attrs.push(attribute);
+                }
             }
         }
     }
@@ -2258,4 +2293,5 @@ mod tests {
         // Empty path → returns root_addr immediately.
         assert_eq!(result.unwrap(), root_addr);
     }
+
 }

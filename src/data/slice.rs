@@ -72,17 +72,52 @@ pub struct SliceRequest {
 
 #[derive(Debug, Clone)]
 pub struct CoordinateGrid {
-    /// Latitude at each displayed source cell.  A 2-D array is used for both
-    /// regular and curvilinear grids so the renderer never has to guess how
-    /// a zoomed slice maps back to geographic space.
+    /// Latitude at each displayed source cell for a curvilinear grid.
     pub latitude: Option<Array2<f64>>,
-    /// Longitude at each displayed source cell.
+    /// Longitude at each displayed source cell for a curvilinear grid.
     pub longitude: Option<Array2<f64>>,
+    /// Latitude values for a regular grid, indexed by source row.
+    ///
+    /// Keeping regular coordinates as axes avoids expanding two small 1-D
+    /// vectors into full-size f64 planes for large rasters.
+    pub latitude_axis: Option<Vec<f64>>,
+    /// Longitude values for a regular grid, indexed by source column.
+    pub longitude_axis: Option<Vec<f64>>,
 }
 
 impl CoordinateGrid {
     pub fn is_empty(&self) -> bool {
-        self.latitude.is_none() && self.longitude.is_none()
+        self.latitude.is_none()
+            && self.longitude.is_none()
+            && self.latitude_axis.is_none()
+            && self.longitude_axis.is_none()
+    }
+
+    pub fn shape(&self) -> Option<(usize, usize)> {
+        self.latitude
+            .as_ref()
+            .or(self.longitude.as_ref())
+            .map(|grid| grid.dim())
+            .or_else(|| {
+                Some((
+                    self.latitude_axis.as_ref()?.len(),
+                    self.longitude_axis.as_ref()?.len(),
+                ))
+            })
+    }
+
+    pub fn latitude_at(&self, row: usize, col: usize) -> Option<f64> {
+        self.latitude
+            .as_ref()
+            .and_then(|grid| grid.get((row, col)).copied())
+            .or_else(|| self.latitude_axis.as_ref()?.get(row).copied())
+    }
+
+    pub fn longitude_at(&self, row: usize, col: usize) -> Option<f64> {
+        self.longitude
+            .as_ref()
+            .and_then(|grid| grid.get((row, col)).copied())
+            .or_else(|| self.longitude_axis.as_ref()?.get(col).copied())
     }
 }
 
@@ -167,7 +202,16 @@ impl Slice2D {
             let longitude = grid.longitude.as_ref().map_or(0, |values| {
                 values.len().saturating_mul(std::mem::size_of::<f64>())
             });
-            latitude.saturating_add(longitude)
+            let latitude_axis = grid.latitude_axis.as_ref().map_or(0, |values| {
+                values.len().saturating_mul(std::mem::size_of::<f64>())
+            });
+            let longitude_axis = grid.longitude_axis.as_ref().map_or(0, |values| {
+                values.len().saturating_mul(std::mem::size_of::<f64>())
+            });
+            latitude
+                .saturating_add(longitude)
+                .saturating_add(latitude_axis)
+                .saturating_add(longitude_axis)
         });
         values.saturating_add(validity).saturating_add(coordinates)
     }
@@ -248,6 +292,14 @@ impl Slice2D {
                 .longitude
                 .as_ref()
                 .is_none_or(|grid| grid.raw_dim() == self.values.raw_dim())
+            && coordinates
+                .latitude_axis
+                .as_ref()
+                .is_none_or(|axis| axis.len() == self.values.nrows())
+            && coordinates
+                .longitude_axis
+                .as_ref()
+                .is_none_or(|axis| axis.len() == self.values.ncols())
         {
             self.coordinates = Some(coordinates);
         }
@@ -274,6 +326,12 @@ impl Slice2D {
                         .longitude
                         .as_ref()
                         .map(|grid| grid.view().permuted_axes([1, 0]).to_owned()),
+                    // A compact axis is tied to its row/column role. An
+                    // arbitrary transpose turns it into a 2-D mapping, so
+                    // drop it and let the renderer use its geographic
+                    // fallback rather than allocating a huge temporary grid.
+                    latitude_axis: None,
+                    longitude_axis: None,
                 });
             }
             slice

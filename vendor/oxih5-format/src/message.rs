@@ -27,6 +27,50 @@ pub struct DataspaceInfo {
     pub max_dims: Option<Vec<u64>>,
 }
 
+/// Addresses for an object's dense attribute indexes (ainfo message 0x0015).
+#[derive(Debug, Clone, Copy)]
+pub struct AttributeInfo {
+    pub flags: u8,
+    pub fractal_heap_address: u64,
+    pub name_index_address: u64,
+    pub creation_order_index_address: Option<u64>,
+}
+
+/// Parse an HDF5 attribute information message.
+pub fn parse_attribute_info(body: &[u8]) -> Result<AttributeInfo, OxiH5Error> {
+    if body.len() < 2 {
+        return Err(OxiH5Error::Format(
+            "attribute info: body too short".into(),
+        ));
+    }
+    if body[0] != 0 {
+        return Err(OxiH5Error::Format(format!(
+            "attribute info: unsupported version {}",
+            body[0]
+        )));
+    }
+    let flags = body[1];
+    let mut pos = 2usize;
+    if flags & 0x01 != 0 {
+        pos = pos.checked_add(2).ok_or_else(|| {
+            OxiH5Error::Format("attribute info: creation index overflow".into())
+        })?;
+    }
+    let fractal_heap_address = read_u64_le(body, pos)?;
+    let name_index_address = read_u64_le(body, pos + 8)?;
+    let creation_order_index_address = if flags & 0x02 != 0 {
+        Some(read_u64_le(body, pos + 16)?)
+    } else {
+        None
+    };
+    Ok(AttributeInfo {
+        flags,
+        fractal_heap_address,
+        name_index_address,
+        creation_order_index_address,
+    })
+}
+
 /// Parse a dataspace message v1 or v2 body.
 ///
 /// **V1 layout** (HDF5 `libver='earliest'`):

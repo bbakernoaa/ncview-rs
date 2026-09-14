@@ -23,6 +23,28 @@ pub fn parse_name_index(
     header_address: u64,
     heap_id_len: u8,
 ) -> Result<Vec<Vec<u8>>, OxiH5Error> {
+    parse_heap_id_index(file_data, header_address, heap_id_len, 5, 4, 4)
+}
+
+/// Parse a B-tree v2 dense-attribute name index (type 8), returning the
+/// fractal-heap IDs for all indexed attributes.
+pub fn parse_attribute_name_index(
+    file_data: &[u8],
+    header_address: u64,
+    heap_id_len: u8,
+) -> Result<Vec<Vec<u8>>, OxiH5Error> {
+    // Attribute name records are heap ID + flags + creation order + name hash.
+    parse_heap_id_index(file_data, header_address, heap_id_len, 8, 0, 9)
+}
+
+fn parse_heap_id_index(
+    file_data: &[u8],
+    header_address: u64,
+    heap_id_len: u8,
+    expected_type: u8,
+    heap_id_offset: usize,
+    record_overhead: u16,
+) -> Result<Vec<Vec<u8>>, OxiH5Error> {
     let base = header_address as usize;
 
     // B-tree v2 header ("BTHD") — identical layout to the chunk-index case.
@@ -52,9 +74,9 @@ pub fn parse_name_index(
     }
 
     let btree_type = file_data[base + 5];
-    if btree_type != 5 {
+    if btree_type != expected_type {
         return Err(OxiH5Error::NotImplemented(format!(
-            "BTHD (name index): expected type 5, got {btree_type}"
+            "BTHD (heap ID index): expected type {expected_type}, got {btree_type}"
         )));
     }
 
@@ -62,11 +84,10 @@ pub fn parse_name_index(
     let record_size = read_u16_le(file_data, base + 10)?;
     let tree_depth = read_u16_le(file_data, base + 12)?;
 
-    // Validate: record_size must equal 4 (name_hash) + heap_id_len.
-    let expected_record_size = 4u16.saturating_add(heap_id_len as u16);
+    let expected_record_size = record_overhead.saturating_add(heap_id_len as u16);
     if record_size != expected_record_size {
         return Err(OxiH5Error::Format(format!(
-            "BTHD (name index): record_size {record_size} != 4 + heap_id_len {heap_id_len} = {expected_record_size}"
+            "BTHD (heap ID index): record_size {record_size} != {record_overhead} + heap_id_len {heap_id_len} = {expected_record_size}"
         )));
     }
 
@@ -92,6 +113,7 @@ pub fn parse_name_index(
         root_nrecords,
         record_size,
         heap_id_len,
+        heap_id_offset,
         &mut heap_ids,
         0,
     )?;
@@ -111,6 +133,7 @@ fn parse_name_index_node(
     num_records: u16,
     record_size: u16,
     heap_id_len: u8,
+    heap_id_offset: usize,
     heap_ids: &mut Vec<Vec<u8>>,
     recursion: u16,
 ) -> Result<(), OxiH5Error> {
@@ -171,8 +194,7 @@ fn parse_name_index_node(
 
         for i in 0..record_count {
             let r_off = records_start + i * rs;
-            // Skip 4 bytes of name hash, take heap_id_len bytes.
-            let id_off = r_off + 4;
+            let id_off = r_off + heap_id_offset;
             let id_end = id_off + hil;
             let id_bytes = file_data.get(id_off..id_end).ok_or_else(|| {
                 OxiH5Error::Format(format!(
@@ -184,8 +206,10 @@ fn parse_name_index_node(
     } else {
         // ---------- Internal node (BTIN) ----------
         let child_count = record_count + 1;
-        // Each child pointer: address(8) + num_records_in_child(2) — same as chunk tree.
-        let child_ptr_size = 8 + 2;
+        // Each child pointer stores an 8-byte address followed by the
+        // number of records in that child. The count is one byte for the
+        // dense attribute/link indexes (the B-tree degree bounds it).
+        let child_ptr_size = 8 + 1;
 
         let records_end = records_start
             .checked_add(record_count * rs)
@@ -206,7 +230,11 @@ fn parse_name_index_node(
         for c in 0..child_count {
             let ptr_off = records_end + c * child_ptr_size;
             let child_addr = read_u64_le(file_data, ptr_off)?;
-            let child_nrecords = read_u16_le(file_data, ptr_off + 8)?;
+            let child_nrecords = u16::from(
+                *file_data.get(ptr_off + 8).ok_or_else(|| {
+                    OxiH5Error::Format("BTreeV2 name-index child count truncated".into())
+                })?,
+            );
 
             if child_addr == UNDEF {
                 continue;
@@ -219,6 +247,7 @@ fn parse_name_index_node(
                 child_nrecords,
                 record_size,
                 heap_id_len,
+                heap_id_offset,
                 heap_ids,
                 recursion + 1,
             )?;

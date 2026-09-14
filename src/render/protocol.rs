@@ -32,7 +32,8 @@ pub struct ProtocolState {
 pub struct GraphicsRenderer {
     state: ProtocolState,
     image: Option<StatefulProtocol>,
-    image_hash: Option<u64>,
+    image_key: Option<u64>,
+    raster: Option<(u64, DynamicImage)>,
     pending: Option<PendingImage>,
     image_bytes: usize,
     resize_filter: FilterType,
@@ -41,7 +42,7 @@ pub struct GraphicsRenderer {
 }
 
 struct PendingImage {
-    hash: u64,
+    key: u64,
     bytes: usize,
     receiver: Receiver<Result<StatefulProtocol, String>>,
 }
@@ -52,7 +53,8 @@ impl GraphicsRenderer {
         Self {
             state: ProtocolState::probe(),
             image: None,
-            image_hash: None,
+            image_key: None,
+            raster: None,
             pending: None,
             image_bytes: 0,
             resize_filter: if scientific_mode {
@@ -76,7 +78,8 @@ impl GraphicsRenderer {
                 protocol: self.state.protocol,
             },
             image: None,
-            image_hash: None,
+            image_key: None,
+            raster: None,
             pending: None,
             image_bytes: 0,
             resize_filter: self.resize_filter,
@@ -142,7 +145,8 @@ impl GraphicsRenderer {
         // The encoded protocol image includes the resized pixels, so force a
         // fresh encoding when the interpolation mode changes.
         self.image = None;
-        self.image_hash = None;
+        self.image_key = None;
+        self.raster = None;
         self.pending = None;
         self.image_bytes = 0;
         true
@@ -166,16 +170,79 @@ impl GraphicsRenderer {
         if !self.supports_graphics() || area.width == 0 || area.height == 0 {
             return false;
         }
-        let hash = image_hash(&image);
-        self.finish_pending(hash);
+        let key = image_hash(&image);
+        let image_is_needed = self.image_key != Some(key)
+            && !self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.key == key);
+        if image_is_needed {
+            self.raster = Some((key, image));
+        }
+        let rendered = self.render_cached(frame, area, key);
+        if !image_is_needed {
+            self.raster = None;
+        }
+        rendered
+    }
+
+    /// Render a lazily-created image using a caller-owned visual-state key.
+    /// The map can therefore retain its raster between UI redraws instead of
+    /// hashing and rebuilding identical pixels on every input event.
+    pub fn render_with_key<F>(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        key: u64,
+        make_image: F,
+    ) -> bool
+    where
+        F: FnOnce() -> DynamicImage,
+    {
+        if !self.supports_graphics() || area.width == 0 || area.height == 0 {
+            return false;
+        }
+        let pending_same_key = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.key == key);
+        if self.image_key != Some(key)
+            && !pending_same_key
+            && self
+                .raster
+                .as_ref()
+                .is_none_or(|(raster_key, _)| *raster_key != key)
+        {
+            self.raster = Some((key, make_image()));
+        }
+        let rendered = self.render_cached(frame, area, key);
+        if self.image_key == Some(key)
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.key == key)
+        {
+            self.raster = None;
+        }
+        rendered
+    }
+
+    fn render_cached(&mut self, frame: &mut Frame, area: Rect, key: u64) -> bool {
+        self.finish_pending(key);
         if !self.supports_graphics() {
             return false;
         }
         // Keep at most one encoder in flight. If playback advances while that
         // encoder is busy, the completed frame is discarded and the current
         // slice is queued on the next draw.
-        if self.image_hash != Some(hash) && self.pending.is_none() {
-            self.start_encoding(hash, image, area);
+        if self.image_key != Some(key) && self.pending.is_none() {
+            let Some((raster_key, image)) = self.raster.take() else {
+                return false;
+            };
+            if raster_key != key {
+                return false;
+            }
+            self.start_encoding(key, image, area);
         }
         let Some(protocol) = self.image.as_mut() else {
             // Keep the map stable until the first protocol image has finished
@@ -198,7 +265,7 @@ impl GraphicsRenderer {
             .is_some_and(|result| result.is_err())
         {
             self.image = None;
-            self.image_hash = None;
+            self.image_key = None;
             self.disabled = true;
             return false;
         }
@@ -217,9 +284,14 @@ impl GraphicsRenderer {
     pub fn working_set_bytes(&self) -> usize {
         self.image_bytes
             .saturating_add(self.pending.as_ref().map_or(0, |pending| pending.bytes))
+            .saturating_add(
+                self.raster
+                    .as_ref()
+                    .map_or(0, |(_, image)| image.as_bytes().len()),
+            )
     }
 
-    fn start_encoding(&mut self, hash: u64, image: DynamicImage, area: Rect) {
+    fn start_encoding(&mut self, key: u64, image: DynamicImage, area: Rect) {
         let picker = self.state.picker.clone();
         let resize = Resize::Scale(Some(self.resize_filter));
         let size = Size::new(area.width, area.height);
@@ -236,23 +308,23 @@ impl GraphicsRenderer {
             let _ = sender.send(result);
         });
         self.pending = Some(PendingImage {
-            hash,
+            key,
             bytes,
             receiver,
         });
     }
 
-    fn finish_pending(&mut self, current_hash: u64) {
+    fn finish_pending(&mut self, current_key: u64) {
         let Some(pending) = self.pending.take() else {
             return;
         };
         match pending.receiver.try_recv() {
-            Ok(Ok(protocol)) if pending.hash == current_hash => {
+            Ok(Ok(protocol)) if pending.key == current_key => {
                 self.image_bytes = pending.bytes;
                 self.image = Some(protocol);
-                self.image_hash = Some(current_hash);
+                self.image_key = Some(current_key);
             }
-            Ok(Err(_)) if pending.hash == current_hash => {
+            Ok(Err(_)) if pending.key == current_key => {
                 self.image_bytes = 0;
                 self.disabled = true;
             }
@@ -264,7 +336,7 @@ impl GraphicsRenderer {
                 self.pending = Some(pending);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                if pending.hash == current_hash {
+                if pending.key == current_key {
                     self.disabled = true;
                 }
             }

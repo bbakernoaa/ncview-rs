@@ -139,7 +139,7 @@ fn rasterize(
     let mapper = crate::render::colors::ColorMapper::new(&palette, statistics, limits, scale);
     let mut image = RgbImage::new(output_cols as u32, output_rows as u32);
     let background = show_land_borders.then(|| {
-        map_background::render_with_palette(
+        map_background::render_with_palette_cached(
             output_cols,
             output_rows,
             slice.coordinates.as_ref(),

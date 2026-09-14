@@ -158,7 +158,7 @@ impl SpatialIndex {
 
 static GLOBAL_INDEX: OnceLock<SpatialIndex> = OnceLock::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Detail {
     Global,
     Regional,
@@ -184,23 +184,31 @@ fn detail_for_extent(grid: Option<&CoordinateGrid>) -> Detail {
     let Some(grid) = grid else {
         return Detail::Global;
     };
-    let Some(latitude) = grid.latitude.as_ref() else {
-        return Detail::Global;
-    };
-    let Some(longitude) = grid.longitude.as_ref() else {
-        return Detail::Global;
-    };
     let mut min_longitude = f64::INFINITY;
     let mut max_longitude = f64::NEG_INFINITY;
-    for value in longitude.iter().copied().filter(|value| value.is_finite()) {
-        min_longitude = min_longitude.min(value);
-        max_longitude = max_longitude.max(value);
+    if let Some(longitude) = grid.longitude.as_ref() {
+        for value in longitude.iter().copied().filter(|value| value.is_finite()) {
+            min_longitude = min_longitude.min(value);
+            max_longitude = max_longitude.max(value);
+        }
+    } else if let Some(longitude) = grid.longitude_axis.as_ref() {
+        for value in longitude.iter().copied().filter(|value| value.is_finite()) {
+            min_longitude = min_longitude.min(value);
+            max_longitude = max_longitude.max(value);
+        }
     }
     let mut min_latitude = f64::INFINITY;
     let mut max_latitude = f64::NEG_INFINITY;
-    for value in latitude.iter().copied().filter(|value| value.is_finite()) {
-        min_latitude = min_latitude.min(value);
-        max_latitude = max_latitude.max(value);
+    if let Some(latitude) = grid.latitude.as_ref() {
+        for value in latitude.iter().copied().filter(|value| value.is_finite()) {
+            min_latitude = min_latitude.min(value);
+            max_latitude = max_latitude.max(value);
+        }
+    } else if let Some(latitude) = grid.latitude_axis.as_ref() {
+        for value in latitude.iter().copied().filter(|value| value.is_finite()) {
+            min_latitude = min_latitude.min(value);
+            max_latitude = max_latitude.max(value);
+        }
     }
     if !min_longitude.is_finite()
         || !max_longitude.is_finite()
@@ -228,20 +236,30 @@ pub fn is_land(latitude: f64, longitude: f64) -> bool {
 /// Return the lazily selected Natural Earth rings for a presentation layer.
 /// The map renderer uses these filled rings; scientific masking still comes
 /// exclusively from the dataset's validity values.
-pub fn polygons_for_detail(detail: Detail) -> Vec<&'static [(f64, f64)]> {
+pub enum PolygonIter {
+    Static(std::slice::Iter<'static, &'static [(f64, f64)]>),
+    Decoded(std::slice::Iter<'static, Vec<(f64, f64)>>),
+}
+
+impl Iterator for PolygonIter {
+    type Item = &'static [(f64, f64)];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Static(polygons) => polygons.next().copied(),
+            Self::Decoded(polygons) => polygons.next().map(Vec::as_slice),
+        }
+    }
+}
+
+pub fn polygons_for_detail(detail: Detail) -> PolygonIter {
     match detail {
-        Detail::Global if !vendored::POLYGONS.is_empty() => vendored::POLYGONS.to_vec(),
-        Detail::Global => FALLBACK_POLYGONS.to_vec(),
-        Detail::Regional => regional_polygons()
-            .polygons
-            .iter()
-            .map(Vec::as_slice)
-            .collect(),
-        Detail::Local => local_polygons()
-            .polygons
-            .iter()
-            .map(Vec::as_slice)
-            .collect(),
+        Detail::Global if !vendored::POLYGONS.is_empty() => {
+            PolygonIter::Static(vendored::POLYGONS.iter())
+        }
+        Detail::Global => PolygonIter::Static(FALLBACK_POLYGONS.iter()),
+        Detail::Regional => PolygonIter::Decoded(regional_polygons().polygons.iter()),
+        Detail::Local => PolygonIter::Decoded(local_polygons().polygons.iter()),
     }
 }
 
@@ -317,16 +335,14 @@ pub fn cell_is_border_grid_with_detail(
     col: usize,
     detail: Detail,
 ) -> Option<bool> {
-    let latitude = grid.latitude.as_ref()?;
-    let longitude = grid.longitude.as_ref()?;
-    let (rows, cols) = latitude.dim();
-    if longitude.dim() != (rows, cols) || row >= rows || col >= cols {
+    let (rows, cols) = grid.shape()?;
+    if row >= rows || col >= cols {
         return None;
     }
     let at = |neighbor_row: usize, neighbor_col: usize| {
         Some(is_land_with_detail(
-            *latitude.get((neighbor_row, neighbor_col))?,
-            *longitude.get((neighbor_row, neighbor_col))?,
+            grid.latitude_at(neighbor_row, neighbor_col)?,
+            grid.longitude_at(neighbor_row, neighbor_col)?,
             detail,
         ))
     };
@@ -699,10 +715,14 @@ mod tests {
         let local = CoordinateGrid {
             latitude: Some(array![[40.0, 40.0], [41.0, 41.0]]),
             longitude: Some(array![[-75.0, -74.0], [-75.0, -74.0]]),
+            latitude_axis: None,
+            longitude_axis: None,
         };
         let regional = CoordinateGrid {
             latitude: Some(array![[0.0, 0.0], [50.0, 50.0]]),
             longitude: Some(array![[-40.0, 40.0], [-40.0, 40.0]]),
+            latitude_axis: None,
+            longitude_axis: None,
         };
         assert_eq!(super::detail_for_extent(Some(&local)), Detail::Local);
         assert_eq!(super::detail_for_extent(Some(&regional)), Detail::Regional);

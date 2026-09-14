@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use clap::{CommandFactory, Parser, Subcommand};
 use crossterm::{
     event, execute,
@@ -189,9 +190,13 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut graphics = GraphicsRenderer::probe();
     let mut chart_graphics = graphics.secondary();
 
+    let lazy_remote_grib_collection = lazy_remote_grib_collection(datasets);
     let (load_tx, load_rx) = std::sync::mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     for (index, dataset) in datasets.iter().cloned().enumerate() {
+        if lazy_remote_grib_collection && index > 0 {
+            continue;
+        }
         let load_tx = load_tx.clone();
         let worker_cancelled = Arc::clone(&cancelled);
         std::thread::spawn(move || {
@@ -296,6 +301,39 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .position(Option::is_some)
         .ok_or("no dataset finished loading")?;
+    if lazy_remote_grib_collection {
+        let template = pending_sources[first_loaded]
+            .as_ref()
+            .ok_or("initial remote GRIB2 source disappeared")?;
+        let template_metadata = template.metadata().clone();
+        let first_variable = template
+            .metadata()
+            .variables
+            .iter()
+            .find(|variable| variable.numeric && variable.dimensions.len() >= 2)
+            .map(|variable| variable.name.clone());
+        let base_label = first_variable
+            .as_deref()
+            .and_then(|variable| template.time_label_for_variable(variable, 0));
+        let base_hour = datasets
+            .get(first_loaded)
+            .and_then(|dataset| forecast_hour(dataset))
+            .unwrap_or(0);
+        for (index, dataset) in datasets.iter().enumerate() {
+            if index == first_loaded {
+                continue;
+            }
+            pending_sources[index] = Some(Arc::new(LazyRemoteGribSource::new(
+                dataset,
+                &template_metadata,
+                base_label.as_deref(),
+                base_hour,
+                forecast_hour(dataset).unwrap_or(base_hour),
+            )));
+        }
+        loaded = datasets.len();
+        finished = datasets.len();
+    }
     let mut sources = pending_sources
         .into_iter()
         .enumerate()
@@ -318,6 +356,12 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|(index, error)| format!("{}: {error}", datasets[*index])),
     );
+    if lazy_remote_grib_collection {
+        state
+            .view
+            .collection_diagnostics
+            .push("remote GRIB2 collection ready; later forecast files open on demand".into());
+    }
     if finished < datasets.len() {
         state.view.collection_diagnostics.push(format!(
             "opening {}/{} sources; remaining inputs continue in the background",
@@ -420,7 +464,6 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             apply_remote_plot(&mut state, message);
             dirty = true;
         }
-        let source = sources[active_file].as_ref();
         if state.view.playing
             && last_playback_tick.elapsed()
                 >= Duration::from_secs_f32(1.0 / state.view.playback_speed)
@@ -436,6 +479,14 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             last_playback_tick = Instant::now();
             dirty = true;
         }
+        // A timeline frame is backed by a source, not just by a local time
+        // coordinate. Keep the active source synchronized before rendering
+        // and before handling the next input so a frame change can actually
+        // switch the remote object being read.
+        if let Some(point) = state.view.timeline.get(state.view.time_index) {
+            active_file = point.source_index;
+        }
+        let source = sources[active_file].as_ref();
 
         if (dirty || graphics.has_pending_image() || chart_graphics.has_pending_image())
             && last_render.elapsed() >= frame_budget
@@ -716,6 +767,232 @@ fn collection_variables(sources: &[Arc<dyn data::DataSource>]) -> Vec<Variable> 
         }
     }
     variables
+}
+
+fn lazy_remote_grib_collection(datasets: &[String]) -> bool {
+    let Some(first_key) = datasets
+        .first()
+        .and_then(|dataset| forecast_collection_key(dataset))
+    else {
+        return false;
+    };
+    datasets.len() > 1
+        && datasets
+            .iter()
+            .all(|dataset| forecast_collection_key(dataset).is_some_and(|key| key == first_key))
+}
+
+fn forecast_collection_key(dataset: &str) -> Option<String> {
+    let location = ncview_rs::storage::location::SourceLocation::parse(dataset).ok()?;
+    if !location.is_remote()
+        || !location
+            .object_key()
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "grib" | "grib2" | "grb" | "grb2"
+                )
+            })
+    {
+        return None;
+    }
+    let marker = location.object_key().rfind(".f")?;
+    let suffix = &location.object_key()[marker + 2..];
+    if suffix.len() < 3
+        || !suffix[..3]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!(
+        "{}{}",
+        &location.object_key()[..marker],
+        &suffix[3..]
+    ))
+}
+
+fn forecast_hour(dataset: &str) -> Option<u32> {
+    let marker = dataset.rfind(".f")? + 2;
+    let digits = dataset[marker..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+struct LazyRemoteGribSource {
+    path: String,
+    metadata: DatasetMetadata,
+    time_label: Option<String>,
+    source: std::sync::OnceLock<Arc<dyn data::DataSource>>,
+}
+
+impl LazyRemoteGribSource {
+    fn new(
+        path: &str,
+        template: &DatasetMetadata,
+        base_label: Option<&str>,
+        base_hour: u32,
+        hour: u32,
+    ) -> Self {
+        let mut metadata = template.clone();
+        metadata.path = path.to_owned();
+        Self {
+            path: path.to_owned(),
+            metadata,
+            time_label: valid_time_from_forecast_hour(base_label, base_hour, hour)
+                .or_else(|| Some(format!("forecast f{hour:03}"))),
+            source: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn source(&self) -> Result<Arc<dyn data::DataSource>, String> {
+        if let Some(source) = self.source.get() {
+            return Ok(Arc::clone(source));
+        }
+        let source = data::open_location(&self.path).map_err(|error| error.to_string())?;
+        let source: Arc<dyn data::DataSource> = Arc::from(source);
+        let _ = self.source.set(Arc::clone(&source));
+        Ok(self
+            .source
+            .get()
+            .map_or(source, |cached| Arc::clone(cached)))
+    }
+
+    fn request_for_source(
+        &self,
+        source: &dyn data::DataSource,
+        request: &SliceRequest,
+    ) -> Result<SliceRequest, String> {
+        if source
+            .metadata()
+            .variables
+            .iter()
+            .any(|variable| variable.name == request.variable)
+        {
+            return Ok(request.clone());
+        }
+        let ordinal = self
+            .metadata
+            .variables
+            .iter()
+            .position(|variable| variable.name == request.variable)
+            .ok_or_else(|| {
+                format!(
+                    "variable {} is not present in the collection",
+                    request.variable
+                )
+            })?;
+        let actual_variable = source
+            .metadata()
+            .variables
+            .get(ordinal)
+            .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+            .map(|variable| variable.name.clone())
+            .ok_or_else(|| {
+                format!(
+                    "variable {} is not present in the remote object",
+                    request.variable
+                )
+            })?;
+        let mut request = request.clone();
+        request.variable = actual_variable;
+        Ok(request)
+    }
+}
+
+fn valid_time_from_forecast_hour(
+    base_label: Option<&str>,
+    base_hour: u32,
+    hour: u32,
+) -> Option<String> {
+    let base = DateTime::parse_from_rfc3339(base_label?)
+        .ok()?
+        .with_timezone(&Utc);
+    let offset = i64::from(hour).checked_sub(i64::from(base_hour))?;
+    base.checked_add_signed(TimeDelta::try_hours(offset)?)
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+impl data::DataSource for LazyRemoteGribSource {
+    fn metadata(&self) -> &DatasetMetadata {
+        &self.metadata
+    }
+
+    fn is_remote(&self) -> bool {
+        true
+    }
+
+    fn read_slice(&self, request: &SliceRequest) -> ncview_rs::error::Result<Slice2D> {
+        let source = self
+            .source()
+            .map_err(|error| ncview_rs::error::NcvError::InvalidDataset {
+                path: self.path.clone().into(),
+                reason: format!("lazy remote GRIB2 open failed: {error}"),
+            })?;
+        let request = self
+            .request_for_source(source.as_ref(), request)
+            .map_err(|reason| ncview_rs::error::NcvError::InvalidDataset {
+                path: self.path.clone().into(),
+                reason,
+            })?;
+        source.read_slice(&request)
+    }
+
+    fn read_slice_on_axes(
+        &self,
+        request: &SliceRequest,
+        row_axis: Option<&str>,
+        col_axis: Option<&str>,
+        fixed_axes: &[(String, usize)],
+    ) -> ncview_rs::error::Result<Slice2D> {
+        let source = self
+            .source()
+            .map_err(|error| ncview_rs::error::NcvError::InvalidDataset {
+                path: self.path.clone().into(),
+                reason: format!("lazy remote GRIB2 open failed: {error}"),
+            })?;
+        let request = self
+            .request_for_source(source.as_ref(), request)
+            .map_err(|reason| ncview_rs::error::NcvError::InvalidDataset {
+                path: self.path.clone().into(),
+                reason,
+            })?;
+        source.read_slice_on_axes(&request, row_axis, col_axis, fixed_axes)
+    }
+
+    fn read_slice_on_axes_cancellable(
+        &self,
+        request: &SliceRequest,
+        row_axis: Option<&str>,
+        col_axis: Option<&str>,
+        fixed_axes: &[(String, usize)],
+        cancelled: Arc<AtomicBool>,
+    ) -> ncview_rs::error::Result<Slice2D> {
+        let source = self
+            .source()
+            .map_err(|error| ncview_rs::error::NcvError::InvalidDataset {
+                path: self.path.clone().into(),
+                reason: format!("lazy remote GRIB2 open failed: {error}"),
+            })?;
+        let request = self
+            .request_for_source(source.as_ref(), request)
+            .map_err(|reason| ncview_rs::error::NcvError::InvalidDataset {
+                path: self.path.clone().into(),
+                reason,
+            })?;
+        source.read_slice_on_axes_cancellable(&request, row_axis, col_axis, fixed_axes, cancelled)
+    }
+
+    fn time_label(&self, _index: usize) -> Option<String> {
+        self.time_label.clone()
+    }
+
+    fn time_label_for_variable(&self, _variable: &str, _index: usize) -> Option<String> {
+        self.time_label.clone()
+    }
 }
 
 fn loading_phase(message: &str) -> OperationPhase {

@@ -15,7 +15,7 @@ mod vendored {
     include!(concat!(env!("OUT_DIR"), "/vendored_colormaps.rs"));
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScaleMode {
     Linear,
     Log,
@@ -30,7 +30,7 @@ impl ScaleMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Palette {
     Viridis,
     Plasma,
@@ -49,7 +49,7 @@ pub enum Palette {
     Reversed(Box<Palette>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScientificColorMap {
     pub name: String,
     pub colors: Vec<[u8; 3]>,
@@ -123,7 +123,7 @@ impl<'a> PaletteSampler<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct MapOverlayColors {
     pub(crate) ocean: [u8; 3],
     pub(crate) land: [u8; 3],
