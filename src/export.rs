@@ -1,7 +1,8 @@
 //! File exporters for the current scientific view.
 
-use std::{env, fmt::Write as FmtWrite, fs, io::Cursor, path::Path};
+use std::{env, fmt::Write as FmtWrite, fs, io::Cursor, path::Path, sync::OnceLock};
 
+use ab_glyph::{Font, FontRef, Point, PxScale, ScaleFont};
 use base64_simd::STANDARD;
 use image::{
     DynamicImage, ImageFormat, RgbImage, Rgba, RgbaImage,
@@ -76,7 +77,7 @@ pub fn write_slice_svg(
     let text_muted = if light_text { "#94a3b8" } else { "#4b5563" };
     let border = if light_text { "#cbd5e1" } else { "#6b7280" };
     let font_family = env::var("NCVIEW_EXPORT_FONT")
-        .unwrap_or_else(|_| "JetBrainsMono Nerd Font, Symbols Nerd Font, sans-serif".into());
+        .unwrap_or_else(|_| "Fira Code, monospace".into());
     let font_family = escape_xml(&font_family);
     let mut svg = String::new();
     writeln!(
@@ -208,17 +209,18 @@ pub fn write_slice_png(
 
     let metadata_lines = [
         format!(
-            "TIME: {}  |  DEPTH INDEX: {}",
+            "TIME: {}  |  Depth Index: {}",
             time_label.unwrap_or("TIME"),
             depth_index
         ),
-        format!("LONG_NAME: {}", long_name.unwrap_or("—")),
-        format!("STANDARD_NAME: {}", standard_name.unwrap_or("—")),
-        format!("UNITS: {}", units.unwrap_or("—")),
+        format!("Long_Name: {}", long_name.unwrap_or("—")),
+        format!("Standard_Name: {}", standard_name.unwrap_or("—")),
+        format!("units: {}", units.unwrap_or("—")),
     ];
-    draw_text(&mut canvas, 56, 20, variable, foreground, 4);
+    draw_text(&mut canvas, 56.0, 52.0, 30.0, variable, foreground);
     for (index, line) in metadata_lines.iter().enumerate() {
-        draw_text(&mut canvas, 56, 64 + index as u32 * 16, line, foreground, 2);
+        let y = 78.0 + index as f32 * 16.0;
+        draw_text(&mut canvas, 56.0, y, 13.0, line, foreground);
     }
 
     // Frame the map and colorbar with a high-contrast, presentation-safe line.
@@ -260,16 +262,16 @@ pub fn write_slice_png(
     let (min, max) = limits;
     draw_text(
         &mut canvas,
-        BAR_X,
-        184,
-        units.unwrap_or("VALUE"),
+        BAR_X as f32,
+        180.0,
+        18.0,
+        units.unwrap_or("value"),
         foreground,
-        3,
     );
     for (value, label) in legend_ticks(min, max, scale) {
         let fraction = fraction_for(value, min, max, scale);
         let y = BAR_Y + ((BAR_HEIGHT - 1) as f64 * (1.0 - fraction)).round() as u32;
-        for x in BAR_X + BAR_WIDTH..(BAR_X + BAR_WIDTH + 12).min(WIDTH) {
+        for x in BAR_X + BAR_WIDTH..(BAR_X + BAR_WIDTH + 8).min(WIDTH) {
             for offset in 0..2 {
                 if y + offset < HEIGHT {
                     canvas.put_pixel(x, y + offset, foreground);
@@ -278,11 +280,11 @@ pub fn write_slice_png(
         }
         draw_text(
             &mut canvas,
-            BAR_X + BAR_WIDTH + 18,
-            y.saturating_sub(7),
+            (BAR_X + BAR_WIDTH + 12) as f32,
+            y as f32 + 5.0,
+            15.0,
             &label,
             foreground,
-            2,
         );
     }
     canvas.save_with_format(path, ImageFormat::Png)?;
@@ -342,178 +344,67 @@ fn export_light_text() -> bool {
         .unwrap_or(false)
 }
 
-/// Draw presentation text without a system-font dependency. The compact 5x7
-/// glyphs are deliberately embedded so PNG exports render identically on macOS,
-/// Linux, Windows, and headless HPC login nodes.
-fn draw_text(image: &mut RgbaImage, x: u32, y: u32, text: &str, color: Rgba<u8>, scale: u32) {
-    let mut cursor_x = x;
-    for character in text.chars() {
-        if cursor_x >= image.width() {
-            break;
-        }
-        let glyph = glyph_for(character);
-        for (row, bits) in glyph.iter().enumerate() {
-            for column in 0..5u32 {
-                if bits & (1 << (4 - column)) == 0 {
-                    continue;
-                }
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let px = cursor_x + column * scale + dx;
-                        let py = y + row as u32 * scale + dy;
-                        if px < image.width() && py < image.height() {
-                            image.put_pixel(px, py, color);
-                        }
-                    }
-                }
-            }
-        }
-        cursor_x = cursor_x.saturating_add(6 * scale);
-    }
+fn get_fira_code_font() -> &'static FontRef<'static> {
+    static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        FontRef::try_from_slice(include_bytes!("../assets/fonts/FiraCode-Regular.ttf"))
+            .expect("embedded FiraCode font must be valid TTF")
+    })
 }
 
-fn glyph_for(character: char) -> [u8; 7] {
-    let character = match character {
-        'µ' | 'μ' => 'u',
-        '−' | '–' | '—' => '-',
-        '²' => '2',
-        '³' => '3',
-        '·' | '×' => '*',
-        '°' => 'o',
-        character => character,
-    };
-    match character.to_ascii_uppercase() {
-        'A' => [
-            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-        'B' => [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
-        ],
-        'C' => [
-            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
-        ],
-        'D' => [
-            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
-        ],
-        'E' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
-        ],
-        'F' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-        'G' => [
-            0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
-        ],
-        'H' => [
-            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-        'I' => [
-            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
-        ],
-        'J' => [
-            0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100,
-        ],
-        'K' => [
-            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
-        ],
-        'L' => [
-            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
-        ],
-        'M' => [
-            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
-        ],
-        'N' => [
-            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
-        ],
-        'O' => [
-            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-        'P' => [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-        'Q' => [
-            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
-        ],
-        'R' => [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
-        ],
-        'S' => [
-            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
-        ],
-        'T' => [
-            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-        'U' => [
-            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-        'V' => [
-            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
-        ],
-        'W' => [
-            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
-        ],
-        'X' => [
-            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
-        ],
-        'Y' => [
-            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-        'Z' => [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
-        ],
-        '0' => [
-            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-        ],
-        '1' => [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-        '2' => [
-            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
-        ],
-        '3' => [
-            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
-        ],
-        '4' => [
-            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-        ],
-        '5' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
-        ],
-        '6' => [
-            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
-        ],
-        '7' => [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-        '8' => [
-            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-        ],
-        '9' => [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
-        ],
-        '-' => [0, 0, 0, 0b11111, 0, 0, 0],
-        '_' => [0, 0, 0, 0, 0, 0, 0b11111],
-        ':' => [0, 0b00100, 0, 0, 0b00100, 0, 0],
-        '.' => [0, 0, 0, 0, 0, 0b00110, 0b00110],
-        ',' => [0, 0, 0, 0, 0, 0b00110, 0b00100],
-        '/' => [0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0, 0],
-        '+' => [0, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0],
-        '=' => [0, 0, 0b11111, 0, 0b11111, 0, 0],
-        '|' => [
-            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-        '(' => [
-            0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010,
-        ],
-        ')' => [
-            0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000,
-        ],
-        '%' => [
-            0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011,
-        ],
-        '*' => [0, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0],
-        ' ' => [0; 7],
-        _ => [0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0, 0b00100],
+/// Draw presentation text on PNG using embedded Fira Code TTF font.
+fn draw_text(image: &mut RgbaImage, x: f32, baseline_y: f32, px_size: f32, text: &str, color: Rgba<u8>) {
+    let font = get_fira_code_font();
+    let scale = PxScale::from(px_size);
+    let scaled_font = font.as_scaled(scale);
+
+    let mut cursor_x = x;
+
+    for c in text.chars() {
+        let glyph_id = font.glyph_id(c);
+        let glyph = glyph_id.with_scale_and_position(scale, Point { x: cursor_x, y: baseline_y });
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, c_val| {
+                if c_val <= 0.0 {
+                    return;
+                }
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px >= 0 && (px as u32) < image.width() && py >= 0 && (py as u32) < image.height() {
+                    let px = px as u32;
+                    let py = py as u32;
+                    let alpha = (c_val * color[3] as f32).round() as u8;
+                    if alpha == 0 {
+                        return;
+                    }
+                    if alpha == 255 || color[3] == 0 {
+                        let bg = image.get_pixel(px, py);
+                        if bg[3] == 0 {
+                            image.put_pixel(px, py, Rgba([color[0], color[1], color[2], alpha]));
+                        } else {
+                            let a_f = alpha as f32 / 255.0;
+                            let inv_a = 1.0 - a_f;
+                            let r = (color[0] as f32 * a_f + bg[0] as f32 * inv_a).round() as u8;
+                            let g = (color[1] as f32 * a_f + bg[1] as f32 * inv_a).round() as u8;
+                            let b = (color[2] as f32 * a_f + bg[2] as f32 * inv_a).round() as u8;
+                            let out_a = (alpha as u16 + (bg[3] as u16 * (255 - alpha as u16)) / 255) as u8;
+                            image.put_pixel(px, py, Rgba([r, g, b, out_a]));
+                        }
+                    } else {
+                        let bg = image.get_pixel(px, py);
+                        let a_f = alpha as f32 / 255.0;
+                        let inv_a = 1.0 - a_f;
+                        let r = (color[0] as f32 * a_f + bg[0] as f32 * inv_a).round() as u8;
+                        let g = (color[1] as f32 * a_f + bg[1] as f32 * inv_a).round() as u8;
+                        let b = (color[2] as f32 * a_f + bg[2] as f32 * inv_a).round() as u8;
+                        let out_a = (alpha as u16 + (bg[3] as u16 * (255 - alpha as u16)) / 255) as u8;
+                        image.put_pixel(px, py, Rgba([r, g, b, out_a]));
+                    }
+                }
+            });
+        }
+        cursor_x += scaled_font.h_advance(glyph_id);
     }
 }
 
@@ -599,7 +490,10 @@ mod tests {
         .unwrap();
         let png = image::open(png_path).unwrap();
         assert_eq!(png.dimensions(), (1600, 900));
-        assert_ne!(png.to_rgba8().get_pixel(56, 20).0, [0, 0, 0, 0]);
+        let rgba = png.to_rgba8();
+        // Check text pixel around variable name position (x=56..120, y=30..52)
+        let has_text_pixel = (30..55).any(|y| (56..150).any(|x| rgba.get_pixel(x, y).0 != [0, 0, 0, 0]));
+        assert!(has_text_pixel);
 
         write_slice_metadata_json(
             &metadata_path,

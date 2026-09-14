@@ -1307,6 +1307,7 @@ dependencies = [
 name = "ncview-rs"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "base64-simd",
  "clap",
  "color-eyre",

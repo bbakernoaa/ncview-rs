@@ -114,9 +114,9 @@ fn ensure_chart_font() -> bool {
     static REGISTERED: OnceLock<bool> = OnceLock::new();
     *REGISTERED.get_or_init(|| {
         register_font(
-            "sans-serif",
+            "Fira Code",
             FontStyle::Normal,
-            include_bytes!("../../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf"),
+            include_bytes!("../../assets/fonts/FiraCode-Regular.ttf"),
         )
         .is_ok()
     })
@@ -202,7 +202,7 @@ fn draw_series_image(
     let grid = RGBColor(57, 63, 78);
     let mut chart = PlotChartBuilder::on(root)
         .margin(24)
-        .caption(title, ("sans-serif", 32).into_font().color(&text))
+        .caption(title, ("Fira Code", 32).into_font().color(&text))
         .x_label_area_size(72)
         .y_label_area_size(104)
         .build_cartesian_2d(
@@ -223,8 +223,8 @@ fn draw_series_image(
         .y_desc(y_title)
         .x_labels(5)
         .y_labels(5)
-        .label_style(("sans-serif", 22).into_font().color(&text))
-        .axis_desc_style(("sans-serif", 25).into_font().color(&text))
+        .label_style(("Fira Code", 22).into_font().color(&text))
+        .axis_desc_style(("Fira Code", 25).into_font().color(&text))
         .axis_style(text)
         .bold_line_style(grid)
         .light_line_style(RGBColor(35, 39, 51));
@@ -279,7 +279,7 @@ fn draw_series_image(
             .configure_series_labels()
             .background_style(RGBColor(28, 28, 40))
             .border_style(RGBColor(90, 98, 120))
-            .label_font(("sans-serif", 22).into_font().color(&text))
+            .label_font(("Fira Code", 22).into_font().color(&text))
             .draw()
             .ok()?;
     }
@@ -348,7 +348,7 @@ fn draw_histogram_image(
         .margin(24)
         .caption(
             format!("Histogram · value bins · {y_name} · n={}", finite.len()),
-            ("sans-serif", 32).into_font().color(&text),
+            ("Fira Code", 32).into_font().color(&text),
         )
         .x_label_area_size(72)
         .y_label_area_size(104)
@@ -360,8 +360,8 @@ fn draw_histogram_image(
         .y_desc(y_name)
         .x_labels(bin_count.min(8))
         .y_labels(5)
-        .label_style(("sans-serif", 22).into_font().color(&text))
-        .axis_desc_style(("sans-serif", 25).into_font().color(&text))
+        .label_style(("Fira Code", 22).into_font().color(&text))
+        .axis_desc_style(("Fira Code", 25).into_font().color(&text))
         .axis_style(text)
         .bold_line_style(RGBColor(57, 63, 78))
         .light_line_style(RGBColor(35, 39, 51))
@@ -413,7 +413,7 @@ fn draw_cdf_image(
         .margin(24)
         .caption(
             format!("Cumulative distribution · n={}", finite.len()),
-            ("sans-serif", 32).into_font().color(&text),
+            ("Fira Code", 32).into_font().color(&text),
         )
         .x_label_area_size(72)
         .y_label_area_size(104)
@@ -425,8 +425,8 @@ fn draw_cdf_image(
         .y_desc("cumulative (%)")
         .x_labels(6)
         .y_labels(5)
-        .label_style(("sans-serif", 22).into_font().color(&text))
-        .axis_desc_style(("sans-serif", 25).into_font().color(&text))
+        .label_style(("Fira Code", 22).into_font().color(&text))
+        .axis_desc_style(("Fira Code", 25).into_font().color(&text))
         .axis_style(text)
         .bold_line_style(RGBColor(57, 63, 78))
         .light_line_style(RGBColor(35, 39, 51))
