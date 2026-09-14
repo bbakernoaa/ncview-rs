@@ -76,8 +76,8 @@ pub fn write_slice_svg(
     let text_secondary = if light_text { "#cbd5e1" } else { "#374151" };
     let text_muted = if light_text { "#94a3b8" } else { "#4b5563" };
     let border = if light_text { "#cbd5e1" } else { "#6b7280" };
-    let font_family = env::var("NCVIEW_EXPORT_FONT")
-        .unwrap_or_else(|_| "Fira Code, monospace".into());
+    let font_family =
+        env::var("NCVIEW_EXPORT_FONT").unwrap_or_else(|_| "Fira Code, monospace".into());
     let font_family = escape_xml(&font_family);
     let mut svg = String::new();
     writeln!(
@@ -353,7 +353,14 @@ fn get_fira_code_font() -> &'static FontRef<'static> {
 }
 
 /// Draw presentation text on PNG using embedded Fira Code TTF font.
-fn draw_text(image: &mut RgbaImage, x: f32, baseline_y: f32, px_size: f32, text: &str, color: Rgba<u8>) {
+fn draw_text(
+    image: &mut RgbaImage,
+    x: f32,
+    baseline_y: f32,
+    px_size: f32,
+    text: &str,
+    color: Rgba<u8>,
+) {
     let font = get_fira_code_font();
     let scale = PxScale::from(px_size);
     let scaled_font = font.as_scaled(scale);
@@ -362,7 +369,13 @@ fn draw_text(image: &mut RgbaImage, x: f32, baseline_y: f32, px_size: f32, text:
 
     for c in text.chars() {
         let glyph_id = font.glyph_id(c);
-        let glyph = glyph_id.with_scale_and_position(scale, Point { x: cursor_x, y: baseline_y });
+        let glyph = glyph_id.with_scale_and_position(
+            scale,
+            Point {
+                x: cursor_x,
+                y: baseline_y,
+            },
+        );
         if let Some(outlined) = font.outline_glyph(glyph) {
             let bounds = outlined.px_bounds();
             outlined.draw(|gx, gy, c_val| {
@@ -371,7 +384,8 @@ fn draw_text(image: &mut RgbaImage, x: f32, baseline_y: f32, px_size: f32, text:
                 }
                 let px = bounds.min.x as i32 + gx as i32;
                 let py = bounds.min.y as i32 + gy as i32;
-                if px >= 0 && (px as u32) < image.width() && py >= 0 && (py as u32) < image.height() {
+                if px >= 0 && (px as u32) < image.width() && py >= 0 && (py as u32) < image.height()
+                {
                     let px = px as u32;
                     let py = py as u32;
                     let alpha = (c_val * color[3] as f32).round() as u8;
@@ -388,7 +402,8 @@ fn draw_text(image: &mut RgbaImage, x: f32, baseline_y: f32, px_size: f32, text:
                             let r = (color[0] as f32 * a_f + bg[0] as f32 * inv_a).round() as u8;
                             let g = (color[1] as f32 * a_f + bg[1] as f32 * inv_a).round() as u8;
                             let b = (color[2] as f32 * a_f + bg[2] as f32 * inv_a).round() as u8;
-                            let out_a = (alpha as u16 + (bg[3] as u16 * (255 - alpha as u16)) / 255) as u8;
+                            let out_a =
+                                (alpha as u16 + (bg[3] as u16 * (255 - alpha as u16)) / 255) as u8;
                             image.put_pixel(px, py, Rgba([r, g, b, out_a]));
                         }
                     } else {
@@ -398,7 +413,8 @@ fn draw_text(image: &mut RgbaImage, x: f32, baseline_y: f32, px_size: f32, text:
                         let r = (color[0] as f32 * a_f + bg[0] as f32 * inv_a).round() as u8;
                         let g = (color[1] as f32 * a_f + bg[1] as f32 * inv_a).round() as u8;
                         let b = (color[2] as f32 * a_f + bg[2] as f32 * inv_a).round() as u8;
-                        let out_a = (alpha as u16 + (bg[3] as u16 * (255 - alpha as u16)) / 255) as u8;
+                        let out_a =
+                            (alpha as u16 + (bg[3] as u16 * (255 - alpha as u16)) / 255) as u8;
                         image.put_pixel(px, py, Rgba([r, g, b, out_a]));
                     }
                 }
@@ -492,7 +508,8 @@ mod tests {
         assert_eq!(png.dimensions(), (1600, 900));
         let rgba = png.to_rgba8();
         // Check text pixel around variable name position (x=56..120, y=30..52)
-        let has_text_pixel = (30..55).any(|y| (56..150).any(|x| rgba.get_pixel(x, y).0 != [0, 0, 0, 0]));
+        let has_text_pixel =
+            (30..55).any(|y| (56..150).any(|x| rgba.get_pixel(x, y).0 != [0, 0, 0, 0]));
         assert!(has_text_pixel);
 
         write_slice_metadata_json(
