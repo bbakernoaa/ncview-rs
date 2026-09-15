@@ -22,6 +22,10 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: ncv-linux-x86_64.tar.gz
+          - name: Linux x86_64 (musl, static)
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: ncv-linux-x86_64-musl.tar.gz
           - name: macOS arm64
             os: macos-latest
             target: aarch64-apple-darwin
@@ -34,6 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: matrix.target != 'x86_64-unknown-linux-musl'
         with:
           toolchain: stable
           target: ${{ matrix.target }}
@@ -59,7 +64,34 @@ jobs:
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "VCPKG_TARGET_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CMAKE_TOOLCHAIN_FILE=$(Join-Path $vcpkgRoot 'scripts/buildsystems/vcpkg.cmake')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Build standard target
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Build static musl target
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --workdir /work \
+            rust:alpine \
+            sh -euxc '\
+              apk add --no-cache build-base cmake perl sqlite && \
+              rustup target add x86_64-unknown-linux-musl && \
+              export CC_x86_64_unknown_linux_musl=gcc CXX_x86_64_unknown_linux_musl=g++ && \
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc && \
+              export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static -C link-arg=-static-libstdc++ -C link-arg=-static-libgcc" && \
+              cargo build --locked --release --jobs 2 --target x86_64-unknown-linux-musl'
+      - name: Verify static musl binary
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/ncv"
+          file_output="$(file "$binary")"
+          printf '%s\n' "$file_output"
+          if [[ "$file_output" != *"statically linked"* && "$file_output" != *"static-pie linked"* ]]; then
+            exit 1
+          fi
       - name: Package Unix binary
         if: runner.os != 'Windows'
         shell: bash

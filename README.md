@@ -31,8 +31,9 @@ cargo install --path . --locked
 ncv path/to/data.nc
 ```
 
-The release workflow publishes Linux x86_64, macOS arm64, and Windows x86_64 archives for tags
-named `v*`. Each release includes a `SHA256SUMS` file.
+The release workflow publishes Linux x86_64, a glibc-independent static Linux x86_64 (musl),
+macOS arm64, and Windows x86_64 archives for tags named `v*`. Each release includes a
+`SHA256SUMS` file. On older HPC distributions, use `ncv-linux-x86_64-musl.tar.gz`.
 
 ## Screenshots
 
@@ -246,7 +247,11 @@ generated exports are ignored by Git; they should not be committed to the reposi
 ## Releases and Versioning
 
 This project strictly adheres to [Semantic Versioning 2.0.0](https://semver.org/).
-Cross-platform binary archives (Linux x86_64, macOS arm64, Windows x86_64) and SHA256 checksums are automatically built and published via GitHub Actions whenever a Git tag following the `v*` pattern (e.g. `v0.1.0`) is pushed to the repository. The latest pre-built releases are accessible on the [GitHub Releases Page](https://github.com/bbakernoaa/ncview-rs/releases).
+Cross-platform binary archives (Linux x86_64 glibc, Linux x86_64 musl/static, macOS arm64, and
+Windows x86_64) and SHA256 checksums are automatically built and published via GitHub Actions
+whenever a Git tag following the `v*` pattern (e.g. `v0.1.0`) is pushed to the repository. The
+musl archive is intended for older HPC distributions whose glibc is too old for the regular Linux
+build. The latest pre-built releases are accessible on the [GitHub Releases Page](https://github.com/bbakernoaa/ncview-rs/releases).
 
 ## License
 

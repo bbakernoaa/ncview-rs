@@ -88,3 +88,32 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  musl:
+    name: Build static Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build x86_64-unknown-linux-musl
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --workdir /work \
+            rust:alpine \
+            sh -euxc '\
+              apk add --no-cache build-base cmake perl sqlite && \
+              rustup target add x86_64-unknown-linux-musl && \
+              export CC_x86_64_unknown_linux_musl=gcc CXX_x86_64_unknown_linux_musl=g++ && \
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc && \
+              export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static -C link-arg=-static-libstdc++ -C link-arg=-static-libgcc" && \
+              cargo build --locked --release --jobs 2 --target x86_64-unknown-linux-musl'
+      - name: Verify binary is statically linked
+        shell: bash
+        run: |
+          binary=target/x86_64-unknown-linux-musl/release/ncv
+          file_output="$(file "$binary")"
+          printf '%s\n' "$file_output"
+          if [[ "$file_output" != *"statically linked"* && "$file_output" != *"static-pie linked"* ]]; then
+            exit 1
+          fi

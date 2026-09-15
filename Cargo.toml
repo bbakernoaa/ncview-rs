@@ -58,6 +58,13 @@ tempfile = "3"
 [build-dependencies]
 serde_json = "1"
 
+# A musl build cannot use a host libproj or SQLite built for glibc.  Enable
+# both bundled builds only for the static Linux release target; native builds
+# retain the normal system-PROJ discovery behavior.
+[target.'cfg(target_env = "musl")'.dependencies]
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+proj = { version = "0.31", default-features = false, features = ["bundled_proj"] }
+
 [[bench]]
 name = "interactive_paths"
 harness = false
