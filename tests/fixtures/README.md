@@ -1,9 +1,11 @@
 # Synthetic fixtures
 
 Remote-streaming tests serve byte-identical copies of these deterministic fixtures through the
-in-process object-store test double. Large-object coverage pads a fixture at runtime, so no cloud
-object or generated operational dataset is committed. Optional live-provider checks must remain
-environment-gated and must never record credentials.
+in-process object-store test double. These small fixtures are intentionally committed so a clean
+checkout can compile and run the tests; the ignore rules for local datasets explicitly exempt them.
+Large-object coverage pads a fixture at runtime, so no cloud object or generated operational dataset
+is committed. Optional live-provider checks must remain environment-gated and must never record
+credentials.
 
 Fixture builders use small, redistributable arrays with documented expected values. The
 COARDS/CF NetCDF-4 fixture is generated from `coards-float32.cdl`, so tests do not depend on a

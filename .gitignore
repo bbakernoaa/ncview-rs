@@ -5,6 +5,9 @@
 # Local datasets and generated presentation exports
 *.nc
 *.nc4
+# Deterministic NetCDF fixtures are part of the test suite.
+!tests/fixtures/*.nc
+!tests/fixtures/*.nc4
 *_t[0-9]*_z[0-9]*.png
 *_t[0-9]*_z[0-9]*.svg
 *_t[0-9]*_z[0-9]*.json
