@@ -18,6 +18,7 @@ use crate::{
     storage::{
         StorageRuntime,
         object_store::{ByteRange, ObjectIdentity, RemoteStore},
+        receive,
     },
 };
 
@@ -191,17 +192,4 @@ fn report(progress: &dyn Fn(&str) -> bool, message: &str) -> Result<()> {
     } else {
         Err(NcvError::WorkerStopped)
     }
-}
-
-fn receive<T>(
-    runtime: &StorageRuntime,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> Result<T>
-where
-    T: Send + 'static,
-{
-    runtime
-        .submit(future)?
-        .recv()
-        .map_err(|_| NcvError::WorkerStopped)
 }

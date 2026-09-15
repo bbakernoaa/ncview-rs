@@ -11,7 +11,7 @@ use grib::{Grib2SubmessageDecoder, LatLons};
 use ndarray::Array2;
 
 use super::grib2_catalog::TableCatalog;
-use super::grib2_identity::{FieldIdentity, aerosol_type_code_for};
+use super::grib2_identity::{FieldIdentity, aerosol_type_code_for, slug};
 use super::grib2_types::{Grib2MessageHeader, Grib2SourceLocation};
 use super::slice::{CoordinateGrid, Slice2D, SliceRequest, Validity};
 use super::{
@@ -647,7 +647,7 @@ fn unique_variable_name(
         return preferred.to_owned();
     }
 
-    let time_suffix = slug_component(time_label);
+    let time_suffix = slug(time_label);
     if !time_suffix.is_empty() {
         let candidate = format!("{preferred}_valid_{time_suffix}");
         if used_names.insert(candidate.clone()) {
@@ -674,12 +674,12 @@ fn surface_qualifier(
         return None;
     }
     let (label, _, _) = first.describe();
-    let slugged_label = slug_component(&label);
+    let slugged_label = slug(&label);
     let machine_label = slugged_label
         .strip_suffix("_surface")
         .unwrap_or(&slugged_label)
         .to_owned();
-    let unit = first.unit().map(slug_component).unwrap_or_default();
+    let unit = first.unit().map(slug).unwrap_or_default();
     let display_label = label
         .strip_suffix(" surface")
         .unwrap_or(&label)
@@ -723,20 +723,6 @@ fn compact_number(value: f64) -> String {
         result.pop();
     }
     result
-}
-
-fn slug_component(value: &str) -> String {
-    let mut result = String::new();
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            result.push(character.to_ascii_lowercase());
-        } else if character == '.' {
-            result.push('p');
-        } else if !result.ends_with('_') {
-            result.push('_');
-        }
-    }
-    result.trim_matches('_').to_owned()
 }
 
 fn iso_datetime(value: &grib::def::grib2::template::param_set::DateTime) -> String {

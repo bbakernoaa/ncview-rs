@@ -168,74 +168,9 @@ fn rasterize(
             let (row_chunks, _) = row_bytes.as_chunks_mut::<3>();
             for (output_col, chunk) in row_chunks.iter_mut().enumerate() {
                 let (col_start, col_end) = col_bins[output_col];
-                let mut sum = 0.0;
-                let mut count = 0_usize;
-                let mut filtered = false;
-
-                if let (Some(v_s), Some(m_s)) = (v_slice, m_slice) {
-                    if let Some((f_min, f_max)) = filter {
-                        for row in row_start..row_end {
-                            let row_offset = row * cols;
-                            let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
-                            let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
-                            for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
-                                if mask == crate::data::slice::Validity::Finite && value.is_finite()
-                                {
-                                    if value < f_min || value > f_max {
-                                        filtered = true;
-                                    } else {
-                                        sum += value;
-                                        count += 1;
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        for row in row_start..row_end {
-                            let row_offset = row * cols;
-                            let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
-                            let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
-                            for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
-                                if mask == crate::data::slice::Validity::Finite && value.is_finite()
-                                {
-                                    sum += value;
-                                    count += 1;
-                                }
-                            }
-                        }
-                    }
-                } else if let Some((f_min, f_max)) = filter {
-                    for row in row_start..row_end {
-                        for col in col_start..col_end {
-                            let value = slice.values[(row, col)];
-                            if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
-                                || !value.is_finite()
-                            {
-                                continue;
-                            }
-                            if value < f_min || value > f_max {
-                                filtered = true;
-                                continue;
-                            }
-                            sum += value;
-                            count += 1;
-                        }
-                    }
-                } else {
-                    for row in row_start..row_end {
-                        for col in col_start..col_end {
-                            let value = slice.values[(row, col)];
-                            if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
-                                || !value.is_finite()
-                            {
-                                continue;
-                            }
-                            sum += value;
-                            count += 1;
-                        }
-                    }
-                }
-
+                let (sum, count, filtered) = aggregate_bin(
+                    slice, v_slice, m_slice, row_start, row_end, col_start, col_end, filter,
+                );
                 let background_rgb =
                     background_ref.map(|bg| bg.get_pixel(output_col as u32, output_row as u32).0);
                 let mut rgb = if count == 0 {
@@ -260,6 +195,89 @@ fn rasterize(
         mark_point(&mut image, slice, point, [255, 255, 255]);
     }
     image
+}
+
+#[allow(clippy::too_many_arguments)]
+fn aggregate_bin(
+    slice: &Slice2D,
+    values: Option<&[f64]>,
+    validity: Option<&[crate::data::slice::Validity]>,
+    row_start: usize,
+    row_end: usize,
+    col_start: usize,
+    col_end: usize,
+    filter: Option<(f64, f64)>,
+) -> (f64, usize, bool) {
+    let (_, cols) = slice.values.dim();
+    let v_slice = values;
+    let m_slice = validity;
+    let mut sum = 0.0;
+    let mut count = 0_usize;
+    let mut filtered = false;
+
+    if let (Some(v_s), Some(m_s)) = (v_slice, m_slice) {
+        if let Some((f_min, f_max)) = filter {
+            for row in row_start..row_end {
+                let row_offset = row * cols;
+                let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
+                let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
+                for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
+                    if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                        if value < f_min || value > f_max {
+                            filtered = true;
+                        } else {
+                            sum += value;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            for row in row_start..row_end {
+                let row_offset = row * cols;
+                let v_sub = &v_s[row_offset + col_start..row_offset + col_end];
+                let m_sub = &m_s[row_offset + col_start..row_offset + col_end];
+                for (&value, &mask) in v_sub.iter().zip(m_sub.iter()) {
+                    if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                        sum += value;
+                        count += 1;
+                    }
+                }
+            }
+        }
+    } else if let Some((f_min, f_max)) = filter {
+        for row in row_start..row_end {
+            for col in col_start..col_end {
+                let value = slice.values[(row, col)];
+                if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
+                    || !value.is_finite()
+                {
+                    continue;
+                }
+                if value < f_min || value > f_max {
+                    filtered = true;
+                    continue;
+                }
+                sum += value;
+                count += 1;
+            }
+        }
+    } else {
+        for row in row_start..row_end {
+            for col in col_start..col_end {
+                let value = slice.values[(row, col)];
+                if slice.validity[(row, col)] != crate::data::slice::Validity::Finite
+                    || !value.is_finite()
+                {
+                    continue;
+                }
+                sum += value;
+                count += 1;
+            }
+        }
+    }
+
+    (sum, count, filtered)
 }
 
 pub fn blend_rgb(background: [u8; 3], foreground: [u8; 3], opacity: f32) -> [u8; 3] {

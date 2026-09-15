@@ -114,6 +114,17 @@ impl StorageRuntime {
     }
 }
 
+pub(crate) fn receive<F, T>(runtime: &StorageRuntime, future: F) -> Result<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    runtime
+        .submit(future)?
+        .recv()
+        .map_err(|_| NcvError::WorkerStopped)
+}
+
 async fn wait_for_cancellation(cancelled: Arc<AtomicBool>) {
     while !cancelled.load(Ordering::Acquire) {
         tokio::time::sleep(Duration::from_millis(10)).await;

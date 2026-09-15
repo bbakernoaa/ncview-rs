@@ -76,127 +76,141 @@ pub fn command_from_key_with_search(
 
 pub fn command_from_key_with_mode(key: KeyEvent, mode: InputMode) -> Option<Command> {
     match mode {
-        InputMode::VariableSearch => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-                return Some(Command::OpenCommandPalette);
-            }
-            match key.code {
-                KeyCode::Esc => Some(Command::Quit),
-                KeyCode::Enter => Some(Command::SubmitVariableSearch),
-                KeyCode::Up => Some(Command::SelectVariable(0)),
-                KeyCode::Down => Some(Command::SelectVariable(1)),
-                KeyCode::Backspace => Some(Command::DeleteInput),
-                KeyCode::Char(character) => Some(Command::InputChar(character)),
-                _ => None,
-            }
-        }
-        InputMode::TextOverlay(overlay) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-                return Some(Command::OpenCommandPalette);
-            }
-            match key.code {
-                KeyCode::Esc => Some(Command::Quit),
-                KeyCode::Enter => match overlay {
-                    Overlay::CommandPalette => Some(Command::ExecuteCommandPalette),
-                    Overlay::Limits | Overlay::Filter => Some(Command::ApplyLimitDraft),
-                    _ => Some(Command::ActivatePoint),
-                },
-                KeyCode::Tab => Some(Command::NextLimitField),
-                KeyCode::Backspace => Some(Command::DeleteInput),
-                KeyCode::Up => match overlay {
-                    Overlay::CommandPalette => Some(Command::PaletteMove(-1)),
-                    Overlay::Axis => Some(Command::CycleAxis(-1)),
-                    _ => Some(Command::NextLimitField),
-                },
-                KeyCode::Down => match overlay {
-                    Overlay::CommandPalette => Some(Command::PaletteMove(1)),
-                    Overlay::Axis => Some(Command::CycleAxis(1)),
-                    _ => Some(Command::NextLimitField),
-                },
-                KeyCode::Char(character) => Some(Command::InputChar(character)),
-                _ => None,
-            }
-        }
-        InputMode::PlotOverlay => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(Command::Quit),
-            KeyCode::Tab => Some(Command::NextLimitField),
-            KeyCode::Up | KeyCode::Left => Some(Command::CyclePlotAxis(-1)),
-            KeyCode::Down | KeyCode::Right => Some(Command::CyclePlotAxis(1)),
-            KeyCode::Char('t') => Some(Command::SetPlotKind(crate::app::PlotKind::TimeSeries)),
-            KeyCode::Char('d') => Some(Command::SetPlotKind(crate::app::PlotKind::Scatter)),
-            KeyCode::Char('h') => Some(Command::SetPlotKind(crate::app::PlotKind::Histogram)),
-            KeyCode::Char('k') => Some(Command::SetPlotKind(crate::app::PlotKind::Cdf)),
-            KeyCode::Char('u') => Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile)),
-            KeyCode::Char('m') => Some(Command::TogglePointSelection),
-            KeyCode::Enter => Some(Command::ActivatePoint),
+        InputMode::VariableSearch => variable_search_command(key),
+        InputMode::TextOverlay(overlay) => text_overlay_command(key, overlay),
+        InputMode::PlotOverlay => plot_overlay_command(key),
+        InputMode::Help => help_command(key),
+        InputMode::Normal => normal_command(key),
+    }
+}
+
+fn command_palette_shortcut(key: KeyEvent) -> Option<Command> {
+    (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p'))
+        .then_some(Command::OpenCommandPalette)
+}
+
+fn variable_search_command(key: KeyEvent) -> Option<Command> {
+    command_palette_shortcut(key).or(match key.code {
+        KeyCode::Esc => Some(Command::Quit),
+        KeyCode::Enter => Some(Command::SubmitVariableSearch),
+        KeyCode::Up => Some(Command::SelectVariable(0)),
+        KeyCode::Down => Some(Command::SelectVariable(1)),
+        KeyCode::Backspace => Some(Command::DeleteInput),
+        KeyCode::Char(character) => Some(Command::InputChar(character)),
+        _ => None,
+    })
+}
+
+fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
+    command_palette_shortcut(key).or(match key.code {
+        KeyCode::Esc => Some(Command::Quit),
+        KeyCode::Enter => Some(match overlay {
+            Overlay::CommandPalette => Command::ExecuteCommandPalette,
+            Overlay::Limits | Overlay::Filter => Command::ApplyLimitDraft,
+            _ => Command::ActivatePoint,
+        }),
+        KeyCode::Tab | KeyCode::Backspace => Some(match key.code {
+            KeyCode::Tab => Command::NextLimitField,
+            _ => Command::DeleteInput,
+        }),
+        KeyCode::Up => Some(text_overlay_direction(overlay, -1)),
+        KeyCode::Down => Some(text_overlay_direction(overlay, 1)),
+        KeyCode::Char(character) => Some(Command::InputChar(character)),
+        _ => None,
+    })
+}
+
+fn text_overlay_direction(overlay: Overlay, direction: isize) -> Command {
+    match overlay {
+        Overlay::CommandPalette => Command::PaletteMove(direction),
+        Overlay::Axis => Command::CycleAxis(direction),
+        _ => Command::NextLimitField,
+    }
+}
+
+fn plot_overlay_command(key: KeyEvent) -> Option<Command> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => Some(Command::Quit),
+        KeyCode::Tab => Some(Command::NextLimitField),
+        KeyCode::Up | KeyCode::Left => Some(Command::CyclePlotAxis(-1)),
+        KeyCode::Down | KeyCode::Right => Some(Command::CyclePlotAxis(1)),
+        KeyCode::Char('t') => Some(Command::SetPlotKind(crate::app::PlotKind::TimeSeries)),
+        KeyCode::Char('d') => Some(Command::SetPlotKind(crate::app::PlotKind::Scatter)),
+        KeyCode::Char('h') => Some(Command::SetPlotKind(crate::app::PlotKind::Histogram)),
+        KeyCode::Char('k') => Some(Command::SetPlotKind(crate::app::PlotKind::Cdf)),
+        KeyCode::Char('u') => Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile)),
+        KeyCode::Char('m') => Some(Command::TogglePointSelection),
+        KeyCode::Enter => Some(Command::ActivatePoint),
+        _ => None,
+    }
+}
+
+fn help_command(key: KeyEvent) -> Option<Command> {
+    matches!(
+        key.code,
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+    )
+    .then_some(Command::Quit)
+}
+
+fn normal_command(key: KeyEvent) -> Option<Command> {
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        let pan = match key.code {
+            KeyCode::Up => Some((-1, 0)),
+            KeyCode::Down => Some((1, 0)),
+            KeyCode::Left => Some((0, -1)),
+            KeyCode::Right => Some((0, 1)),
             _ => None,
-        },
-        InputMode::Help => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => Some(Command::Quit),
-            _ => None,
-        },
-        InputMode::Normal => {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                match key.code {
-                    KeyCode::Up => return Some(Command::Pan { rows: -1, cols: 0 }),
-                    KeyCode::Down => return Some(Command::Pan { rows: 1, cols: 0 }),
-                    KeyCode::Left => return Some(Command::Pan { rows: 0, cols: -1 }),
-                    KeyCode::Right => return Some(Command::Pan { rows: 0, cols: 1 }),
-                    _ => {}
-                }
-            }
-            match key.code {
-                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(Command::OpenCommandPalette)
-                }
-                KeyCode::Char(':') => Some(Command::OpenCommandPalette),
-                KeyCode::Char('/') => Some(Command::OpenVariableSearch),
-                KeyCode::Char('q') | KeyCode::Esc => Some(Command::Quit),
-                KeyCode::Char('?') => Some(Command::ToggleHelp),
-                KeyCode::Up => Some(Command::SelectVariable(0)),
-                KeyCode::Down => Some(Command::SelectVariable(1)),
-                KeyCode::Left => Some(Command::MoveTime(-1)),
-                KeyCode::Right => Some(Command::MoveTime(1)),
-                // Keep the compact sidebar controls usable from the keyboard too.
-                // Terminals report shifted angle brackets and plus as character keys.
-                KeyCode::Char('<') => Some(Command::MoveTime(-1)),
-                KeyCode::Char('>') => Some(Command::MoveTime(1)),
-                KeyCode::Char('-') => Some(Command::DecreasePlaybackSpeed),
-                KeyCode::Char('+') => Some(Command::IncreasePlaybackSpeed),
-                KeyCode::Char('[') => Some(Command::MoveDepth(-1)),
-                KeyCode::Char(']') => Some(Command::MoveDepth(1)),
-                KeyCode::Char('c') => Some(Command::CyclePalette),
-                KeyCode::Char('v') => Some(Command::TogglePaletteReverse),
-                KeyCode::Char('i') => Some(Command::CycleImageFilter),
-                KeyCode::Char('e') => Some(Command::ExportCurrent),
-                KeyCode::Char('a') => Some(Command::AutomaticLimits),
-                KeyCode::Char('l') => Some(Command::OpenLimits),
-                KeyCode::Char('f') => Some(Command::OpenFilter),
-                KeyCode::Char('p') => Some(Command::OpenPlot),
-                KeyCode::Char('t') => Some(Command::SetPlotKind(crate::app::PlotKind::TimeSeries)),
-                KeyCode::Char('d') => Some(Command::SetPlotKind(crate::app::PlotKind::Scatter)),
-                KeyCode::Char('h') => Some(Command::SetPlotKind(crate::app::PlotKind::Histogram)),
-                KeyCode::Char('k') => Some(Command::SetPlotKind(crate::app::PlotKind::Cdf)),
-                KeyCode::Char('u') => {
-                    Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile))
-                }
-                KeyCode::Char('r') => Some(Command::ResetZoom),
-                KeyCode::Char('x') => Some(Command::OpenAxisOverlay),
-                KeyCode::Enter => Some(Command::ActivatePoint),
-                KeyCode::Char('g') => Some(Command::ToggleGridMode),
-                KeyCode::Char('b') => Some(Command::ToggleLandBorders),
-                KeyCode::Char('z') => Some(Command::ToggleColorScaleScope),
-                KeyCode::Char('s') => Some(Command::ToggleScale),
-                KeyCode::Char('m') => Some(Command::TogglePointSelection),
-                KeyCode::Char(' ') => Some(Command::TogglePlayback),
-                KeyCode::Char('{') => Some(Command::PreviousFile),
-                KeyCode::Char('}') => Some(Command::NextFile),
-                KeyCode::Tab => Some(Command::NextLimitField),
-                KeyCode::Backspace => Some(Command::DeleteInput),
-                KeyCode::Char(character) => Some(Command::InputChar(character)),
-                _ => None,
-            }
+        };
+        if let Some((rows, cols)) = pan {
+            return Some(Command::Pan { rows, cols });
         }
+    }
+    match key.code {
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Command::OpenCommandPalette)
+        }
+        KeyCode::Char(':') => Some(Command::OpenCommandPalette),
+        KeyCode::Char('/') => Some(Command::OpenVariableSearch),
+        KeyCode::Char('q') | KeyCode::Esc => Some(Command::Quit),
+        KeyCode::Char('?') => Some(Command::ToggleHelp),
+        KeyCode::Up => Some(Command::SelectVariable(0)),
+        KeyCode::Down => Some(Command::SelectVariable(1)),
+        KeyCode::Left => Some(Command::MoveTime(-1)),
+        KeyCode::Right | KeyCode::Char('>') => Some(Command::MoveTime(1)),
+        KeyCode::Char('<') => Some(Command::MoveTime(-1)),
+        KeyCode::Char('-') => Some(Command::DecreasePlaybackSpeed),
+        KeyCode::Char('+') => Some(Command::IncreasePlaybackSpeed),
+        KeyCode::Char('[') => Some(Command::MoveDepth(-1)),
+        KeyCode::Char(']') => Some(Command::MoveDepth(1)),
+        KeyCode::Char('c') => Some(Command::CyclePalette),
+        KeyCode::Char('v') => Some(Command::TogglePaletteReverse),
+        KeyCode::Char('i') => Some(Command::CycleImageFilter),
+        KeyCode::Char('e') => Some(Command::ExportCurrent),
+        KeyCode::Char('a') => Some(Command::AutomaticLimits),
+        KeyCode::Char('l') => Some(Command::OpenLimits),
+        KeyCode::Char('f') => Some(Command::OpenFilter),
+        KeyCode::Char('p') => Some(Command::OpenPlot),
+        KeyCode::Char('t') => Some(Command::SetPlotKind(crate::app::PlotKind::TimeSeries)),
+        KeyCode::Char('d') => Some(Command::SetPlotKind(crate::app::PlotKind::Scatter)),
+        KeyCode::Char('h') => Some(Command::SetPlotKind(crate::app::PlotKind::Histogram)),
+        KeyCode::Char('k') => Some(Command::SetPlotKind(crate::app::PlotKind::Cdf)),
+        KeyCode::Char('u') => Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile)),
+        KeyCode::Char('r') => Some(Command::ResetZoom),
+        KeyCode::Char('x') => Some(Command::OpenAxisOverlay),
+        KeyCode::Enter => Some(Command::ActivatePoint),
+        KeyCode::Char('g') => Some(Command::ToggleGridMode),
+        KeyCode::Char('b') => Some(Command::ToggleLandBorders),
+        KeyCode::Char('z') => Some(Command::ToggleColorScaleScope),
+        KeyCode::Char('s') => Some(Command::ToggleScale),
+        KeyCode::Char('m') => Some(Command::TogglePointSelection),
+        KeyCode::Char(' ') => Some(Command::TogglePlayback),
+        KeyCode::Char('{') => Some(Command::PreviousFile),
+        KeyCode::Char('}') => Some(Command::NextFile),
+        KeyCode::Tab => Some(Command::NextLimitField),
+        KeyCode::Backspace => Some(Command::DeleteInput),
+        KeyCode::Char(character) => Some(Command::InputChar(character)),
+        _ => None,
     }
 }
 

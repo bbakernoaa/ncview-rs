@@ -292,7 +292,7 @@ fn compact_interval(first: &str, second: &str) -> String {
     }
 }
 
-fn slug(value: &str) -> String {
+pub(crate) fn slug(value: &str) -> String {
     let mut result = String::new();
     for character in value.chars() {
         if character.is_ascii_alphanumeric() {

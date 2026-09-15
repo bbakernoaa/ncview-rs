@@ -146,6 +146,7 @@ fn main() -> ExitCode {
 }
 
 fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let datasets = datasets.to_vec();
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         use std::io::Write;
@@ -190,7 +191,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut graphics = GraphicsRenderer::probe();
     let mut chart_graphics = graphics.secondary();
 
-    let lazy_remote_grib_collection = lazy_remote_grib_collection(datasets);
+    let lazy_remote_grib_collection = lazy_remote_grib_collection(&datasets);
     let (load_tx, load_rx) = std::sync::mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     for (index, dataset) in datasets.iter().cloned().enumerate() {
@@ -270,16 +271,18 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             status::render_loading(
                 frame,
                 frame.area(),
-                datasets,
+                &datasets,
                 loaded,
                 current_dataset.as_deref(),
                 loading_status.as_deref(),
             );
         })?;
-        if loaded > 0 {
-            break;
-        }
-        if finished == datasets.len() {
+        let metadata_loading_complete =
+            finished == datasets.len() || (lazy_remote_grib_collection && finished > 0);
+        if metadata_loading_complete {
+            if loaded > 0 {
+                break;
+            }
             cancelled.store(true, Ordering::Relaxed);
             let details = load_errors
                 .into_iter()
@@ -346,7 +349,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .map(|source| source.as_ref())
         .collect::<Vec<_>>();
     let mut manifest = VirtualDatasetManifest::from_sources(&source_refs);
-    let mut active_file = first_loaded;
+    let mut active_file = earliest_source_index(&sources);
     let initial_source = sources[active_file].as_ref();
     let mut state = state_for_source(initial_source);
     state.view.collection_diagnostics = manifest.diagnostics().to_vec();
@@ -379,7 +382,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         status::render_loading(
             frame,
             frame.area(),
-            datasets,
+            &datasets,
             loaded,
             Some("preparing initial field"),
             None,
@@ -542,169 +545,21 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             {
                 break;
             }
-            let file_delta = match command {
-                Command::PreviousFile => Some(-1isize),
-                Command::NextFile => Some(1isize),
-                _ => None,
-            };
-            if let Some(delta) = file_delta {
-                let palette = state.view.palette.clone();
-                let scale_mode = state.view.scale_mode;
-                let color_scale_scope = state.view.color_scale_scope;
-                let grid_mode = state.view.grid_mode;
-                let show_land_borders = state.view.show_land_borders;
-                let playback_speed = state.view.playback_speed;
-                let plot_generation = state.view.plot_generation;
-
-                active_file = bounded_file_index(active_file, delta, sources.len());
-                let source = sources[active_file].as_ref();
-                state = state_for_source(source);
-                state.view.collection_diagnostics = manifest.diagnostics().to_vec();
-                state.view.collection_progress = Some((finished, datasets.len()));
-                state.view.palette = palette;
-                state.view.scale_mode = scale_mode;
-                state.view.color_scale_scope = color_scale_scope;
-                state.view.grid_mode = grid_mode;
-                state.view.show_land_borders = show_land_borders;
-                state.view.playback_speed = playback_speed;
-                state.view.plot_generation = plot_generation;
-
-                select_initial_variable(&mut state, source.metadata());
-                configure_timeline(&mut state, &sources, &manifest, active_file);
-                load_selected(
-                    &mut state,
-                    &sources,
-                    active_file,
-                    &slice_tx,
-                    &mut slice_cancelled,
-                );
-                state.view.status = format!(
-                    "opened file {}/{}: {}",
-                    active_file + 1,
-                    datasets.len(),
-                    datasets[active_file]
-                );
+            if handle_command(
+                command,
+                &mut state,
+                &sources,
+                &datasets,
+                &mut active_file,
+                &manifest,
+                finished,
+                &slice_tx,
+                &mut slice_cancelled,
+                &plot_tx,
+                &mut plot_cancelled,
+                &mut graphics,
+            ) {
                 continue;
-            }
-            let source = sources[active_file].as_ref();
-            let dataset = &datasets[active_file];
-            let activate_point = matches!(command, Command::ActivatePoint);
-            let cycle_image_filter = matches!(command, Command::CycleImageFilter);
-            let export_current = matches!(command, Command::ExportCurrent);
-            let refresh_time_series = activate_point
-                || matches!(command, Command::OpenPlot)
-                || matches!(
-                    command,
-                    Command::MoveTime(_)
-                        | Command::SetTime(_)
-                        | Command::MoveDepth(_)
-                        | Command::CyclePlotAxis(_)
-                        | Command::SetPlotKind(_)
-                        | Command::TogglePointSelection
-                        | Command::SelectVariable(_)
-                        | Command::SelectVariableAt(_)
-                        | Command::SubmitVariableSearch
-                        | Command::ExecuteCommandPalette
-                        | Command::SetAxes { .. }
-                );
-            let reload = matches!(
-                command,
-                Command::SelectVariable(_)
-                    | Command::SelectVariableAt(_)
-                    | Command::MoveTime(_)
-                    | Command::SetTime(_)
-                    | Command::MoveDepth(_)
-                    | Command::TickPlayback
-                    | Command::SubmitVariableSearch
-                    | Command::ExecuteCommandPalette
-                    | Command::Zoom(_)
-                    | Command::ResetZoom
-                    | Command::Pan { .. }
-                    | Command::SetAxes { .. }
-                    | Command::AutomaticLimits
-                    | Command::ToggleColorScaleScope
-                    | Command::ToggleScale
-            );
-            let axis_submit = matches!(command, Command::ActivatePoint)
-                && state.view.overlay == Some(Overlay::Axis);
-            let reconfigure_timeline = matches!(
-                command,
-                Command::SelectVariable(_)
-                    | Command::SelectVariableAt(_)
-                    | Command::SubmitVariableSearch
-                    | Command::ExecuteCommandPalette
-                    | Command::SetAxes { .. }
-            ) || axis_submit;
-            let point_target = match &command {
-                Command::HoverPoint { row, col, .. } | Command::SelectPoint { row, col } => {
-                    Some((*row, *col))
-                }
-                Command::TogglePointSelection => state
-                    .view
-                    .hover_point
-                    .as_ref()
-                    .map(|point| (point.row, point.col)),
-                Command::ActivatePoint => state.view.selected_point,
-                _ => None,
-            };
-            let _ = state.reduce(command);
-            if cycle_image_filter {
-                if graphics.cycle_filter() {
-                    state.view.status = format!("image interpolation: {}", graphics.filter_label());
-                } else {
-                    state.view.status =
-                        "scientific rendering locked; set NCVIEW_SCIENTIFIC_RENDERING=0 to enable interpolation".into();
-                }
-            }
-            if export_current {
-                match export_current_slice(&state, dataset, source.metadata()) {
-                    Ok(path) => state.view.status = format!("exported {}", path.display()),
-                    Err(error) => state.view.status = format!("export failed: {error}"),
-                }
-            }
-            if let Some((row, col)) = point_target
-                && let Some(variable) = state.view.selected_variable.as_deref()
-            {
-                let coordinates = source.point_coordinates(variable, row, col);
-                if let Some(point) = state.view.hover_point.as_mut()
-                    && point.row == row
-                    && point.col == col
-                {
-                    point.latitude = coordinates.latitude;
-                    point.longitude = coordinates.longitude;
-                }
-                if state.view.selected_point == Some((row, col)) {
-                    state.view.selected_coordinates = coordinates;
-                }
-            }
-            if reload || axis_submit {
-                if reconfigure_timeline {
-                    configure_timeline(&mut state, &sources, &manifest, active_file);
-                }
-                load_selected(
-                    &mut state,
-                    &sources,
-                    active_file,
-                    &slice_tx,
-                    &mut slice_cancelled,
-                );
-            }
-            if refresh_time_series
-                && matches!(
-                    state.view.overlay,
-                    Some(Overlay::TimeSeries | Overlay::Plot)
-                )
-            {
-                load_time_series(
-                    &mut state,
-                    &sources,
-                    active_file,
-                    &plot_tx,
-                    &mut plot_cancelled,
-                );
-            }
-            if let Some(point) = state.view.timeline.get(state.view.time_index) {
-                active_file = point.source_index;
             }
         }
     }
@@ -713,6 +568,172 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     session.restore()?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_command(
+    command: Command,
+    state: &mut AppState,
+    sources: &[Arc<dyn data::DataSource>],
+    datasets: &[String],
+    active_file: &mut usize,
+    manifest: &VirtualDatasetManifest,
+    finished: usize,
+    slice_tx: &std::sync::mpsc::Sender<RemoteSliceMessage>,
+    slice_cancelled: &mut Arc<AtomicBool>,
+    plot_tx: &std::sync::mpsc::Sender<RemotePlotMessage>,
+    plot_cancelled: &mut Arc<AtomicBool>,
+    graphics: &mut GraphicsRenderer,
+) -> bool {
+    let file_delta = match command {
+        Command::PreviousFile => Some(-1isize),
+        Command::NextFile => Some(1isize),
+        _ => None,
+    };
+    if let Some(delta) = file_delta {
+        let palette = state.view.palette.clone();
+        let scale_mode = state.view.scale_mode;
+        let color_scale_scope = state.view.color_scale_scope;
+        let grid_mode = state.view.grid_mode;
+        let show_land_borders = state.view.show_land_borders;
+        let playback_speed = state.view.playback_speed;
+        let plot_generation = state.view.plot_generation;
+
+        *active_file = bounded_file_index(*active_file, delta, sources.len());
+        let source = sources[*active_file].as_ref();
+        *state = state_for_source(source);
+        state.view.collection_diagnostics = manifest.diagnostics().to_vec();
+        state.view.collection_progress = Some((finished, datasets.len()));
+        state.view.palette = palette;
+        state.view.scale_mode = scale_mode;
+        state.view.color_scale_scope = color_scale_scope;
+        state.view.grid_mode = grid_mode;
+        state.view.show_land_borders = show_land_borders;
+        state.view.playback_speed = playback_speed;
+        state.view.plot_generation = plot_generation;
+
+        select_initial_variable(state, source.metadata());
+        configure_timeline(state, sources, manifest, *active_file);
+        load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
+        state.view.status = format!(
+            "opened file {}/{}: {}",
+            *active_file + 1,
+            datasets.len(),
+            datasets[*active_file]
+        );
+        return true;
+    }
+
+    let source = sources[*active_file].as_ref();
+    let dataset = &datasets[*active_file];
+    let activate_point = matches!(command, Command::ActivatePoint);
+    let cycle_image_filter = matches!(command, Command::CycleImageFilter);
+    let export_current = matches!(command, Command::ExportCurrent);
+    let refresh_time_series = activate_point
+        || matches!(command, Command::OpenPlot)
+        || matches!(
+            command,
+            Command::MoveTime(_)
+                | Command::SetTime(_)
+                | Command::MoveDepth(_)
+                | Command::CyclePlotAxis(_)
+                | Command::SetPlotKind(_)
+                | Command::TogglePointSelection
+                | Command::SelectVariable(_)
+                | Command::SelectVariableAt(_)
+                | Command::SubmitVariableSearch
+                | Command::ExecuteCommandPalette
+                | Command::SetAxes { .. }
+        );
+    let reload = matches!(
+        command,
+        Command::SelectVariable(_)
+            | Command::SelectVariableAt(_)
+            | Command::MoveTime(_)
+            | Command::SetTime(_)
+            | Command::MoveDepth(_)
+            | Command::TickPlayback
+            | Command::SubmitVariableSearch
+            | Command::ExecuteCommandPalette
+            | Command::Zoom(_)
+            | Command::ResetZoom
+            | Command::Pan { .. }
+            | Command::SetAxes { .. }
+            | Command::AutomaticLimits
+            | Command::ToggleColorScaleScope
+            | Command::ToggleScale
+    );
+    let axis_submit =
+        matches!(command, Command::ActivatePoint) && state.view.overlay == Some(Overlay::Axis);
+    let reconfigure_timeline = matches!(
+        command,
+        Command::SelectVariable(_)
+            | Command::SelectVariableAt(_)
+            | Command::SubmitVariableSearch
+            | Command::ExecuteCommandPalette
+            | Command::SetAxes { .. }
+    ) || axis_submit;
+    let point_target = match &command {
+        Command::HoverPoint { row, col, .. } | Command::SelectPoint { row, col } => {
+            Some((*row, *col))
+        }
+        Command::TogglePointSelection => state
+            .view
+            .hover_point
+            .as_ref()
+            .map(|point| (point.row, point.col)),
+        Command::ActivatePoint => state.view.selected_point,
+        _ => None,
+    };
+    let _ = state.reduce(command);
+    if cycle_image_filter {
+        if graphics.cycle_filter() {
+            state.view.status = format!("image interpolation: {}", graphics.filter_label());
+        } else {
+            state.view.status =
+                "scientific rendering locked; set NCVIEW_SCIENTIFIC_RENDERING=0 to enable interpolation"
+                    .into();
+        }
+    }
+    if export_current {
+        match export_current_slice(state, dataset, source.metadata()) {
+            Ok(path) => state.view.status = format!("exported {}", path.display()),
+            Err(error) => state.view.status = format!("export failed: {error}"),
+        }
+    }
+    if let Some((row, col)) = point_target
+        && let Some(variable) = state.view.selected_variable.as_deref()
+    {
+        let coordinates = source.point_coordinates(variable, row, col);
+        if let Some(point) = state.view.hover_point.as_mut()
+            && point.row == row
+            && point.col == col
+        {
+            point.latitude = coordinates.latitude;
+            point.longitude = coordinates.longitude;
+        }
+        if state.view.selected_point == Some((row, col)) {
+            state.view.selected_coordinates = coordinates;
+        }
+    }
+    if reload || axis_submit {
+        if reconfigure_timeline {
+            configure_timeline(state, sources, manifest, *active_file);
+        }
+        load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
+    }
+    if refresh_time_series
+        && matches!(
+            state.view.overlay,
+            Some(Overlay::TimeSeries | Overlay::Plot)
+        )
+    {
+        load_time_series(state, sources, *active_file, plot_tx, plot_cancelled);
+    }
+    if let Some(point) = state.view.timeline.get(state.view.time_index) {
+        *active_file = point.source_index;
+    }
+    false
 }
 
 enum SourceLoadMessage {
@@ -1191,66 +1212,104 @@ fn translate_mouse(
     variable_query: &str,
     graphics: Option<&GraphicsRenderer>,
 ) -> Command {
-    if let Command::BeginDrag { x, y, zoom } = command {
-        if view.help_visible || view.overlay.is_some() || view.variable_search_active {
-            return Command::Pointer { x, y };
+    match command {
+        Command::BeginDrag { x, y, zoom } => translate_begin_drag(x, y, zoom, area, view, graphics),
+        Command::UpdateDrag { x, y } => translate_update_drag(x, y, view),
+        Command::MouseRelease { x, y } => {
+            translate_mouse_release(x, y, area, metadata, view, variable_query, graphics)
         }
-        let Some(canvas) = map_drawable(area, view, graphics) else {
-            return Command::Pointer { x, y };
-        };
-        return if canvas.contains((x, y).into()) {
-            Command::BeginDrag { x, y, zoom }
-        } else {
-            Command::Pointer { x, y }
-        };
-    }
-    if let Command::UpdateDrag { x, y } = command {
-        return if view.drag.is_some() {
-            Command::UpdateDrag { x, y }
-        } else {
-            Command::Pointer { x, y }
-        };
-    }
-    if let Command::MouseRelease { x, y } = command {
-        let Some(drag) = view.drag else {
-            return translate_mouse(
-                Command::MouseClick { x, y, right: false },
-                area,
-                metadata,
-                view,
-                variable_query,
-                graphics,
-            );
-        };
-        let Some(slice) = view.slice.as_ref() else {
-            return Command::CancelDrag;
-        };
-        let Some(canvas) = map_drawable(area, view, graphics) else {
-            return Command::CancelDrag;
-        };
-        if let Some(current) = view.zoom_bounds
-            && !drag.zoom
-            && let Some((rows, cols)) = drag.pan_delta(
-                canvas,
-                current.row_end.saturating_sub(current.row_start),
-                current.col_end.saturating_sub(current.col_start),
-            )
-        {
-            return Command::Pan { rows, cols };
+        command => {
+            translate_mouse_position(command, area, metadata, view, variable_query, graphics)
         }
-        let (rows, cols) = slice.values.dim();
-        if let Some(bounds) = drag.bounds(canvas, rows, cols) {
-            return Command::Zoom(Bounds {
-                row_start: slice.source_bounds.row_start + bounds.row_start,
-                row_end: slice.source_bounds.row_start + bounds.row_end,
-                col_start: slice.source_bounds.col_start + bounds.col_start,
-                col_end: slice.source_bounds.col_start + bounds.col_end,
-            });
-        }
-        return map_point_at(x, y, area, view, graphics)
-            .map(|(row, col, _)| Command::SelectPoint { row, col })
-            .unwrap_or(Command::CancelDrag);
     }
+}
+
+fn translate_begin_drag(
+    x: u16,
+    y: u16,
+    zoom: bool,
+    area: Rect,
+    view: &ncview_rs::app::ViewModel,
+    graphics: Option<&GraphicsRenderer>,
+) -> Command {
+    if view.help_visible || view.overlay.is_some() || view.variable_search_active {
+        return Command::Pointer { x, y };
+    }
+    let Some(canvas) = map_drawable(area, view, graphics) else {
+        return Command::Pointer { x, y };
+    };
+    if canvas.contains((x, y).into()) {
+        Command::BeginDrag { x, y, zoom }
+    } else {
+        Command::Pointer { x, y }
+    }
+}
+
+fn translate_update_drag(x: u16, y: u16, view: &ncview_rs::app::ViewModel) -> Command {
+    if view.drag.is_some() {
+        Command::UpdateDrag { x, y }
+    } else {
+        Command::Pointer { x, y }
+    }
+}
+
+fn translate_mouse_release(
+    x: u16,
+    y: u16,
+    area: Rect,
+    metadata: &DatasetMetadata,
+    view: &ncview_rs::app::ViewModel,
+    variable_query: &str,
+    graphics: Option<&GraphicsRenderer>,
+) -> Command {
+    let Some(drag) = view.drag else {
+        return translate_mouse_position(
+            Command::MouseClick { x, y, right: false },
+            area,
+            metadata,
+            view,
+            variable_query,
+            graphics,
+        );
+    };
+    let Some(slice) = view.slice.as_ref() else {
+        return Command::CancelDrag;
+    };
+    let Some(canvas) = map_drawable(area, view, graphics) else {
+        return Command::CancelDrag;
+    };
+    if let Some(current) = view.zoom_bounds
+        && !drag.zoom
+        && let Some((rows, cols)) = drag.pan_delta(
+            canvas,
+            current.row_end.saturating_sub(current.row_start),
+            current.col_end.saturating_sub(current.col_start),
+        )
+    {
+        return Command::Pan { rows, cols };
+    }
+    let (rows, cols) = slice.values.dim();
+    if let Some(bounds) = drag.bounds(canvas, rows, cols) {
+        return Command::Zoom(Bounds {
+            row_start: slice.source_bounds.row_start + bounds.row_start,
+            row_end: slice.source_bounds.row_start + bounds.row_end,
+            col_start: slice.source_bounds.col_start + bounds.col_start,
+            col_end: slice.source_bounds.col_start + bounds.col_end,
+        });
+    }
+    map_point_at(x, y, area, view, graphics)
+        .map(|(row, col, _)| Command::SelectPoint { row, col })
+        .unwrap_or(Command::CancelDrag)
+}
+
+fn translate_mouse_position(
+    command: Command,
+    area: Rect,
+    metadata: &DatasetMetadata,
+    view: &ncview_rs::app::ViewModel,
+    variable_query: &str,
+    graphics: Option<&GraphicsRenderer>,
+) -> Command {
     let (x, y, right, clicked) = match command {
         Command::MouseClick { x, y, right } => (x, y, right, true),
         Command::Pointer { x, y } => (x, y, false, false),
@@ -1260,122 +1319,13 @@ fn translate_mouse(
         return Command::ToggleHelp;
     }
     if view.variable_search_active {
-        let popup = variable_browser_rect(area);
-        if clicked {
-            if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
-                return Command::Quit;
-            }
-            let inner_top = popup.y.saturating_add(3);
-            if y >= inner_top {
-                let index = usize::from(y - inner_top);
-                let plottable = metadata
-                    .variables
-                    .iter()
-                    .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let visible = ncview_rs::ui::sidebar::filter_variables(&plottable, variable_query);
-                if index < visible.len() {
-                    return Command::SelectVariableAt(index);
-                }
-            }
-        }
-        return Command::Pointer { x, y };
+        return translate_variable_browser_click(x, y, clicked, area, metadata, variable_query);
     }
     if view.help_visible {
-        let popup = help_rect(area);
-        if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
-            return Command::ToggleHelp;
-        }
-        return Command::Pointer { x, y };
+        return translate_help_click(x, y, clicked, area);
     }
     if let Some(overlay) = view.overlay {
-        let popup = overlay_rect(area, overlay);
-        if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
-            return Command::Quit;
-        }
-        if matches!(overlay, Overlay::CommandPalette) {
-            if clicked {
-                let inner_top = popup.y.saturating_add(3);
-                if y >= inner_top {
-                    let index = usize::from(y - inner_top);
-                    let matches = ncview_rs::app::palette_matches(&view.palette_query);
-                    if index < matches.len() {
-                        return Command::ExecutePaletteChoice(index);
-                    }
-                }
-            }
-            return Command::Pointer { x, y };
-        }
-        if matches!(overlay, Overlay::Limits | Overlay::Filter) {
-            if clicked {
-                let popup_x = popup.x;
-                let popup_y = popup.y;
-                if x >= popup_x
-                    && x < popup_x.saturating_add(popup.width)
-                    && y == popup_y.saturating_add(1)
-                {
-                    return Command::FocusLimitField(LimitField::Min);
-                }
-                if x >= popup_x
-                    && x < popup_x.saturating_add(popup.width)
-                    && y == popup_y.saturating_add(2)
-                {
-                    return Command::FocusLimitField(LimitField::Max);
-                }
-            }
-            return Command::Pointer { x, y };
-        }
-        if matches!(overlay, Overlay::Axis) {
-            if clicked {
-                let popup_x = popup.x;
-                let popup_y = popup.y;
-                if x >= popup_x
-                    && x < popup_x.saturating_add(popup.width)
-                    && y == popup_y.saturating_add(1)
-                {
-                    return Command::FocusAxisField(AxisField::X);
-                }
-                if x >= popup_x
-                    && x < popup_x.saturating_add(popup.width)
-                    && y == popup_y.saturating_add(2)
-                {
-                    return Command::FocusAxisField(AxisField::Y);
-                }
-            }
-            return Command::Pointer { x, y };
-        }
-        if matches!(overlay, Overlay::Plot) {
-            if clicked {
-                let content_x = popup.x.saturating_add(2);
-                let type_y = popup.y.saturating_add(2);
-                if y == type_y && x >= content_x && x < popup.right().saturating_sub(1) {
-                    let relative = x.saturating_sub(content_x);
-                    let fifth = (popup.width.saturating_sub(4) / 5).max(1);
-                    return if relative < fifth {
-                        Command::SetPlotKind(ncview_rs::app::PlotKind::TimeSeries)
-                    } else if relative < fifth.saturating_mul(2) {
-                        Command::SetPlotKind(ncview_rs::app::PlotKind::Scatter)
-                    } else if relative < fifth.saturating_mul(3) {
-                        Command::SetPlotKind(ncview_rs::app::PlotKind::Histogram)
-                    } else if relative < fifth.saturating_mul(4) {
-                        Command::SetPlotKind(ncview_rs::app::PlotKind::Cdf)
-                    } else {
-                        Command::SetPlotKind(ncview_rs::app::PlotKind::VerticalProfile)
-                    };
-                }
-                if x >= popup.x && x < popup.right() {
-                    if y == popup.y.saturating_add(4) {
-                        return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::X);
-                    }
-                    if y == popup.y.saturating_add(5) {
-                        return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::Y);
-                    }
-                }
-            }
-            return Command::Pointer { x, y };
-        }
-        return Command::Pointer { x, y };
+        return translate_overlay_mouse(overlay, x, y, clicked, area, view);
     }
     if view.help_visible || view.overlay.is_some() {
         return Command::Pointer { x, y };
@@ -1518,6 +1468,146 @@ fn translate_mouse(
     }
 }
 
+fn translate_variable_browser_click(
+    x: u16,
+    y: u16,
+    clicked: bool,
+    area: Rect,
+    metadata: &DatasetMetadata,
+    variable_query: &str,
+) -> Command {
+    let popup = variable_browser_rect(area);
+    if clicked {
+        if close_button_hit(popup, x, y) || !popup.contains((x, y).into()) {
+            return Command::Quit;
+        }
+        let inner_top = popup.y.saturating_add(3);
+        if y >= inner_top {
+            let index = usize::from(y - inner_top);
+            let plottable = metadata
+                .variables
+                .iter()
+                .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+                .cloned()
+                .collect::<Vec<_>>();
+            let visible = ncview_rs::ui::sidebar::filter_variables(&plottable, variable_query);
+            if index < visible.len() {
+                return Command::SelectVariableAt(index);
+            }
+        }
+    }
+    Command::Pointer { x, y }
+}
+
+fn translate_help_click(x: u16, y: u16, clicked: bool, area: Rect) -> Command {
+    let popup = help_rect(area);
+    if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
+        Command::ToggleHelp
+    } else {
+        Command::Pointer { x, y }
+    }
+}
+
+fn translate_overlay_mouse(
+    overlay: Overlay,
+    x: u16,
+    y: u16,
+    clicked: bool,
+    area: Rect,
+    view: &ncview_rs::app::ViewModel,
+) -> Command {
+    let popup = overlay_rect(area, overlay);
+    if clicked && (close_button_hit(popup, x, y) || !popup.contains((x, y).into())) {
+        return Command::Quit;
+    }
+    match overlay {
+        Overlay::CommandPalette => translate_command_palette_click(x, y, clicked, popup, view),
+        Overlay::Limits | Overlay::Filter => translate_limit_overlay_click(x, y, clicked, popup),
+        Overlay::Axis => translate_axis_overlay_click(x, y, clicked, popup),
+        Overlay::Plot => translate_plot_overlay_click(x, y, clicked, popup),
+        Overlay::TimeSeries => Command::Pointer { x, y },
+    }
+}
+
+fn translate_command_palette_click(
+    x: u16,
+    y: u16,
+    clicked: bool,
+    popup: Rect,
+    view: &ncview_rs::app::ViewModel,
+) -> Command {
+    if clicked {
+        let inner_top = popup.y.saturating_add(3);
+        if y >= inner_top {
+            let index = usize::from(y - inner_top);
+            let matches = ncview_rs::app::palette_matches(&view.palette_query);
+            if index < matches.len() {
+                return Command::ExecutePaletteChoice(index);
+            }
+        }
+    }
+    Command::Pointer { x, y }
+}
+
+fn translate_limit_overlay_click(x: u16, y: u16, clicked: bool, popup: Rect) -> Command {
+    if clicked {
+        if popup_row_hit(popup, x, y, 1) {
+            return Command::FocusLimitField(LimitField::Min);
+        }
+        if popup_row_hit(popup, x, y, 2) {
+            return Command::FocusLimitField(LimitField::Max);
+        }
+    }
+    Command::Pointer { x, y }
+}
+
+fn translate_axis_overlay_click(x: u16, y: u16, clicked: bool, popup: Rect) -> Command {
+    if clicked {
+        if popup_row_hit(popup, x, y, 1) {
+            return Command::FocusAxisField(AxisField::X);
+        }
+        if popup_row_hit(popup, x, y, 2) {
+            return Command::FocusAxisField(AxisField::Y);
+        }
+    }
+    Command::Pointer { x, y }
+}
+
+fn popup_row_hit(popup: Rect, x: u16, y: u16, row: u16) -> bool {
+    x >= popup.x && x < popup.x.saturating_add(popup.width) && y == popup.y.saturating_add(row)
+}
+
+fn translate_plot_overlay_click(x: u16, y: u16, clicked: bool, popup: Rect) -> Command {
+    if clicked {
+        let content_x = popup.x.saturating_add(2);
+        let type_y = popup.y.saturating_add(2);
+        if y == type_y && x >= content_x && x < popup.right().saturating_sub(1) {
+            let relative = x.saturating_sub(content_x);
+            let fifth = (popup.width.saturating_sub(4) / 5).max(1);
+            return if relative < fifth {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::TimeSeries)
+            } else if relative < fifth.saturating_mul(2) {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::Scatter)
+            } else if relative < fifth.saturating_mul(3) {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::Histogram)
+            } else if relative < fifth.saturating_mul(4) {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::Cdf)
+            } else {
+                Command::SetPlotKind(ncview_rs::app::PlotKind::VerticalProfile)
+            };
+        }
+        if x >= popup.x && x < popup.right() {
+            if y == popup.y.saturating_add(4) {
+                return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::X);
+            }
+            if y == popup.y.saturating_add(5) {
+                return Command::FocusPlotAxis(ncview_rs::app::PlotAxisField::Y);
+            }
+        }
+    }
+    Command::Pointer { x, y }
+}
+
 fn close_button_hit(popup: Rect, x: u16, y: u16) -> bool {
     popup.width >= 4
         && y == popup.y
@@ -1646,6 +1736,61 @@ fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
     }
 }
 
+fn earliest_source_index(sources: &[Arc<dyn data::DataSource>]) -> usize {
+    sources
+        .iter()
+        .enumerate()
+        .min_by(|(left_index, left), (right_index, right)| {
+            match (
+                source_earliest_time(left.as_ref()),
+                source_earliest_time(right.as_ref()),
+            ) {
+                (Some(left_time), Some(right_time)) => left_time
+                    .cmp(&right_time)
+                    .then_with(|| left_index.cmp(right_index)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left_index.cmp(right_index),
+            }
+        })
+        .map_or(0, |(index, _)| index)
+}
+
+fn source_earliest_time(source: &dyn data::DataSource) -> Option<DateTime<Utc>> {
+    source
+        .metadata()
+        .variables
+        .iter()
+        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+        .flat_map(|variable| {
+            let time_length = leading_lengths(source.metadata(), variable).0.max(1);
+            (0..time_length).filter_map(|index| {
+                source
+                    .time_label_for_variable(&variable.name, index)
+                    .and_then(|label| parse_time_label(&label))
+            })
+        })
+        .min()
+}
+
+fn parse_time_label(label: &str) -> Option<DateTime<Utc>> {
+    let normalized = label
+        .strip_suffix('z')
+        .map_or_else(|| label.to_owned(), |prefix| format!("{prefix}Z"));
+    DateTime::parse_from_rfc3339(&normalized)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
+fn compare_time_labels(left: &str, right: &str) -> std::cmp::Ordering {
+    match (parse_time_label(left), parse_time_label(right)) {
+        (Some(left_time), Some(right_time)) => left_time.cmp(&right_time),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 fn configure_timeline(
     state: &mut AppState,
     sources: &[Arc<dyn data::DataSource>],
@@ -1698,6 +1843,11 @@ fn configure_timeline(
             label,
         });
     }
+    state.view.timeline.sort_by(|left, right| {
+        compare_time_labels(&left.label, &right.label)
+            .then_with(|| left.source_index.cmp(&right.source_index))
+            .then_with(|| left.local_index.cmp(&right.local_index))
+    });
     if state.view.timeline.is_empty()
         && let Some(source) = sources.get(active_file)
         && source
@@ -2217,173 +2367,34 @@ fn load_cross_section(
         if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
             return;
         }
-        let x_is_grib = source.metadata().format == DatasetFormat::Grib2;
-        let latitude_dimension = plot_dimension_name(
-            source.metadata(),
+        if let Some(mut point_series) = cross_section_series(
+            source.as_ref(),
+            &variable_name,
             variable,
-            ncview_rs::app::PlotXAxis::Latitude,
-        )
-        .unwrap_or_else(|| "latitude".into());
-        let longitude_dimension = plot_dimension_name(
-            source.metadata(),
-            variable,
-            ncview_rs::app::PlotXAxis::Longitude,
-        )
-        .unwrap_or_else(|| "longitude".into());
-        let x_on_row = !x_is_grib || x_dimension.eq_ignore_ascii_case(&latitude_dimension);
-        let fixed_index = dimension_index_for_plot(
-            source.metadata(),
+            source_bounds,
+            &x_dimension,
+            x_length,
+            dimension_coordinates.as_deref(),
             &fixed_dimension,
+            time_point,
+            depth,
+            &level_label,
             row,
             col,
-            time_point.local_index,
-            depth,
-        );
-        let bounds = if x_is_grib {
-            if x_on_row {
-                Bounds::new(source_bounds.row_start, source_bounds.row_end, col, col + 1)
+            cancelled,
+        ) {
+            let base = point_series.label.clone();
+            point_series.label = if used_labels.contains(&base) {
+                format!("{base} #{}", point_number + 1)
             } else {
-                Bounds::new(row, row + 1, source_bounds.col_start, source_bounds.col_end)
-            }
-        } else if x_on_row {
-            Bounds::new(0, x_length, fixed_index, fixed_index + 1)
-        } else {
-            Bounds::new(fixed_index, fixed_index + 1, 0, x_length)
-        };
-        let Ok(bounds) = bounds else {
-            continue;
-        };
-        if row < source_bounds.row_start
-            || row >= source_bounds.row_end
-            || col < source_bounds.col_start
-            || col >= source_bounds.col_end
-        {
-            continue;
-        }
-        let request = SliceRequest {
-            variable: variable_name.clone(),
-            time: time_point.local_index,
-            depth,
-            bounds,
-        };
-        let fixed_axes = variable
-            .dimensions
-            .iter()
-            .filter(|name| {
-                !name.eq_ignore_ascii_case(&x_dimension)
-                    && !name.eq_ignore_ascii_case(&fixed_dimension)
-            })
-            .map(|name| {
-                (
-                    name.clone(),
-                    dimension_index_for_plot(
-                        source.metadata(),
-                        name,
-                        row,
-                        col,
-                        time_point.local_index,
-                        depth,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        let row_axis = if x_is_grib {
-            Some(latitude_dimension.as_str())
-        } else if x_on_row {
-            Some(x_dimension.as_str())
-        } else {
-            Some(fixed_dimension.as_str())
-        };
-        let col_axis = if x_is_grib {
-            Some(longitude_dimension.as_str())
-        } else if x_on_row {
-            Some(fixed_dimension.as_str())
-        } else {
-            Some(x_dimension.as_str())
-        };
-        let Ok(slice) = source.read_slice_on_axes(&request, row_axis, col_axis, &fixed_axes) else {
-            continue;
-        };
-        let count = if x_is_grib {
-            if x_on_row {
-                source_bounds.row_end - source_bounds.row_start
-            } else {
-                source_bounds.col_end - source_bounds.col_start
-            }
-        } else {
-            x_length
-        };
-        let mut data = Vec::with_capacity(count);
-        for offset in 0..count {
-            if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
-                return;
-            }
-            let (sample_row, sample_col) = if x_is_grib {
-                if x_on_row {
-                    (source_bounds.row_start + offset, col)
-                } else {
-                    (row, source_bounds.col_start + offset)
-                }
-            } else if x_on_row {
-                (offset, fixed_index)
-            } else {
-                (fixed_index, offset)
+                base
             };
-            let coordinate = source.point_coordinates(
-                &variable_name,
-                if x_dimension.eq_ignore_ascii_case(&latitude_dimension) {
-                    if x_on_row { offset } else { row }
-                } else {
-                    row
-                },
-                if x_dimension.eq_ignore_ascii_case(&longitude_dimension) {
-                    if x_on_row { offset } else { col }
-                } else {
-                    col
-                },
-            );
-            let x = if x_dimension.eq_ignore_ascii_case(&longitude_dimension) {
-                coordinate
-                    .longitude
-                    .filter(|value| value.is_finite())
-                    .unwrap_or(offset as f64)
-            } else if x_dimension.eq_ignore_ascii_case(&latitude_dimension) {
-                coordinate
-                    .latitude
-                    .filter(|value| value.is_finite())
-                    .unwrap_or(offset as f64)
-            } else {
-                dimension_coordinates
-                    .as_ref()
-                    .and_then(|values| values.get(offset).copied())
-                    .filter(|value| value.is_finite())
-                    .unwrap_or(offset as f64)
-            };
-            let y = slice
-                .value_at_source(sample_row, sample_col)
-                .unwrap_or(f64::NAN);
-            data.push((x, y));
+            used_labels.push(point_series.label.clone());
+            series.push(point_series);
         }
-        // Latitude/longitude coordinates can be stored north-to-south or
-        // east-to-west. Sort the horizontal section so its x axis is always
-        // monotonic before it reaches the chart renderer.
-        data.sort_by(|left, right| left.0.total_cmp(&right.0));
-        let base = format!(
-            "{} @ {level_label}",
-            point_label(source.as_ref(), &variable_name, row, col)
-        );
-        let label = if used_labels.contains(&base) {
-            format!("{base} #{}", point_number + 1)
-        } else {
-            base
-        };
-        used_labels.push(label.clone());
-        series.push(PlotSeries {
-            point: (row, col),
-            label,
-            data,
-            labels: Vec::new(),
-        });
+        if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
+            return;
+        }
     }
     if let Some(first) = series.first() {
         state.view.time_series = first.data.clone();
@@ -2394,6 +2405,178 @@ fn load_cross_section(
         "{x_dimension} cross-section at time {} and {level_label}",
         time_point.label
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cross_section_series(
+    source: &dyn data::DataSource,
+    variable_name: &str,
+    variable: &Variable,
+    source_bounds: Bounds,
+    x_dimension: &str,
+    x_length: usize,
+    dimension_coordinates: Option<&[f64]>,
+    fixed_dimension: &str,
+    time_point: &TimelinePoint,
+    depth: usize,
+    level_label: &str,
+    row: usize,
+    col: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Option<PlotSeries> {
+    let x_is_grib = source.metadata().format == DatasetFormat::Grib2;
+    let latitude_dimension = plot_dimension_name(
+        source.metadata(),
+        variable,
+        ncview_rs::app::PlotXAxis::Latitude,
+    )
+    .unwrap_or_else(|| "latitude".into());
+    let longitude_dimension = plot_dimension_name(
+        source.metadata(),
+        variable,
+        ncview_rs::app::PlotXAxis::Longitude,
+    )
+    .unwrap_or_else(|| "longitude".into());
+    let x_on_row = !x_is_grib || x_dimension.eq_ignore_ascii_case(&latitude_dimension);
+    let fixed_index = dimension_index_for_plot(
+        source.metadata(),
+        fixed_dimension,
+        row,
+        col,
+        time_point.local_index,
+        depth,
+    );
+    let bounds = if x_is_grib {
+        if x_on_row {
+            Bounds::new(source_bounds.row_start, source_bounds.row_end, col, col + 1)
+        } else {
+            Bounds::new(row, row + 1, source_bounds.col_start, source_bounds.col_end)
+        }
+    } else if x_on_row {
+        Bounds::new(0, x_length, fixed_index, fixed_index + 1)
+    } else {
+        Bounds::new(fixed_index, fixed_index + 1, 0, x_length)
+    }
+    .ok()?;
+    if row < source_bounds.row_start
+        || row >= source_bounds.row_end
+        || col < source_bounds.col_start
+        || col >= source_bounds.col_end
+    {
+        return None;
+    }
+    let request = SliceRequest {
+        variable: variable_name.to_owned(),
+        time: time_point.local_index,
+        depth,
+        bounds,
+    };
+    let fixed_axes = variable
+        .dimensions
+        .iter()
+        .filter(|name| {
+            !name.eq_ignore_ascii_case(x_dimension) && !name.eq_ignore_ascii_case(fixed_dimension)
+        })
+        .map(|name| {
+            (
+                name.clone(),
+                dimension_index_for_plot(
+                    source.metadata(),
+                    name,
+                    row,
+                    col,
+                    time_point.local_index,
+                    depth,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let row_axis = if x_is_grib {
+        Some(latitude_dimension.as_str())
+    } else if x_on_row {
+        Some(x_dimension)
+    } else {
+        Some(fixed_dimension)
+    };
+    let col_axis = if x_is_grib {
+        Some(longitude_dimension.as_str())
+    } else if x_on_row {
+        Some(fixed_dimension)
+    } else {
+        Some(x_dimension)
+    };
+    let slice = source
+        .read_slice_on_axes(&request, row_axis, col_axis, &fixed_axes)
+        .ok()?;
+    let count = if x_is_grib {
+        if x_on_row {
+            source_bounds.row_end - source_bounds.row_start
+        } else {
+            source_bounds.col_end - source_bounds.col_start
+        }
+    } else {
+        x_length
+    };
+    let mut data = Vec::with_capacity(count);
+    for offset in 0..count {
+        if cancelled.is_some_and(|token| token.load(Ordering::Acquire)) {
+            return None;
+        }
+        let (sample_row, sample_col) = if x_is_grib {
+            if x_on_row {
+                (source_bounds.row_start + offset, col)
+            } else {
+                (row, source_bounds.col_start + offset)
+            }
+        } else if x_on_row {
+            (offset, fixed_index)
+        } else {
+            (fixed_index, offset)
+        };
+        let coordinate = source.point_coordinates(
+            variable_name,
+            if x_dimension.eq_ignore_ascii_case(&latitude_dimension) {
+                if x_on_row { offset } else { row }
+            } else {
+                row
+            },
+            if x_dimension.eq_ignore_ascii_case(&longitude_dimension) {
+                if x_on_row { offset } else { col }
+            } else {
+                col
+            },
+        );
+        let x = if x_dimension.eq_ignore_ascii_case(&longitude_dimension) {
+            coordinate
+                .longitude
+                .filter(|value| value.is_finite())
+                .unwrap_or(offset as f64)
+        } else if x_dimension.eq_ignore_ascii_case(&latitude_dimension) {
+            coordinate
+                .latitude
+                .filter(|value| value.is_finite())
+                .unwrap_or(offset as f64)
+        } else {
+            dimension_coordinates
+                .and_then(|values| values.get(offset).copied())
+                .filter(|value| value.is_finite())
+                .unwrap_or(offset as f64)
+        };
+        let y = slice
+            .value_at_source(sample_row, sample_col)
+            .unwrap_or(f64::NAN);
+        data.push((x, y));
+    }
+    data.sort_by(|left, right| left.0.total_cmp(&right.0));
+    Some(PlotSeries {
+        point: (row, col),
+        label: format!(
+            "{} @ {level_label}",
+            point_label(source, variable_name, row, col)
+        ),
+        data,
+        labels: Vec::new(),
+    })
 }
 
 fn plot_dimension_name(
@@ -2775,4 +2958,21 @@ fn fixed_axes_for_plane(
             Some((name.clone(), index.min(length.saturating_sub(1))))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod timeline_order_tests {
+    use super::compare_time_labels;
+
+    #[test]
+    fn metadata_timestamps_sort_before_non_temporal_fallbacks() {
+        assert_eq!(
+            compare_time_labels("2026-09-09T12:00:00z", "2026-09-10T12:00:00z"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_time_labels("2026-09-10T12:00:00Z", "coordinate index"),
+            std::cmp::Ordering::Less
+        );
+    }
 }

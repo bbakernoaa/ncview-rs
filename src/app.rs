@@ -468,6 +468,73 @@ impl AppState {
 
     pub fn reduce(&mut self, command: Command) -> Option<Effect> {
         match command {
+            command @ (Command::Quit
+            | Command::PreviousFile
+            | Command::NextFile
+            | Command::SetBounds(_)
+            | Command::Resize { .. }
+            | Command::SelectVariable(_)
+            | Command::SelectVariableAt(_)
+            | Command::MoveTime(_)
+            | Command::TogglePlayback
+            | Command::IncreasePlaybackSpeed
+            | Command::DecreasePlaybackSpeed
+            | Command::TickPlayback
+            | Command::SetTime(_)
+            | Command::MoveDepth(_)
+            | Command::ToggleHelp
+            | Command::UpdateVariableQuery(_)) => self.reduce_navigation(command),
+            command @ (Command::CyclePalette
+            | Command::TogglePaletteReverse
+            | Command::CycleImageFilter
+            | Command::ExportCurrent
+            | Command::AutomaticLimits
+            | Command::ManualLimits { .. }
+            | Command::OpenLimits
+            | Command::OpenFilter
+            | Command::ClearFilter
+            | Command::OpenCommandPalette) => self.reduce_display(command),
+            command @ (Command::OpenPlot
+            | Command::SetPlotKind(_)
+            | Command::CyclePlotAxis(_)
+            | Command::FocusPlotAxis(_)) => self.reduce_plot(command),
+            command @ (Command::OpenVariableSearch
+            | Command::SubmitVariableSearch
+            | Command::ExecuteCommandPalette
+            | Command::ExecutePaletteChoice(_)
+            | Command::InputChar(_)
+            | Command::DeleteInput
+            | Command::NextLimitField
+            | Command::FocusLimitField(_)
+            | Command::FocusAxisField(_)) => self.reduce_text_input(command),
+            command @ (Command::Zoom(_)
+            | Command::ResetZoom
+            | Command::BeginDrag { .. }
+            | Command::UpdateDrag { .. }
+            | Command::CancelDrag
+            | Command::Pan { .. }) => self.reduce_viewport(command),
+            command @ (Command::OpenAxisOverlay
+            | Command::CycleAxis(_)
+            | Command::ApplyLimitDraft
+            | Command::ActivatePoint
+            | Command::Pointer { .. }
+            | Command::HoverPoint { .. }
+            | Command::ClearHover
+            | Command::SelectPoint { .. }
+            | Command::TogglePointSelection
+            | Command::MouseClick { .. }
+            | Command::MouseRelease { .. }) => self.reduce_axes_and_points(command),
+            command @ (Command::PaletteMove(_)
+            | Command::SetAxes { .. }
+            | Command::ToggleGridMode
+            | Command::ToggleLandBorders
+            | Command::ToggleColorScaleScope
+            | Command::ToggleScale) => self.reduce_commands(command),
+        }
+    }
+
+    fn reduce_navigation(&mut self, command: Command) -> Option<Effect> {
+        match command {
             Command::Quit => {
                 if self.view.variable_search_active {
                     self.view.variable_search_active = false;
@@ -582,6 +649,12 @@ impl AppState {
                 self.view.variable_browser_index = 0;
                 None
             }
+            _ => unreachable!("navigation reducer received unrelated command"),
+        }
+    }
+
+    fn reduce_display(&mut self, command: Command) -> Option<Effect> {
+        match command {
             Command::CyclePalette => {
                 if self.view.palette_catalog.is_empty() {
                     self.view.palette = self.view.palette.clone().next();
@@ -684,6 +757,12 @@ impl AppState {
                 self.view.overlay = Some(Overlay::CommandPalette);
                 None
             }
+            _ => unreachable!("display reducer received unrelated command"),
+        }
+    }
+
+    fn reduce_plot(&mut self, command: Command) -> Option<Effect> {
+        match command {
             Command::OpenPlot => {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     if self.view.palette_query.len() < 64 {
@@ -782,6 +861,12 @@ impl AppState {
                 }
                 None
             }
+            _ => unreachable!("plot reducer received unrelated command"),
+        }
+    }
+
+    fn reduce_text_input(&mut self, command: Command) -> Option<Effect> {
+        match command {
             Command::OpenVariableSearch => {
                 self.view.help_visible = false;
                 self.view.variable_search_active = true;
@@ -967,6 +1052,12 @@ impl AppState {
                 }
                 None
             }
+            _ => unreachable!("text-input reducer received unrelated command"),
+        }
+    }
+
+    fn reduce_viewport(&mut self, command: Command) -> Option<Effect> {
+        match command {
             Command::Zoom(bounds) => {
                 self.view.zoom_bounds = Some(bounds);
                 self.view.drag = None;
@@ -1023,6 +1114,12 @@ impl AppState {
                 .ok();
                 None
             }
+            _ => unreachable!("viewport reducer received unrelated command"),
+        }
+    }
+
+    fn reduce_axes_and_points(&mut self, command: Command) -> Option<Effect> {
+        match command {
             Command::OpenAxisOverlay => {
                 let (x, y) = default_axes(&self.view.axis_options);
                 self.view.axis_draft = Some(AxisDraft {
@@ -1192,6 +1289,12 @@ impl AppState {
             }
             Command::MouseClick { .. } => None,
             Command::MouseRelease { .. } => None,
+            _ => unreachable!("axes-and-points reducer received unrelated command"),
+        }
+    }
+
+    fn reduce_commands(&mut self, command: Command) -> Option<Effect> {
+        match command {
             Command::PaletteMove(delta) => {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     let length = palette_matches(&self.view.palette_query).len();
@@ -1294,6 +1397,7 @@ impl AppState {
                 }
                 None
             }
+            _ => unreachable!("command reducer received unrelated command"),
         }
     }
 

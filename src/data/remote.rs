@@ -17,6 +17,7 @@ use crate::{
         location::SourceLocation,
         object_store::{ByteRange, RemoteStore, build_provider_store},
         operation::OperationState,
+        receive,
     },
 };
 
@@ -182,19 +183,6 @@ fn report(progress: &dyn Fn(&str) -> bool, message: &str) -> Result<()> {
     } else {
         Err(NcvError::WorkerStopped)
     }
-}
-
-fn receive<T>(
-    runtime: &StorageRuntime,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> Result<T>
-where
-    T: Send + 'static,
-{
-    runtime
-        .submit(future)?
-        .recv()
-        .map_err(|_| NcvError::WorkerStopped)
 }
 
 fn is_grib2(source: &SourceLocation, magic: &[u8]) -> bool {

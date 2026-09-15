@@ -11,6 +11,7 @@ use bytes::Bytes;
 use super::{
     AxisRole, DataSource, DatasetFormat, DatasetMetadata, Dimension, PointCoordinates, Variable,
     grib2::Grib2Source,
+    grib2_identity::slug,
     grib2_index::{IndexRecord, parse_index},
     slice::{Slice2D, SliceRequest},
 };
@@ -20,6 +21,7 @@ use crate::{
         StorageRuntime,
         location::SourceLocation,
         object_store::{ByteRange, ObjectIdentity, RemoteStore},
+        receive,
     },
 };
 
@@ -404,13 +406,13 @@ fn index_variable_name(record: &IndexRecord) -> Option<String> {
         "ASYSFK" => "asymmetry_factor",
         "SSALBK" => "single_scattering_albedo",
         "SCTAOTK" => "scattering_aerosol_optical_thickness",
-        value => &slug_component(value),
+        value => &slug(value),
     };
     let species = record
         .fields
         .iter()
         .find_map(|field| field.strip_prefix("aerosol="))
-        .map(slug_component);
+        .map(slug);
     let size = record
         .fields
         .iter()
@@ -495,20 +497,6 @@ fn format_index_quantity(value: f64, factor: f64, unit: &str) -> String {
     format!("{result}{unit}")
 }
 
-fn slug_component(value: &str) -> String {
-    let mut result = String::new();
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            result.push(character.to_ascii_lowercase());
-        } else if character == '.' {
-            result.push('p');
-        } else if !result.ends_with('_') {
-            result.push('_');
-        }
-    }
-    result.trim_matches('_').to_owned()
-}
-
 fn index_time_label(record: &IndexRecord) -> Option<String> {
     let date = record
         .fields
@@ -528,19 +516,6 @@ fn index_time_label(record: &IndexRecord) -> Option<String> {
         &date[6..8],
         &date[8..10]
     ))
-}
-
-fn receive<T>(
-    runtime: &StorageRuntime,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-) -> Result<T>
-where
-    T: Send + 'static,
-{
-    runtime
-        .submit(future)?
-        .recv()
-        .map_err(|_| NcvError::WorkerStopped)
 }
 
 impl RemoteGrib2Source {
