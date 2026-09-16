@@ -119,6 +119,103 @@ impl CoordinateGrid {
             .and_then(|grid| grid.get((row, col)).copied())
             .or_else(|| self.longitude_axis.as_ref()?.get(col).copied())
     }
+
+    /// Return whether source rows run from south to north.
+    ///
+    /// Raster images are displayed north-up, so this is the condition under
+    /// which a renderer must reverse the source row order. A missing or
+    /// non-monotonic coordinate does not imply an order and keeps the source
+    /// layout unchanged.
+    pub fn latitude_increases_with_source_row(&self) -> bool {
+        let Some(rows) = self
+            .latitude_axis
+            .as_ref()
+            .map(Vec::len)
+            .or_else(|| self.latitude.as_ref().map(|grid| grid.nrows()))
+        else {
+            return false;
+        };
+        if rows < 2 {
+            return false;
+        }
+        let cols = self.latitude.as_ref().map_or(1, |grid| grid.ncols().max(1));
+        let first =
+            (0..cols).find_map(|col| self.latitude_at(0, col).filter(|value| value.is_finite()));
+        let last = (0..cols).find_map(|col| {
+            self.latitude_at(rows - 1, col)
+                .filter(|value| value.is_finite())
+        });
+        last.zip(first).is_some_and(|(last, first)| last > first)
+    }
+
+    /// Map a displayed north-to-south row to its source row.
+    pub fn source_row_for_display_row(
+        &self,
+        display_row: usize,
+        display_rows: usize,
+        source_rows: usize,
+    ) -> usize {
+        self.source_row_for_display_row_with_flip(
+            display_row,
+            display_rows,
+            source_rows,
+            self.latitude_increases_with_source_row(),
+        )
+    }
+
+    pub fn source_row_for_display_row_with_flip(
+        &self,
+        display_row: usize,
+        display_rows: usize,
+        source_rows: usize,
+        flip_rows: bool,
+    ) -> usize {
+        if source_rows == 0 {
+            return 0;
+        }
+        let display_row = display_row.min(display_rows.saturating_sub(1));
+        let source_row = display_row * source_rows / display_rows.max(1);
+        let source_row = source_row.min(source_rows - 1);
+        if flip_rows {
+            source_rows - 1 - source_row
+        } else {
+            source_row
+        }
+    }
+
+    /// Map a source row to its north-to-south displayed row.
+    pub fn display_row_for_source_row(
+        &self,
+        source_row: usize,
+        source_rows: usize,
+        display_rows: usize,
+    ) -> usize {
+        self.display_row_for_source_row_with_flip(
+            source_row,
+            source_rows,
+            display_rows,
+            self.latitude_increases_with_source_row(),
+        )
+    }
+
+    pub fn display_row_for_source_row_with_flip(
+        &self,
+        source_row: usize,
+        source_rows: usize,
+        display_rows: usize,
+        flip_rows: bool,
+    ) -> usize {
+        if source_rows == 0 {
+            return 0;
+        }
+        let source_row = source_row.min(source_rows - 1);
+        let display_row = if flip_rows {
+            source_rows - 1 - source_row
+        } else {
+            source_row
+        };
+        (display_row * display_rows / source_rows).min(display_rows.saturating_sub(1))
+    }
 }
 
 #[derive(Debug, Clone)]

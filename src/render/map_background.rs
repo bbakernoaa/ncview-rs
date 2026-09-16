@@ -24,8 +24,8 @@ use super::{
 const DEFAULT_PALETTE: Palette = Palette::Viridis;
 
 /// Render a D3-like base map for the geographic extent represented by a slice.
-/// The output uses source-row orientation so it can be composited directly
-/// beneath the aggregated data raster.
+/// The output is geographic north-up so it can be composited directly beneath
+/// the normalized scientific data raster.
 pub fn render(
     width: usize,
     height: usize,
@@ -111,7 +111,6 @@ struct ExtentKey {
     max_lon: u64,
     min_lat: u64,
     max_lat: u64,
-    lat_increases_down: bool,
     zero_to_360: bool,
 }
 
@@ -144,7 +143,6 @@ impl BackdropKey {
                 max_lon: extent.max_lon.to_bits(),
                 min_lat: extent.min_lat.to_bits(),
                 max_lat: extent.max_lat.to_bits(),
-                lat_increases_down: extent.lat_increases_down,
                 zero_to_360: extent.zero_to_360,
             },
         }
@@ -162,7 +160,6 @@ struct Extent {
     max_lon: f64,
     min_lat: f64,
     max_lat: f64,
-    lat_increases_down: bool,
     zero_to_360: bool,
 }
 
@@ -173,7 +170,6 @@ fn extent(coordinates: Option<&CoordinateGrid>) -> Extent {
             max_lon: 180.0,
             min_lat: -90.0,
             max_lat: 90.0,
-            lat_increases_down: false,
             zero_to_360: false,
         };
     };
@@ -181,31 +177,16 @@ fn extent(coordinates: Option<&CoordinateGrid>) -> Extent {
     let mut max_lon = f64::NEG_INFINITY;
     let mut min_lat = f64::INFINITY;
     let mut max_lat = f64::NEG_INFINITY;
-    let mut first_lat = None;
-    let mut last_lat = None;
     if let Some(latitude) = grid.latitude.as_ref() {
         for value in latitude.iter().copied().filter(|value| value.is_finite()) {
             min_lat = min_lat.min(value);
             max_lat = max_lat.max(value);
         }
-        let (_, cols) = latitude.dim();
-        first_lat = latitude
-            .get((0, cols / 2))
-            .copied()
-            .filter(|v| v.is_finite());
-        let (rows, _) = latitude.dim();
-        last_lat = rows
-            .checked_sub(1)
-            .and_then(|row| latitude.get((row, cols / 2)))
-            .copied()
-            .filter(|v| v.is_finite());
     } else if let Some(latitude) = grid.latitude_axis.as_ref() {
         for value in latitude.iter().copied().filter(|value| value.is_finite()) {
             min_lat = min_lat.min(value);
             max_lat = max_lat.max(value);
         }
-        first_lat = latitude.first().copied().filter(|v| v.is_finite());
-        last_lat = latitude.last().copied().filter(|v| v.is_finite());
     }
     if let Some(longitude) = grid.longitude.as_ref() {
         for value in longitude.iter().copied().filter(|value| value.is_finite()) {
@@ -230,7 +211,6 @@ fn extent(coordinates: Option<&CoordinateGrid>) -> Extent {
             max_lon: 180.0,
             min_lat: -90.0,
             max_lat: 90.0,
-            lat_increases_down: false,
             zero_to_360: false,
         };
     }
@@ -250,9 +230,6 @@ fn extent(coordinates: Option<&CoordinateGrid>) -> Extent {
         max_lon,
         min_lat,
         max_lat,
-        lat_increases_down: first_lat
-            .zip(last_lat)
-            .is_some_and(|(first, last)| last > first),
         zero_to_360,
     }
 }
@@ -262,11 +239,7 @@ fn project(lon: f64, lat: f64, extent: Extent, width: f32, height: f32) -> (f32,
     let lat_span = (extent.max_lat - extent.min_lat).max(f64::EPSILON);
     let x = ((lon - extent.min_lon) / lon_span).clamp(-2.0, 3.0) as f32 * width;
     let normalized_lat = ((lat - extent.min_lat) / lat_span).clamp(-2.0, 3.0);
-    let y = if extent.lat_increases_down {
-        normalized_lat as f32 * height
-    } else {
-        (1.0 - normalized_lat) as f32 * height
-    };
+    let y = (1.0 - normalized_lat) as f32 * height;
     (x, y)
 }
 
@@ -458,7 +431,6 @@ mod tests {
             max_lon: 10.0,
             min_lat: 0.0,
             max_lat: 10.0,
-            lat_increases_down: false,
             zero_to_360: false,
         };
         // Inside
@@ -502,7 +474,6 @@ mod tests {
             max_lon: 270.0,
             min_lat: -90.0,
             max_lat: 90.0,
-            lat_increases_down: true,
             zero_to_360: true,
         };
         assert_eq!(actual.min_lon, expected.min_lon);

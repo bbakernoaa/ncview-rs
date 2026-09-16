@@ -30,6 +30,16 @@ impl DragState {
     }
 
     pub fn bounds(self, canvas: Rect, rows: usize, cols: usize) -> Option<Bounds> {
+        self.bounds_with_row_flip(canvas, rows, cols, false)
+    }
+
+    pub fn bounds_with_row_flip(
+        self,
+        canvas: Rect,
+        rows: usize,
+        cols: usize,
+        flip_rows: bool,
+    ) -> Option<Bounds> {
         if canvas.width == 0 || canvas.height == 0 {
             return None;
         }
@@ -60,10 +70,15 @@ impl DragState {
         if left == right || top == bottom {
             return None;
         }
-        let row_start = usize::from(top) * rows / usize::from(canvas.height);
-        let row_end = ((usize::from(bottom) + 1) * rows / usize::from(canvas.height))
-            .max(row_start + 1)
+        let display_row_start = usize::from(top) * rows / usize::from(canvas.height);
+        let display_row_end = ((usize::from(bottom) + 1) * rows / usize::from(canvas.height))
+            .max(display_row_start + 1)
             .min(rows);
+        let (row_start, row_end) = if flip_rows {
+            (rows - display_row_end, rows - display_row_start)
+        } else {
+            (display_row_start, display_row_end)
+        };
         let col_start = usize::from(left) * cols / usize::from(canvas.width);
         let col_end = ((usize::from(right) + 1) * cols / usize::from(canvas.width))
             .max(col_start + 1)

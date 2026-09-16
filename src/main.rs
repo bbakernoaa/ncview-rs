@@ -19,7 +19,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use ncview_rs::{
-    analysis::mapping::screen_to_source,
+    analysis::mapping::screen_to_source_with_row_flip,
     app::{
         AppState, AxisField, ColorScaleScope, Command, Generation, LimitField, Overlay, PlotSeries,
         TimelinePoint,
@@ -1289,7 +1289,11 @@ fn translate_mouse_release(
         return Command::Pan { rows, cols };
     }
     let (rows, cols) = slice.values.dim();
-    if let Some(bounds) = drag.bounds(canvas, rows, cols) {
+    let flip_rows = slice
+        .coordinates
+        .as_ref()
+        .is_some_and(|grid| grid.latitude_increases_with_source_row());
+    if let Some(bounds) = drag.bounds_with_row_flip(canvas, rows, cols, flip_rows) {
         return Command::Zoom(Bounds {
             row_start: slice.source_bounds.row_start + bounds.row_start,
             row_end: slice.source_bounds.row_start + bounds.row_end,
@@ -1677,7 +1681,12 @@ fn map_point_at(
             drawable.height.min(u16::try_from(rows).unwrap_or(u16::MAX)),
         )
     };
-    let (row, col) = screen_to_source(x, y, drawable, slice.source_bounds)?;
+    let flip_rows = slice
+        .coordinates
+        .as_ref()
+        .is_some_and(|grid| grid.latitude_increases_with_source_row());
+    let (row, col) =
+        screen_to_source_with_row_flip(x, y, drawable, slice.source_bounds, flip_rows)?;
     let value = slice.value_at_source(row, col);
     Some((row, col, value))
 }

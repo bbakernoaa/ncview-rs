@@ -20,6 +20,10 @@ pub fn rgb_raster_with_limits(
     limits: Option<(f64, f64)>,
 ) -> RgbImage {
     let (rows, cols) = slice.values.dim();
+    let flip_rows = slice
+        .coordinates
+        .as_ref()
+        .is_some_and(|grid| grid.latitude_increases_with_source_row());
     let mut image = RgbImage::new(cols as u32, rows as u32);
     let stats = slice.statistics.unwrap_or(crate::data::slice::Statistics {
         min: 0.0,
@@ -32,19 +36,29 @@ pub fn rgb_raster_with_limits(
     if let (Some(v_slice), Some(m_slice)) = (slice.values.as_slice(), slice.validity.as_slice()) {
         let (chunks, _) = image.as_mut().as_chunks_mut::<3>();
         chunks
-            .par_iter_mut()
-            .zip(v_slice.par_iter().zip(m_slice.par_iter()))
-            .for_each(|(chunk, (&value, &mask))| {
-                let rgb = if mask == crate::data::slice::Validity::Finite && value.is_finite() {
-                    mapper.map_value(value)
-                } else {
-                    [80, 80, 80]
-                };
-                *chunk = rgb;
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(display_row, row_pixels)| {
+                let source_row =
+                    source_row_for_display_row(slice, display_row, rows, rows, flip_rows);
+                let offset = source_row * cols;
+                for (chunk, (&value, &mask)) in row_pixels.iter_mut().zip(
+                    v_slice[offset..offset + cols]
+                        .iter()
+                        .zip(m_slice[offset..offset + cols].iter()),
+                ) {
+                    let rgb = if mask == crate::data::slice::Validity::Finite && value.is_finite() {
+                        mapper.map_value(value)
+                    } else {
+                        [80, 80, 80]
+                    };
+                    *chunk = rgb;
+                }
             });
     } else {
         let mut pixels = image.pixels_mut();
-        for row in 0..rows {
+        for display_row in 0..rows {
+            let row = source_row_for_display_row(slice, display_row, rows, rows, flip_rows);
             for col in 0..cols {
                 let rgb = color_for_with_limits(slice, row, col, &palette, limits);
                 if let Some(pixel) = pixels.next() {
@@ -127,6 +141,10 @@ fn rasterize(
     selected_point: Option<(usize, usize)>,
 ) -> RgbImage {
     let (rows, cols) = slice.values.dim();
+    let flip_rows = slice
+        .coordinates
+        .as_ref()
+        .is_some_and(|grid| grid.latitude_increases_with_source_row());
     let land_detail = landmask::detail_for_grid(slice.coordinates.as_ref());
     let output_rows = output_rows.max(1).min(rows.max(1));
     let output_cols = output_cols.max(1).min(cols.max(1));
@@ -152,7 +170,14 @@ fn rasterize(
     let raw_buf = image.as_mut();
 
     let row_bins: Vec<(usize, usize)> = (0..output_rows)
-        .map(|r| bin_range(r, rows, output_rows))
+        .map(|display_row| {
+            let (start, end) = bin_range(display_row, rows, output_rows);
+            if flip_rows {
+                (rows - end, rows - start)
+            } else {
+                (start, end)
+            }
+        })
         .collect();
     let col_bins: Vec<(usize, usize)> = (0..output_cols)
         .map(|c| bin_range(c, cols, output_cols))
@@ -302,7 +327,21 @@ fn mark_point(image: &mut RgbImage, slice: &Slice2D, point: (usize, usize), colo
         return;
     };
     let (source_rows, source_cols) = slice.values.dim();
-    let row = row.saturating_mul(image.height() as usize) / source_rows.max(1);
+    let flip_rows = slice
+        .coordinates
+        .as_ref()
+        .is_some_and(|grid| grid.latitude_increases_with_source_row());
+    let row = slice.coordinates.as_ref().map_or_else(
+        || row.saturating_mul(image.height() as usize) / source_rows.max(1),
+        |grid| {
+            grid.display_row_for_source_row_with_flip(
+                row,
+                source_rows,
+                image.height() as usize,
+                flip_rows,
+            )
+        },
+    );
     let col = col.saturating_mul(image.width() as usize) / source_cols.max(1);
     if row >= image.height() as usize || col >= image.width() as usize {
         return;
@@ -321,6 +360,29 @@ fn mark_point(image: &mut RgbImage, slice: &Slice2D, point: (usize, usize), colo
             }
         }
     }
+}
+
+fn source_row_for_display_row(
+    slice: &Slice2D,
+    display_row: usize,
+    display_rows: usize,
+    source_rows: usize,
+    flip_rows: bool,
+) -> usize {
+    slice.coordinates.as_ref().map_or_else(
+        || {
+            let row = display_row * source_rows / display_rows.max(1);
+            row.min(source_rows.saturating_sub(1))
+        },
+        |grid| {
+            grid.source_row_for_display_row_with_flip(
+                display_row,
+                display_rows,
+                source_rows,
+                flip_rows,
+            )
+        },
+    )
 }
 
 pub fn projected_lookup(
@@ -346,8 +408,8 @@ pub fn projected_lookup(
 mod tests {
     use ndarray::Array2;
 
-    use super::rgb_raster_with_options_for_view;
-    use crate::data::slice::{Bounds, Slice2D, Validity};
+    use super::{rgb_raster, rgb_raster_with_options_for_view};
+    use crate::data::slice::{Bounds, CoordinateGrid, Slice2D, Validity};
     use crate::render::colors::{Palette, ScaleMode};
 
     #[test]
@@ -367,5 +429,56 @@ mod tests {
             None,
         );
         assert_eq!(image.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn ascending_latitude_is_rendered_north_up() {
+        let values = Array2::from_shape_vec((2, 1), vec![10.0, 20.0]).unwrap();
+        let validity = Array2::from_elem((2, 1), Validity::Finite);
+        let coordinates = CoordinateGrid {
+            latitude: None,
+            longitude: None,
+            latitude_axis: Some(vec![-45.0, 45.0]),
+            longitude_axis: Some(vec![0.0]),
+        };
+        let slice = Slice2D::new(values, validity, Bounds::new(0, 2, 0, 1).unwrap())
+            .unwrap()
+            .with_coordinates(coordinates);
+        let image = rgb_raster(&slice, Palette::Viridis);
+
+        assert_ne!(image.get_pixel(0, 0), image.get_pixel(0, 1));
+        let descending_values = Array2::from_shape_vec((2, 1), vec![20.0, 10.0]).unwrap();
+        let descending = Slice2D::new(
+            descending_values,
+            Array2::from_elem((2, 1), Validity::Finite),
+            Bounds::new(0, 2, 0, 1).unwrap(),
+        )
+        .unwrap();
+        let expected = rgb_raster(&descending, Palette::Viridis);
+        assert_eq!(image, expected);
+
+        let viewport = rgb_raster_with_options_for_view(
+            &slice,
+            Palette::Viridis,
+            None,
+            None,
+            false,
+            ScaleMode::Linear,
+            2,
+            1,
+            None,
+        );
+        let expected_viewport = rgb_raster_with_options_for_view(
+            &descending,
+            Palette::Viridis,
+            None,
+            None,
+            false,
+            ScaleMode::Linear,
+            2,
+            1,
+            None,
+        );
+        assert_eq!(viewport, expected_viewport);
     }
 }

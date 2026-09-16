@@ -275,9 +275,18 @@ fn render_content(
             &palette,
         )
     });
+    let flip_rows = slice
+        .coordinates
+        .as_ref()
+        .is_some_and(|grid| grid.latitude_increases_with_source_row());
     let lines = (0..height)
         .map(|screen_row| {
-            let source_row = screen_row * rows / height;
+            let source_row = slice.coordinates.as_ref().map_or_else(
+                || screen_row * rows / height,
+                |grid| {
+                    grid.source_row_for_display_row_with_flip(screen_row, height, rows, flip_rows)
+                },
+            );
             let spans = (0..width)
                 .map(|screen_col| {
                     let source_col = screen_col * cols / width;
