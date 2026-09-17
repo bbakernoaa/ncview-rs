@@ -1470,6 +1470,9 @@ impl AppState {
         self.view.time_series.clear();
         self.view.time_series_labels.clear();
         self.view.plot_series.clear();
+        self.view.sidebar_focused = false;
+        self.view.depth_cursor = 0;
+        self.view.level_labels.clear();
         let generation = self.next_generation();
         self.view.loading = LoadingState::Loading;
         let effect = Effect::ReadSlice {

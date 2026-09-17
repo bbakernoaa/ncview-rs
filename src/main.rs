@@ -1938,6 +1938,8 @@ fn load_selected(
     state.view.depth_index = state.view.depth_index.min(depth_length.saturating_sub(1));
     state.view.time_label = Some(timeline_point.label.clone());
     state.view.level_label = source.vertical_label(&variable_name, state.view.depth_index);
+    state.view.level_labels = source.vertical_labels(&variable_name);
+    state.view.depth_cursor = state.view.depth_index;
     state.view.full_bounds = Some(full_bounds);
     let bounds = state.view.zoom_bounds.unwrap_or(full_bounds);
     let fixed_axes = fixed_axes_for_plane(

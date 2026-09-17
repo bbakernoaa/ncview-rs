@@ -136,6 +136,32 @@ pub trait DataSource: Send + Sync {
         None
     }
 
+    /// Labels for every index of the variable's vertical (Depth) axis, in
+    /// index order. Empty when the variable has no vertical axis. The sidebar
+    /// level list renders this, so it is read once per variable change rather
+    /// than per frame.
+    fn vertical_labels(&self, variable: &str) -> Vec<String> {
+        let metadata = self.metadata();
+        let count = metadata
+            .variables
+            .iter()
+            .find(|item| item.name == variable)
+            .and_then(|item| {
+                item.dimensions.iter().find_map(|name| {
+                    metadata
+                        .dimensions
+                        .iter()
+                        .find(|dimension| &dimension.name == name)
+                        .filter(|dimension| dimension.role == AxisRole::Depth)
+                        .map(|dimension| dimension.length)
+                })
+            })
+            .unwrap_or(0);
+        (0..count)
+            .filter_map(|index| self.vertical_label(variable, index))
+            .collect()
+    }
+
     fn dimension_values(&self, _variable: &str, _dimension: &str) -> Option<Vec<f64>> {
         None
     }

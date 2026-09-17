@@ -351,3 +351,45 @@ fn coards_float32_time_lat_lon_dataset_reads_a_2d_slice() {
     assert_eq!(hovmoller.values.shape(), &[4, 3]);
     assert_eq!(hovmoller.values[(2, 2)], 43.0);
 }
+
+#[test]
+fn vertical_labels_are_prefetched_for_every_depth_index() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("levels.nc4");
+    let mut writer = NcFileWriter::new();
+    let lev = writer.def_dim("lev_dim", 3).unwrap();
+    let lat = writer.def_dim("lat_dim", 2).unwrap();
+    let lon = writer.def_dim("lon_dim", 2).unwrap();
+    let lev_var = writer.def_var("lev", &[lev], NcType::Float64).unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lev_var), "standard_name", "depth")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(lev_var), "units", "m")
+        .unwrap();
+    writer.put_var_f64(lev_var, &[5.0, 10.0, 20.0]).unwrap();
+    let field = writer
+        .def_var("temp", &[lev, lat, lon], NcType::Float64)
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(field), "coordinates", "lev")
+        .unwrap();
+    writer
+        .put_var_f64(field, &(0..12).map(|i| i as f64).collect::<Vec<_>>())
+        .unwrap();
+    let mask = writer
+        .def_var("mask", &[lat, lon], NcType::Float64)
+        .unwrap();
+    writer
+        .put_var_f64(mask, &(0..4).map(|i| i as f64).collect::<Vec<_>>())
+        .unwrap();
+    writer.close(&path).unwrap();
+
+    let source = ncview_rs::data::open(&path).unwrap();
+    let labels = source.vertical_labels("temp");
+    assert_eq!(labels.len(), 3, "got {labels:?}");
+    assert!(labels[0].contains('5'), "got {:?}", labels[0]);
+    assert!(labels[2].contains("20"), "got {:?}", labels[2]);
+    // A variable with no vertical axis yields no labels.
+    assert!(source.vertical_labels("mask").is_empty());
+}
