@@ -1222,6 +1222,11 @@ fn translate_mouse(
         Command::MouseRelease { x, y } => {
             translate_mouse_release(x, y, area, metadata, view, variable_query, graphics)
         }
+        Command::PointerScroll { x, y, delta } => {
+            let areas = dashboard_layout::dashboard(area);
+            translate_scroll(x, y, delta, areas.sidebar, metadata, view, variable_query)
+                .unwrap_or(Command::Pointer { x, y })
+        }
         command => {
             translate_mouse_position(command, area, metadata, view, variable_query, graphics)
         }
@@ -1310,6 +1315,188 @@ fn translate_mouse_release(
         .unwrap_or(Command::CancelDrag)
 }
 
+/// Single source of truth for the sidebar Level section geometry used by the
+/// mouse hit-test. `variable_rows` must match the widget's `.take(8)` count in
+/// `sidebar.rs`, so the two agree on where the variable rows end.
+fn level_geometry(
+    sidebar: Rect,
+    view: &ncview_rs::app::ViewModel,
+    metadata: &DatasetMetadata,
+    variable_query: &str,
+) -> Option<ncview_rs::ui::level::LevelSection> {
+    let plottable_all: Vec<_> = metadata
+        .variables
+        .iter()
+        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+        .cloned()
+        .collect();
+    let filtered = ncview_rs::ui::sidebar::filter_variables(&plottable_all, variable_query);
+    // The widget draws a single "no plottable fields" placeholder row when the
+    // list is empty; match that so the section heading stays aligned.
+    let variable_rows = if filtered.is_empty() {
+        1
+    } else {
+        filtered.len().min(8)
+    };
+    let stepper_span = (usize::from(sidebar.width.saturating_sub(2)) / 2) as u16;
+    let geometry = ncview_rs::ui::level::level_section(
+        sidebar,
+        variable_rows,
+        view.level_labels.len(),
+        stepper_span,
+    )?;
+    let (top, _) = ncview_rs::ui::level::level_window(
+        view.level_labels.len(),
+        geometry.list_rows,
+        view.depth_cursor,
+    );
+    Some(ncview_rs::ui::level::LevelSection {
+        window_top: top,
+        ..geometry
+    })
+}
+
+/// Map a click inside the sidebar panel to the command its row represents, or
+/// `None` when the row carries no control. Sidebar rows: filename, colormap
+/// name/scale, a View actions heading, two view-action rows, a Navigation
+/// heading, two navigation rows, variables, the optional Level section,
+/// dimensions, then the limit/filter controls.
+fn translate_sidebar_position(
+    x: u16,
+    y: u16,
+    sidebar: Rect,
+    metadata: &DatasetMetadata,
+    view: &ncview_rs::app::ViewModel,
+    variable_query: &str,
+) -> Option<Command> {
+    if !sidebar.contains((x, y).into()) {
+        return None;
+    }
+    let plottable_all: Vec<_> = metadata
+        .variables
+        .iter()
+        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+        .cloned()
+        .collect();
+    let plottable = ncview_rs::ui::sidebar::filter_variables(&plottable_all, variable_query)
+        .into_iter()
+        .take(8)
+        .collect::<Vec<_>>();
+    let action_third = (sidebar.width / 3).max(1);
+    let action_row_one = sidebar.y.saturating_add(6);
+    let action_row_two = sidebar.y.saturating_add(7);
+    if y == action_row_one {
+        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
+            0 => Command::CyclePalette,
+            1 => Command::TogglePaletteReverse,
+            _ => Command::AutomaticLimits,
+        });
+    }
+    if y == action_row_two {
+        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
+            0 => Command::OpenLimits,
+            1 => Command::OpenFilter,
+            _ => Command::OpenAxisOverlay,
+        });
+    }
+    let date_row = sidebar.y.saturating_add(9);
+    if y == date_row {
+        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
+            0 => Command::ResetZoom,
+            1 => Command::MoveTime(-1),
+            _ => Command::MoveTime(1),
+        });
+    }
+    let speed_row = sidebar.y.saturating_add(10);
+    if y == speed_row {
+        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
+            0 => Command::DecreasePlaybackSpeed,
+            1 => Command::IncreasePlaybackSpeed,
+            _ => Command::ToggleColorScaleScope,
+        });
+    }
+    let search_row = sidebar.y.saturating_add(12);
+    if y == search_row {
+        return Some(Command::OpenVariableSearch);
+    }
+    let variable_start = search_row.saturating_add(1);
+    if y >= variable_start && usize::from(y - variable_start) < plottable.len() {
+        return Some(Command::SelectVariableAt(usize::from(y - variable_start)));
+    }
+    let section = level_geometry(sidebar, view, metadata, variable_query);
+    if let Some(section) = section.as_ref() {
+        if y == section.stepper {
+            return ncview_rs::ui::level::level_button(section, x).map(|button| match button {
+                ncview_rs::ui::level::DepthButton::Prev => Command::MoveDepth(-1),
+                ncview_rs::ui::level::DepthButton::Next => Command::MoveDepth(1),
+            });
+        }
+        if let Some(index) = ncview_rs::ui::level::level_at(section, y) {
+            return Some(Command::SetDepth(index));
+        }
+    }
+    let dimensions = metadata.dimensions.iter().take(8).count();
+    let level_rows = section.map_or(0, |section| {
+        usize::from(section.list_top) + section.list_rows - usize::from(section.heading)
+    });
+    let dimensions_heading = variable_start
+        .saturating_add(u16::try_from(plottable.len()).unwrap_or(u16::MAX))
+        .saturating_add(1)
+        .saturating_add(u16::try_from(level_rows).unwrap_or(u16::MAX));
+    let dimensions_end = dimensions_heading
+        .saturating_add(1)
+        .saturating_add(u16::try_from(dimensions).unwrap_or(u16::MAX));
+    let colormap_heading = sidebar.y.saturating_add(2);
+    let palette_row = colormap_heading.saturating_add(1);
+    let scale_row = colormap_heading.saturating_add(2);
+    let limits_row = dimensions_end.saturating_add(1);
+    let filter_row = dimensions_end.saturating_add(2);
+    let scope_row = dimensions_end.saturating_add(4);
+    let reverse_row = dimensions_end.saturating_add(5);
+    let command = match y {
+        value if value == palette_row => Command::CyclePalette,
+        value if value == scale_row => Command::ToggleScale,
+        value if value == limits_row => Command::OpenLimits,
+        value if value == filter_row => Command::OpenFilter,
+        value if value == scope_row => Command::ToggleColorScaleScope,
+        value if value == reverse_row => {
+            if x >= sidebar.x.saturating_add(18) {
+                Command::ToggleLandBorders
+            } else {
+                Command::TogglePaletteReverse
+            }
+        }
+        _ => return None,
+    };
+    Some(command)
+}
+
+/// Route a wheel scroll over the sidebar: the Level section steps depth, the
+/// variable list cycles the selected variable. Outside the sidebar returns
+/// `None` so the event stays a no-op.
+fn translate_scroll(
+    x: u16,
+    y: u16,
+    delta: isize,
+    sidebar: Rect,
+    metadata: &DatasetMetadata,
+    view: &ncview_rs::app::ViewModel,
+    variable_query: &str,
+) -> Option<Command> {
+    if !sidebar.contains((x, y).into()) {
+        return None;
+    }
+    if let Some(section) = level_geometry(sidebar, view, metadata, variable_query) {
+        let list_bottom = section
+            .list_top
+            .saturating_add(u16::try_from(section.list_rows.saturating_sub(1)).unwrap_or(u16::MAX));
+        if y >= section.heading && y <= list_bottom {
+            return Some(Command::MoveDepth(delta));
+        }
+    }
+    Some(Command::SelectVariable(if delta < 0 { 0 } else { 1 }))
+}
+
 fn translate_mouse_position(
     command: Command,
     area: Rect,
@@ -1391,89 +1578,8 @@ fn translate_mouse_position(
     if !areas.sidebar.contains((x, y).into()) {
         return Command::Pointer { x, y };
     }
-    let plottable_all = metadata
-        .variables
-        .iter()
-        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
-        .cloned()
-        .collect::<Vec<_>>();
-    let plottable = ncview_rs::ui::sidebar::filter_variables(&plottable_all, variable_query)
-        .into_iter()
-        .take(8)
-        .collect::<Vec<_>>();
-    // Sidebar rows: filename, colormap name/scale, a View actions heading,
-    // two view-action rows, a Navigation heading, two navigation rows,
-    // variables, dimensions, then the limit/filter controls. Keep mouse hit
-    // targets aligned with the visible button rows.
-    let action_row_one = areas.sidebar.y.saturating_add(6);
-    let action_row_two = areas.sidebar.y.saturating_add(7);
-    let action_third = (areas.sidebar.width / 3).max(1);
-    if y == action_row_one {
-        return match (x.saturating_sub(areas.sidebar.x)) / action_third {
-            0 => Command::CyclePalette,
-            1 => Command::TogglePaletteReverse,
-            _ => Command::AutomaticLimits,
-        };
-    }
-    if y == action_row_two {
-        return match (x.saturating_sub(areas.sidebar.x)) / action_third {
-            0 => Command::OpenLimits,
-            1 => Command::OpenFilter,
-            _ => Command::OpenAxisOverlay,
-        };
-    }
-    let date_row = areas.sidebar.y.saturating_add(9);
-    if y == date_row {
-        return match (x.saturating_sub(areas.sidebar.x)) / action_third {
-            0 => Command::ResetZoom,
-            1 => Command::MoveTime(-1),
-            _ => Command::MoveTime(1),
-        };
-    }
-    let speed_row = areas.sidebar.y.saturating_add(10);
-    if y == speed_row {
-        return match (x.saturating_sub(areas.sidebar.x)) / action_third {
-            0 => Command::DecreasePlaybackSpeed,
-            1 => Command::IncreasePlaybackSpeed,
-            _ => Command::ToggleColorScaleScope,
-        };
-    }
-    let search_row = areas.sidebar.y.saturating_add(12);
-    if y == search_row {
-        return Command::OpenVariableSearch;
-    }
-    let variable_start = search_row.saturating_add(1);
-    if y >= variable_start && usize::from(y - variable_start) < plottable.len() {
-        return Command::SelectVariableAt(usize::from(y - variable_start));
-    }
-    let dimensions = metadata.dimensions.iter().take(8).count();
-    let colormap_heading = areas.sidebar.y.saturating_add(2);
-    let palette_row = colormap_heading.saturating_add(1);
-    let scale_row = colormap_heading.saturating_add(2);
-    let dimensions_heading =
-        variable_start + u16::try_from(plottable.len()).unwrap_or(u16::MAX) + 1;
-    let dimensions_end = dimensions_heading
-        .saturating_add(1)
-        .saturating_add(u16::try_from(dimensions).unwrap_or(u16::MAX));
-    let limits_row = dimensions_end.saturating_add(1);
-    let filter_row = dimensions_end.saturating_add(2);
-    let scope_row = dimensions_end.saturating_add(4);
-    let reverse_row = dimensions_end.saturating_add(5);
-    match y {
-        value if value == palette_row => Command::CyclePalette,
-        value if value == scale_row => Command::ToggleScale,
-        value if value == limits_row => Command::OpenLimits,
-        value if value == filter_row => Command::OpenFilter,
-        value if value == scope_row => Command::ToggleColorScaleScope,
-        value if value == reverse_row => {
-            if x >= areas.sidebar.x.saturating_add(18) {
-                Command::ToggleLandBorders
-            } else {
-                Command::TogglePaletteReverse
-            }
-        }
-        _ => Command::Pointer { x, y },
-    }
+    translate_sidebar_position(x, y, areas.sidebar, metadata, view, variable_query)
+        .unwrap_or(Command::Pointer { x, y })
 }
 
 fn translate_variable_browser_click(
@@ -2989,5 +3095,152 @@ mod timeline_order_tests {
             compare_time_labels("2026-09-10T12:00:00Z", "coordinate index"),
             std::cmp::Ordering::Less
         );
+    }
+}
+
+#[cfg(test)]
+mod sidebar_hit_tests {
+    use super::{level_geometry, translate_scroll, translate_sidebar_position};
+    use ncview_rs::app::{AppState, Command};
+    use ncview_rs::data::{AxisRole, DatasetFormat, DatasetMetadata, Dimension, Variable};
+    use ratatui::layout::Rect;
+
+    const SIDEBAR: Rect = Rect::new(0, 0, 32, 30);
+
+    fn metadata_with_variable() -> DatasetMetadata {
+        DatasetMetadata {
+            path: "f.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: vec![
+                Dimension {
+                    name: "lev".into(),
+                    length: 12,
+                    role: AxisRole::Depth,
+                },
+                Dimension {
+                    name: "lat".into(),
+                    length: 4,
+                    role: AxisRole::Latitude,
+                },
+                Dimension {
+                    name: "lon".into(),
+                    length: 5,
+                    role: AxisRole::Longitude,
+                },
+            ],
+            variables: vec![Variable {
+                name: "temp".into(),
+                dimensions: vec!["lev".into(), "lat".into(), "lon".into()],
+                numeric: true,
+                units: None,
+                long_name: None,
+                standard_name: None,
+            }],
+        }
+    }
+
+    fn state_with_levels() -> AppState {
+        let mut state = AppState::default();
+        state.view.depth_length = 12;
+        state.view.level_labels = (0..12).map(|i| format!("L{i}")).collect();
+        state
+    }
+
+    #[test]
+    fn stepper_and_level_rows_dispatch_depth_commands() {
+        let state = state_with_levels();
+        let metadata = metadata_with_variable();
+        let section = level_geometry(SIDEBAR, &state.view, &metadata, "").unwrap();
+
+        assert_eq!(
+            translate_sidebar_position(
+                section.stepper_prev.x + 1,
+                section.stepper,
+                SIDEBAR,
+                &metadata,
+                &state.view,
+                "",
+            ),
+            Some(Command::MoveDepth(-1))
+        );
+        assert_eq!(
+            translate_sidebar_position(
+                section.stepper_next.x + 1,
+                section.stepper,
+                SIDEBAR,
+                &metadata,
+                &state.view,
+                "",
+            ),
+            Some(Command::MoveDepth(1))
+        );
+        let index = section.window_top + 1;
+        assert_eq!(
+            translate_sidebar_position(
+                section.list_rect.x + 1,
+                section.list_top + 1,
+                SIDEBAR,
+                &metadata,
+                &state.view,
+                "",
+            ),
+            Some(Command::SetDepth(index))
+        );
+    }
+
+    #[test]
+    fn scroll_over_the_level_list_steps_depth_else_moves_variables() {
+        let state = state_with_levels();
+        let metadata = metadata_with_variable();
+        let section = level_geometry(SIDEBAR, &state.view, &metadata, "").unwrap();
+        assert_eq!(
+            translate_scroll(
+                SIDEBAR.x + 1,
+                section.list_top,
+                1,
+                SIDEBAR,
+                &metadata,
+                &state.view,
+                "",
+            ),
+            Some(Command::MoveDepth(1))
+        );
+        // Over the variable list (row 13): previous variable (index arg 0 = up).
+        assert_eq!(
+            translate_scroll(
+                SIDEBAR.x + 1,
+                SIDEBAR.y + 13,
+                -1,
+                SIDEBAR,
+                &metadata,
+                &state.view,
+                "",
+            ),
+            Some(Command::SelectVariable(0))
+        );
+        // Outside the sidebar: ignored.
+        assert_eq!(
+            translate_scroll(
+                SIDEBAR.x + 120,
+                SIDEBAR.y + 13,
+                -1,
+                SIDEBAR,
+                &metadata,
+                &state.view,
+                "",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn hit_test_rows_match_the_rendered_widget() {
+        let state = state_with_levels();
+        let metadata = metadata_with_variable();
+        let section = level_geometry(SIDEBAR, &state.view, &metadata, "").unwrap();
+        // One plottable variable -> variable_rows = 1.
+        // heading = first_variable_row(13) + 1 + separator(1) = 15.
+        assert_eq!(section.heading, 15);
+        assert_eq!(section.list_top, 18);
     }
 }
