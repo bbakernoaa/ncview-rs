@@ -175,7 +175,7 @@ pub fn render_with_search_and_image(
         view.playback_speed,
     );
     let status = if view.help_visible {
-        "Keys: arrows navigate  [/] depth  click map to select  Enter: plots  m: add point  ? help"
+        "Keys: arrows navigate  [/] depth  Tab: level list  click map to select  Enter: plots  m: add point  ? help"
             .to_string()
     } else if let Some(drag) = view.drag {
         if view.zoom_bounds.is_some() && !drag.zoom {

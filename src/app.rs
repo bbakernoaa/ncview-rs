@@ -1695,6 +1695,18 @@ pub const COMMAND_PALETTE: &[PaletteEntry] = &[
         shortcut: "→",
     },
     PaletteEntry {
+        label: "Previous depth slice",
+        shortcut: "[",
+    },
+    PaletteEntry {
+        label: "Next depth slice",
+        shortcut: "]",
+    },
+    PaletteEntry {
+        label: "Focus level list",
+        shortcut: "Tab",
+    },
+    PaletteEntry {
         label: "Search variables",
         shortcut: "/",
     },
@@ -1752,9 +1764,12 @@ fn palette_command(index: usize) -> Command {
         18 => Command::SelectVariable(1),
         19 => Command::MoveTime(-1),
         20 => Command::MoveTime(1),
-        21 => Command::OpenVariableSearch,
-        22 => Command::PreviousFile,
-        23 => Command::NextFile,
+        21 => Command::MoveDepth(-1),
+        22 => Command::MoveDepth(1),
+        23 => Command::ToggleSidebarFocus,
+        24 => Command::OpenVariableSearch,
+        25 => Command::PreviousFile,
+        26 => Command::NextFile,
         _ => Command::ToggleHelp,
     }
 }

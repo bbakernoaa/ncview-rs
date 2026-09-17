@@ -550,3 +550,60 @@ fn zero_length_depth_stays_at_index_zero() {
     state.reduce(Command::MoveDepthCursor(3));
     assert_eq!(state.view.depth_cursor, 0);
 }
+
+#[test]
+fn every_palette_shortcut_is_documented_in_help() {
+    let help = ncview_rs::ui::help::help_text();
+    for entry in ncview_rs::app::COMMAND_PALETTE {
+        if entry.shortcut.is_empty() {
+            continue;
+        }
+        assert!(
+            help.contains(entry.shortcut),
+            "palette shortcut {:?} for {:?} is missing from help text",
+            entry.shortcut,
+            entry.label,
+        );
+    }
+}
+
+#[test]
+fn palette_exposes_depth_navigation() {
+    let labels: Vec<&str> = ncview_rs::app::COMMAND_PALETTE
+        .iter()
+        .map(|entry| entry.label)
+        .collect();
+    for expected in [
+        "Previous depth slice",
+        "Next depth slice",
+        "Focus level list",
+    ] {
+        assert!(
+            labels.contains(&expected),
+            "missing palette entry {expected}"
+        );
+    }
+}
+
+#[test]
+fn palette_depth_entries_dispatch_depth_commands() {
+    let mut state = AppState::default();
+    state.view.depth_length = 4;
+    let next = ncview_rs::app::COMMAND_PALETTE
+        .iter()
+        .position(|entry| entry.label == "Next depth slice")
+        .unwrap();
+    state.view.overlay = Some(Overlay::CommandPalette);
+    state.reduce(Command::ExecutePaletteChoice(next));
+    assert_eq!(state.view.depth_index, 1);
+    assert_eq!(state.view.overlay, None);
+
+    let focus = ncview_rs::app::COMMAND_PALETTE
+        .iter()
+        .position(|entry| entry.label == "Focus level list")
+        .unwrap();
+    state.view.overlay = Some(Overlay::CommandPalette);
+    state.reduce(Command::ExecutePaletteChoice(focus));
+    assert!(state.view.sidebar_focused);
+    assert_eq!(state.view.overlay, None);
+}
