@@ -6,6 +6,7 @@ pub mod colorbar;
 pub mod dashboard;
 pub mod help;
 pub mod layout;
+pub mod level;
 pub mod popup;
 pub mod sidebar;
 pub mod status;

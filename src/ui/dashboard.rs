@@ -122,6 +122,12 @@ pub fn render_with_search_and_image(
         view.color_scale_scope,
         variable_query,
         variable_search_active,
+        (view.depth_length > 1).then(|| crate::ui::level::LevelPanel {
+            labels: &view.level_labels,
+            selected: view.depth_index,
+            cursor: view.depth_cursor,
+            focused: view.sidebar_focused,
+        }),
     );
     canvas::render_with_points_and_image(
         frame,

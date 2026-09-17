@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::data::{DatasetMetadata, Variable};
+use crate::ui::level::{LevelPanel, level_section, level_window};
 use crate::{
     app::ColorScaleScope,
     render::colors::{Palette, ScaleMode},
@@ -100,6 +101,7 @@ pub fn render(
         color_scale_scope,
         "",
         false,
+        None,
     );
 }
 
@@ -117,6 +119,7 @@ pub fn render_with_search(
     color_scale_scope: ColorScaleScope,
     variable_query: &str,
     variable_search_active: bool,
+    level: Option<LevelPanel<'_>>,
 ) {
     let content_width = usize::from(area.width.saturating_sub(2));
     let limit_text = limits.map_or_else(
@@ -240,6 +243,7 @@ pub fn render_with_search(
             },
         ),
     ]));
+    let variables_top = lines.len();
     if variables.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no plottable fields",
@@ -266,6 +270,76 @@ pub fn render_with_search(
                     }),
                 ),
             ]));
+        }
+    }
+    let variable_rows = lines.len() - variables_top;
+    if let Some(panel) = level {
+        let stepper_span = (content_width / 2) as u16;
+        if let Some(base) = level_section(area, variable_rows, panel.labels.len(), stepper_span) {
+            let (top, len) = level_window(panel.labels.len(), base.list_rows, panel.cursor);
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Level",
+                theme::title_style(if panel.focused {
+                    theme::TEAL
+                } else {
+                    theme::BLUE
+                }),
+            )));
+            let readout = panel
+                .labels
+                .get(panel.selected)
+                .cloned()
+                .unwrap_or_else(|| format!("index {}", panel.selected));
+            lines.push(Line::from(Span::styled(
+                truncate_text(
+                    &format!(
+                        "  {readout} [{} / {}]",
+                        panel.selected + 1,
+                        panel.labels.len()
+                    ),
+                    content_width,
+                ),
+                Style::default().fg(theme::TEXT),
+            )));
+            lines.push(Line::from(vec![
+                button("◂ Prev", theme::SURFACE_ALT),
+                Span::raw("  "),
+                button("Next ▸", theme::SURFACE_ALT),
+            ]));
+            for index in top..top + len {
+                let label = panel
+                    .labels
+                    .get(index)
+                    .map_or_else(|| format!("index {index}"), String::clone);
+                let is_selected = index == panel.selected;
+                let is_cursor = panel.focused && index == panel.cursor;
+                let marker = if is_cursor {
+                    "▸"
+                } else if is_selected {
+                    "●"
+                } else {
+                    " "
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {marker} "),
+                        theme::title_style(if is_cursor || is_selected {
+                            theme::TEAL
+                        } else {
+                            theme::SURFACE_ALT
+                        }),
+                    ),
+                    Span::styled(
+                        truncate_text(&label, content_width.saturating_sub(4)),
+                        Style::default().fg(if is_selected {
+                            theme::TEXT
+                        } else {
+                            theme::SUBTEXT
+                        }),
+                    ),
+                ]));
+            }
         }
     }
     lines.push(Line::from(""));
@@ -319,6 +393,68 @@ pub fn render_with_search(
 #[cfg(test)]
 mod tests {
     use super::truncate_variable_name;
+
+    fn empty_metadata() -> crate::data::DatasetMetadata {
+        crate::data::DatasetMetadata {
+            path: "f.nc".into(),
+            format: crate::data::DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        }
+    }
+
+    fn render_sidebar(level: Option<crate::ui::level::LevelPanel<'_>>) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(32, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_with_search(
+                    frame,
+                    frame.area(),
+                    "f.nc",
+                    &empty_metadata(),
+                    None,
+                    &crate::render::colors::Palette::Viridis,
+                    None,
+                    None,
+                    crate::render::colors::ScaleMode::Linear,
+                    crate::app::ColorScaleScope::CurrentView,
+                    "",
+                    false,
+                    level,
+                )
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn level_section_renders_header_stepper_and_list() {
+        use crate::ui::level::LevelPanel;
+        let labels: Vec<String> = (0..6).map(|i| format!("L{i}")).collect();
+        let rendered = render_sidebar(Some(LevelPanel {
+            labels: &labels,
+            selected: 2,
+            cursor: 2,
+            focused: false,
+        }));
+        assert!(rendered.contains("Level"), "{rendered}");
+        assert!(rendered.contains("L2 [3 / 6]"), "{rendered}");
+        assert!(rendered.contains("Prev"), "{rendered}");
+        assert!(rendered.contains("Next"), "{rendered}");
+    }
+
+    #[test]
+    fn level_section_is_absent_without_levels() {
+        let rendered = render_sidebar(None);
+        assert!(!rendered.contains("Level"), "{rendered}");
+    }
 
     #[test]
     fn variable_truncation_preserves_both_ends() {
