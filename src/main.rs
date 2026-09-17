@@ -1223,7 +1223,7 @@ fn translate_mouse(
             translate_mouse_release(x, y, area, metadata, view, variable_query, graphics)
         }
         Command::PointerScroll { x, y, delta } => {
-            let areas = dashboard_layout::dashboard(area);
+            let areas = dashboard_layout::dashboard(area, view.depth_length > 1);
             translate_scroll(x, y, delta, areas.sidebar, metadata, view, variable_query)
                 .unwrap_or(Command::Pointer { x, y })
         }
@@ -1525,7 +1525,7 @@ fn translate_mouse_position(
     if view.help_visible || view.overlay.is_some() {
         return Command::Pointer { x, y };
     }
-    let areas = dashboard_layout::dashboard(area);
+    let areas = dashboard_layout::dashboard(area, view.depth_length > 1);
     if let Some((row, col, value)) = map_point_at(x, y, area, view, graphics) {
         return if clicked {
             Command::SelectPoint { row, col }
@@ -1807,7 +1807,7 @@ fn map_drawable(
     graphics: Option<&GraphicsRenderer>,
 ) -> Option<Rect> {
     let _ = view.slice.as_ref()?;
-    let panel = dashboard_layout::dashboard(area).canvas;
+    let panel = dashboard_layout::dashboard(area, view.depth_length > 1).canvas;
     let inner = Rect::new(
         panel.x.saturating_add(1),
         panel.y.saturating_add(1),

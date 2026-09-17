@@ -77,7 +77,7 @@ pub fn render_with_search_and_image(
         Block::default().style(Style::default().bg(theme::BASE)),
         area,
     );
-    let areas = layout::dashboard(area);
+    let areas = layout::dashboard(area, view.depth_length > 1);
     let header = Block::default()
         .borders(Borders::BOTTOM)
         .border_style(Style::default().fg(theme::SURFACE_ALT))
