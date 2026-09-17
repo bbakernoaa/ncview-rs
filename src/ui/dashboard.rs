@@ -165,6 +165,23 @@ pub fn render_with_search_and_image(
         selected_metadata.and_then(|variable| variable.standard_name.as_deref()),
         selected_level_label(metadata, selected_metadata, view).as_deref(),
     );
+    if !areas.level.is_empty() {
+        let level_text =
+            selected_level_label(metadata, selected_metadata, view).unwrap_or_else(|| {
+                format!(
+                    "index {} of {}",
+                    view.depth_index,
+                    view.depth_length.saturating_sub(1)
+                )
+            });
+        crate::ui::level::render_gauge(
+            frame,
+            areas.level,
+            &level_text,
+            view.depth_index,
+            view.depth_length,
+        );
+    }
     timeline::render(
         frame,
         areas.timeline,

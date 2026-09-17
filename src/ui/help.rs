@@ -46,6 +46,7 @@ Mouse\n\
   click map      pin point (◆), then Enter or p for plot choices\n\
   hover + m      accumulate multiple points for multi-trace plots\n\
   click a sidebar button, variable, timeline play/pause, or speed control\n\
+  click / drag the level bar  seek the vertical level\n\
   wheel over the sidebar  scroll the level or variable list\n\
   right-click or ? closes this help\n\
 Command palette\n\

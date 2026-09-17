@@ -607,3 +607,8 @@ fn palette_depth_entries_dispatch_depth_commands() {
     assert!(state.view.sidebar_focused);
     assert_eq!(state.view.overlay, None);
 }
+
+#[test]
+fn help_documents_the_level_bar() {
+    assert!(ncview_rs::ui::help::help_text().contains("level bar"));
+}

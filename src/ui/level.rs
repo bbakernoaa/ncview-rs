@@ -1,4 +1,6 @@
-use ratatui::layout::Rect;
+use ratatui::{Frame, layout::Rect, widgets::Gauge};
+
+use super::theme;
 
 const ROW: u16 = 1;
 /// Rows the section draws before the list: heading, readout, stepper.
@@ -129,6 +131,31 @@ pub fn level_button(section: &LevelSection, x: u16) -> Option<DepthButton> {
     None
 }
 
+/// Full-width level gauge mirroring the time bar. `label` is the current
+/// level's readout (CF coordinate label or the dimension-name fallback);
+/// `index`/`length` position the fill. No-ops for zero-area or single-level
+/// variables so the dashboard can call it unconditionally.
+pub fn render_gauge(frame: &mut Frame, area: Rect, label: &str, index: usize, length: usize) {
+    if area.is_empty() || length <= 1 {
+        return;
+    }
+    let ratio = (index as f64 / (length - 1) as f64).clamp(0.0, 1.0);
+    let title = format!("{}  Level", theme::ICON_DIMENSION);
+    let text = format!("{index}/{}  {label}", length.saturating_sub(1));
+    frame.render_widget(
+        Gauge::default()
+            .block(theme::panel(&title, theme::MAUVE))
+            .label(text)
+            .gauge_style(
+                ratatui::style::Style::default()
+                    .fg(theme::TEAL)
+                    .bg(theme::SURFACE_ALT),
+            )
+            .ratio(ratio),
+        area,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -220,5 +247,48 @@ mod tests {
             Some(DepthButton::Next)
         );
         assert_eq!(level_button(&section, AREA.x), None);
+    }
+
+    #[test]
+    fn render_gauge_shows_title_position_and_label() {
+        use super::render_gauge;
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_gauge(
+                    frame,
+                    frame.area(),
+                    "pressure 500 hPa (index 3 of 26)",
+                    3,
+                    27,
+                );
+            })
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("Level"), "{content}");
+        assert!(content.contains("3/26"), "{content}");
+        assert!(content.contains("500"), "{content}");
+    }
+
+    #[test]
+    fn render_gauge_is_inert_without_levels() {
+        use super::render_gauge;
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        terminal
+            .draw(|frame| render_gauge(frame, frame.area(), "x", 0, 1))
+            .unwrap();
+        terminal
+            .draw(|frame| {
+                render_gauge(frame, ratatui::layout::Rect::ZERO, "x", 0, 1);
+            })
+            .unwrap();
     }
 }
