@@ -1208,6 +1208,19 @@ fn sanitize_filename(value: &str) -> String {
     }
 }
 
+/// Proportional depth index for a click at column `x` inside the level gauge,
+/// matching the timeline's click-to-seek mapping (inner area, clamped).
+fn depth_index_at(x: u16, area: Rect, depth_length: usize) -> usize {
+    if depth_length <= 1 {
+        return 0;
+    }
+    let start = area.x.saturating_add(1);
+    let end = area.x.saturating_add(area.width.saturating_sub(2));
+    let position = x.clamp(start, end).saturating_sub(start) as usize;
+    let width = usize::from(end.saturating_sub(start).max(1));
+    position.saturating_mul(depth_length.saturating_sub(1)) / width
+}
+
 fn translate_mouse(
     command: Command,
     area: Rect,
@@ -1218,12 +1231,23 @@ fn translate_mouse(
 ) -> Command {
     match command {
         Command::BeginDrag { x, y, zoom } => translate_begin_drag(x, y, zoom, area, view, graphics),
-        Command::UpdateDrag { x, y } => translate_update_drag(x, y, view),
+        Command::UpdateDrag { x, y } => {
+            if view.drag.is_none() {
+                let areas = dashboard_layout::dashboard(area, view.depth_length > 1);
+                if view.depth_length > 1 && areas.level.contains((x, y).into()) {
+                    return Command::SetDepth(depth_index_at(x, areas.level, view.depth_length));
+                }
+            }
+            translate_update_drag(x, y, view)
+        }
         Command::MouseRelease { x, y } => {
             translate_mouse_release(x, y, area, metadata, view, variable_query, graphics)
         }
         Command::PointerScroll { x, y, delta } => {
             let areas = dashboard_layout::dashboard(area, view.depth_length > 1);
+            if view.depth_length > 1 && areas.level.contains((x, y).into()) {
+                return Command::MoveDepth(delta);
+            }
             translate_scroll(x, y, delta, areas.sidebar, metadata, view, variable_query)
                 .unwrap_or(Command::Pointer { x, y })
         }
@@ -1243,6 +1267,10 @@ fn translate_begin_drag(
 ) -> Command {
     if view.help_visible || view.overlay.is_some() || view.variable_search_active {
         return Command::Pointer { x, y };
+    }
+    let areas = dashboard_layout::dashboard(area, view.depth_length > 1);
+    if view.depth_length > 1 && areas.level.contains((x, y).into()) {
+        return Command::SetDepth(depth_index_at(x, areas.level, view.depth_length));
     }
     let Some(canvas) = map_drawable(area, view, graphics) else {
         return Command::Pointer { x, y };
@@ -1526,6 +1554,9 @@ fn translate_mouse_position(
         return Command::Pointer { x, y };
     }
     let areas = dashboard_layout::dashboard(area, view.depth_length > 1);
+    if clicked && view.depth_length > 1 && areas.level.contains((x, y).into()) {
+        return Command::SetDepth(depth_index_at(x, areas.level, view.depth_length));
+    }
     if let Some((row, col, value)) = map_point_at(x, y, area, view, graphics) {
         return if clicked {
             Command::SelectPoint { row, col }
@@ -3242,5 +3273,169 @@ mod sidebar_hit_tests {
         // heading = first_variable_row(13) + 1 + separator(1) = 15.
         assert_eq!(section.heading, 15);
         assert_eq!(section.list_top, 18);
+    }
+}
+
+#[cfg(test)]
+mod level_bar_tests {
+    use super::{depth_index_at, translate_mouse, translate_mouse_position};
+    use ncview_rs::app::{AppState, Command};
+    use ncview_rs::data::{DatasetFormat, DatasetMetadata};
+    use ratatui::layout::Rect;
+
+    const TERM: Rect = Rect::new(0, 0, 100, 30);
+    // With show_level, the level band occupies rows 23..=25 (Task 1 test).
+    const BAR_ROW: u16 = 24;
+
+    fn empty_metadata() -> DatasetMetadata {
+        DatasetMetadata {
+            path: "f.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        }
+    }
+
+    fn view_with_levels() -> AppState {
+        let mut state = AppState::default();
+        state.view.depth_length = 12;
+        state
+    }
+
+    #[test]
+    fn depth_index_scales_across_the_bar() {
+        let bar = Rect::new(0, 23, 100, 3);
+        assert_eq!(depth_index_at(1, bar, 12), 0);
+        assert_eq!(depth_index_at(98, bar, 12), 11);
+        assert_eq!(depth_index_at(50, bar, 12), 5);
+        assert_eq!(depth_index_at(999, bar, 12), 11);
+        assert_eq!(depth_index_at(0, bar, 1), 0);
+    }
+
+    #[test]
+    fn click_on_the_bar_seeks_depth() {
+        let state = view_with_levels();
+        let metadata = empty_metadata();
+        assert_eq!(
+            translate_mouse_position(
+                Command::MouseClick {
+                    x: 1,
+                    y: BAR_ROW,
+                    right: false
+                },
+                TERM,
+                &metadata,
+                &state.view,
+                "",
+                None,
+            ),
+            Command::SetDepth(0)
+        );
+        assert_eq!(
+            translate_mouse_position(
+                Command::MouseClick {
+                    x: 98,
+                    y: BAR_ROW,
+                    right: false
+                },
+                TERM,
+                &metadata,
+                &state.view,
+                "",
+                None,
+            ),
+            Command::SetDepth(11)
+        );
+    }
+
+    #[test]
+    fn press_on_the_bar_seeks_without_starting_a_canvas_drag() {
+        let state = view_with_levels();
+        assert_eq!(
+            translate_mouse(
+                Command::BeginDrag {
+                    x: 50,
+                    y: BAR_ROW,
+                    zoom: false
+                },
+                TERM,
+                &empty_metadata(),
+                &state.view,
+                "",
+                None,
+            ),
+            Command::SetDepth(5)
+        );
+    }
+
+    #[test]
+    fn drag_over_the_bar_without_canvas_drag_seeks() {
+        let state = view_with_levels();
+        assert_eq!(
+            translate_mouse(
+                Command::UpdateDrag { x: 98, y: BAR_ROW },
+                TERM,
+                &empty_metadata(),
+                &state.view,
+                "",
+                None,
+            ),
+            Command::SetDepth(11)
+        );
+    }
+
+    #[test]
+    fn wheel_over_the_bar_steps_depth() {
+        let state = view_with_levels();
+        assert_eq!(
+            translate_mouse(
+                Command::PointerScroll {
+                    x: 50,
+                    y: BAR_ROW,
+                    delta: 1
+                },
+                TERM,
+                &empty_metadata(),
+                &state.view,
+                "",
+                None,
+            ),
+            Command::MoveDepth(1)
+        );
+    }
+
+    #[test]
+    fn absent_bar_leaves_events_untouched() {
+        let state = AppState::default(); // depth_length == 1, no level band
+        assert_eq!(
+            translate_mouse_position(
+                Command::MouseClick {
+                    x: 50,
+                    y: BAR_ROW,
+                    right: false
+                },
+                TERM,
+                &empty_metadata(),
+                &state.view,
+                "",
+                None,
+            ),
+            Command::Pointer { x: 50, y: BAR_ROW }
+        );
+        assert_eq!(
+            translate_mouse(
+                Command::PointerScroll {
+                    x: 50,
+                    y: BAR_ROW,
+                    delta: 1
+                },
+                TERM,
+                &empty_metadata(),
+                &state.view,
+                "",
+                None,
+            ),
+            Command::Pointer { x: 50, y: BAR_ROW }
+        );
     }
 }
