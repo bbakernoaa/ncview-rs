@@ -26,6 +26,15 @@ pub enum Command {
     MoveTime(isize),
     SetTime(usize),
     MoveDepth(isize),
+    SetDepth(usize),
+    ToggleSidebarFocus,
+    MoveDepthCursor(isize),
+    ApplyDepthCursor,
+    PointerScroll {
+        x: u16,
+        y: u16,
+        delta: isize,
+    },
     SetBounds(Bounds),
     ToggleHelp,
     UpdateVariableQuery(String),
@@ -154,6 +163,9 @@ pub struct ViewModel {
     pub playback_speed: f32,
     pub depth_index: usize,
     pub depth_length: usize,
+    pub depth_cursor: usize,
+    pub sidebar_focused: bool,
+    pub level_labels: Vec<String>,
     pub help_visible: bool,
     pub palette: Palette,
     pub palette_catalog: Vec<Palette>,
@@ -221,6 +233,7 @@ pub enum Overlay {
 pub enum InputMode {
     Normal,
     VariableSearch,
+    Sidebar,
     TextOverlay(Overlay),
     PlotOverlay,
     Help,
@@ -239,6 +252,8 @@ impl ViewModel {
             }
         } else if self.help_visible {
             InputMode::Help
+        } else if self.sidebar_focused {
+            InputMode::Sidebar
         } else {
             InputMode::Normal
         }
@@ -375,6 +390,9 @@ impl Default for ViewModel {
             playback_speed: 1.0,
             depth_index: 0,
             depth_length: 1,
+            depth_cursor: 0,
+            sidebar_focused: false,
+            level_labels: Vec::new(),
             help_visible: false,
             palette: Palette::Viridis,
             palette_catalog: discover_colormaps(),
@@ -482,6 +500,11 @@ impl AppState {
             | Command::TickPlayback
             | Command::SetTime(_)
             | Command::MoveDepth(_)
+            | Command::SetDepth(_)
+            | Command::ToggleSidebarFocus
+            | Command::MoveDepthCursor(_)
+            | Command::ApplyDepthCursor
+            | Command::PointerScroll { .. }
             | Command::ToggleHelp
             | Command::UpdateVariableQuery(_)) => self.reduce_navigation(command),
             command @ (Command::CyclePalette
@@ -638,8 +661,31 @@ impl AppState {
             Command::MoveDepth(delta) => {
                 self.view.depth_index =
                     bounded_index(self.view.depth_index, delta, self.view.depth_length);
+                self.view.depth_cursor = self.view.depth_index;
                 None
             }
+            Command::SetDepth(index) => {
+                self.view.depth_index = index.min(self.view.depth_length.saturating_sub(1));
+                self.view.depth_cursor = self.view.depth_index;
+                None
+            }
+            Command::MoveDepthCursor(delta) => {
+                self.view.depth_cursor =
+                    bounded_index(self.view.depth_cursor, delta, self.view.depth_length);
+                None
+            }
+            Command::ApplyDepthCursor => {
+                let cursor = self.view.depth_cursor;
+                self.reduce(Command::SetDepth(cursor))
+            }
+            Command::ToggleSidebarFocus => {
+                self.view.sidebar_focused = !self.view.sidebar_focused;
+                if self.view.sidebar_focused {
+                    self.view.depth_cursor = self.view.depth_index;
+                }
+                None
+            }
+            Command::PointerScroll { .. } => None,
             Command::ToggleHelp => {
                 self.view.help_visible = !self.view.help_visible;
                 None

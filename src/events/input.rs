@@ -28,6 +28,20 @@ pub fn command_from_event_with_mode(event: Event, mode: InputMode) -> Option<Com
                 y: mouse.row,
             })
         }
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
+            Some(Command::PointerScroll {
+                x: mouse.column,
+                y: mouse.row,
+                delta: -1,
+            })
+        }
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
+            Some(Command::PointerScroll {
+                x: mouse.column,
+                y: mouse.row,
+                delta: 1,
+            })
+        }
         Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
             Some(Command::BeginDrag {
                 x: mouse.column,
@@ -77,6 +91,7 @@ pub fn command_from_key_with_search(
 pub fn command_from_key_with_mode(key: KeyEvent, mode: InputMode) -> Option<Command> {
     match mode {
         InputMode::VariableSearch => variable_search_command(key),
+        InputMode::Sidebar => sidebar_command(key),
         InputMode::TextOverlay(overlay) => text_overlay_command(key, overlay),
         InputMode::PlotOverlay => plot_overlay_command(key),
         InputMode::Help => help_command(key),
@@ -153,6 +168,20 @@ fn help_command(key: KeyEvent) -> Option<Command> {
     .then_some(Command::Quit)
 }
 
+fn sidebar_command(key: KeyEvent) -> Option<Command> {
+    match key.code {
+        KeyCode::Tab | KeyCode::Esc => Some(Command::ToggleSidebarFocus),
+        KeyCode::Enter => Some(Command::ApplyDepthCursor),
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('[') => Some(Command::MoveDepthCursor(-1)),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char(']') => {
+            Some(Command::MoveDepthCursor(1))
+        }
+        KeyCode::PageUp => Some(Command::MoveDepthCursor(-7)),
+        KeyCode::PageDown => Some(Command::MoveDepthCursor(7)),
+        _ => None,
+    }
+}
+
 fn normal_command(key: KeyEvent) -> Option<Command> {
     if key.modifiers.contains(KeyModifiers::SHIFT) {
         let pan = match key.code {
@@ -207,7 +236,7 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char(' ') => Some(Command::TogglePlayback),
         KeyCode::Char('{') => Some(Command::PreviousFile),
         KeyCode::Char('}') => Some(Command::NextFile),
-        KeyCode::Tab => Some(Command::NextLimitField),
+        KeyCode::Tab => Some(Command::ToggleSidebarFocus),
         KeyCode::Backspace => Some(Command::DeleteInput),
         KeyCode::Char(character) => Some(Command::InputChar(character)),
         _ => None,
@@ -216,9 +245,12 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_from_key, command_from_key_with_mode, command_from_key_with_search};
+    use super::{
+        command_from_event_with_mode, command_from_key, command_from_key_with_mode,
+        command_from_key_with_search,
+    };
     use crate::app::{Command, InputMode, Overlay};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
     #[test]
     fn navigation_keys_map_to_domain_commands() {
@@ -281,6 +313,64 @@ mod tests {
         assert_eq!(
             command_from_key_with_mode(enter, InputMode::TextOverlay(Overlay::Filter)),
             Some(Command::ApplyLimitDraft)
+        );
+    }
+
+    #[test]
+    fn tab_toggles_sidebar_focus_in_normal_mode() {
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Command::ToggleSidebarFocus)
+        );
+    }
+
+    #[test]
+    fn sidebar_mode_keys_navigate_the_level_list() {
+        let map = |code| {
+            command_from_key_with_mode(KeyEvent::new(code, KeyModifiers::NONE), InputMode::Sidebar)
+        };
+        assert_eq!(map(KeyCode::Up), Some(Command::MoveDepthCursor(-1)));
+        assert_eq!(map(KeyCode::Char('k')), Some(Command::MoveDepthCursor(-1)));
+        assert_eq!(map(KeyCode::Down), Some(Command::MoveDepthCursor(1)));
+        assert_eq!(map(KeyCode::Char('j')), Some(Command::MoveDepthCursor(1)));
+        assert_eq!(map(KeyCode::PageUp), Some(Command::MoveDepthCursor(-7)));
+        assert_eq!(map(KeyCode::PageDown), Some(Command::MoveDepthCursor(7)));
+        assert_eq!(map(KeyCode::Char('[')), Some(Command::MoveDepthCursor(-1)));
+        assert_eq!(map(KeyCode::Char(']')), Some(Command::MoveDepthCursor(1)));
+        assert_eq!(map(KeyCode::Enter), Some(Command::ApplyDepthCursor));
+        assert_eq!(map(KeyCode::Tab), Some(Command::ToggleSidebarFocus));
+        assert_eq!(map(KeyCode::Esc), Some(Command::ToggleSidebarFocus));
+    }
+
+    #[test]
+    fn scroll_wheel_becomes_pointer_scroll() {
+        use crossterm::event::{Event, MouseEvent};
+        let scroll = |kind| {
+            command_from_event_with_mode(
+                Event::Mouse(MouseEvent {
+                    kind,
+                    column: 5,
+                    row: 12,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                InputMode::Normal,
+            )
+        };
+        assert_eq!(
+            scroll(MouseEventKind::ScrollUp),
+            Some(Command::PointerScroll {
+                x: 5,
+                y: 12,
+                delta: -1
+            })
+        );
+        assert_eq!(
+            scroll(MouseEventKind::ScrollDown),
+            Some(Command::PointerScroll {
+                x: 5,
+                y: 12,
+                delta: 1
+            })
         );
     }
 }

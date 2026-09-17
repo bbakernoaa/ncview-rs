@@ -1,7 +1,7 @@
 use ncview_rs::{
     app::{
-        AppState, Command, Effect, Generation, GridMode, LimitField, Overlay, PlotAxisField,
-        PlotKind, PlotSeries, PlotYAxis,
+        AppState, Command, Effect, Generation, GridMode, InputMode, LimitField, Overlay,
+        PlotAxisField, PlotKind, PlotSeries, PlotYAxis,
     },
     data::{
         Variable,
@@ -485,4 +485,68 @@ fn time_navigation_does_not_change_automatic_limits() {
 
     assert_eq!(state.view.time_index, 1);
     assert_eq!(state.view.limits, Some((1.0, 4.0)));
+}
+
+#[test]
+fn set_depth_clamps_and_syncs_cursor() {
+    let mut state = AppState::default();
+    state.view.depth_length = 4;
+    state.view.depth_index = 0;
+    state.view.depth_cursor = 2;
+    state.reduce(Command::SetDepth(9));
+    assert_eq!(state.view.depth_index, 3);
+    assert_eq!(state.view.depth_cursor, 3);
+    state.reduce(Command::SetDepth(1));
+    assert_eq!(state.view.depth_index, 1);
+    assert_eq!(state.view.depth_cursor, 1);
+}
+
+#[test]
+fn move_depth_syncs_cursor_but_cursor_move_does_not_apply() {
+    let mut state = AppState::default();
+    state.view.depth_length = 5;
+    state.reduce(Command::MoveDepth(1));
+    assert_eq!(state.view.depth_index, 1);
+    assert_eq!(state.view.depth_cursor, 1);
+    state.reduce(Command::MoveDepthCursor(2));
+    assert_eq!(state.view.depth_cursor, 3);
+    assert_eq!(state.view.depth_index, 1);
+    state.reduce(Command::MoveDepthCursor(-99));
+    assert_eq!(state.view.depth_cursor, 0);
+}
+
+#[test]
+fn toggle_sidebar_focus_resets_cursor_to_applied_depth() {
+    let mut state = AppState::default();
+    state.view.depth_length = 6;
+    state.view.depth_index = 2;
+    state.view.depth_cursor = 5;
+    state.reduce(Command::ToggleSidebarFocus);
+    assert!(state.view.sidebar_focused);
+    assert_eq!(state.view.depth_cursor, 2);
+    assert_eq!(state.view.input_mode(), InputMode::Sidebar);
+    state.reduce(Command::ToggleSidebarFocus);
+    assert!(!state.view.sidebar_focused);
+    assert_eq!(state.view.input_mode(), InputMode::Normal);
+}
+
+#[test]
+fn sidebar_focus_yields_to_overlays_and_search() {
+    let mut state = AppState::default();
+    state.view.sidebar_focused = true;
+    state.view.variable_search_active = true;
+    assert_eq!(state.view.input_mode(), InputMode::VariableSearch);
+    state.view.variable_search_active = false;
+    state.view.help_visible = true;
+    assert_eq!(state.view.input_mode(), InputMode::Help);
+}
+
+#[test]
+fn zero_length_depth_stays_at_index_zero() {
+    let mut state = AppState::default();
+    state.view.depth_length = 0;
+    state.reduce(Command::SetDepth(7));
+    assert_eq!(state.view.depth_index, 0);
+    state.reduce(Command::MoveDepthCursor(3));
+    assert_eq!(state.view.depth_cursor, 0);
 }

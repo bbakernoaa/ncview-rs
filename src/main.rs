@@ -636,6 +636,8 @@ fn handle_command(
             Command::MoveTime(_)
                 | Command::SetTime(_)
                 | Command::MoveDepth(_)
+                | Command::SetDepth(_)
+                | Command::ApplyDepthCursor
                 | Command::CyclePlotAxis(_)
                 | Command::SetPlotKind(_)
                 | Command::TogglePointSelection
@@ -652,6 +654,8 @@ fn handle_command(
             | Command::MoveTime(_)
             | Command::SetTime(_)
             | Command::MoveDepth(_)
+            | Command::SetDepth(_)
+            | Command::ApplyDepthCursor
             | Command::TickPlayback
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
