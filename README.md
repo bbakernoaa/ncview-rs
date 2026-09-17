@@ -71,9 +71,11 @@ reversal, `a` automatic limits, `l` limits, `f` data masking, `s` linear/log col
 `<`/`>` date stepping, and `-`/`+` playback speed, Space play/pause, Enter
 time-series inspection, and `g` logical/projected grid selection. The sidebar includes clickable
 date step, playback speed, scale-scope, palette, limits, mask, axis, and zoom controls. For a
-variable with a vertical (depth/level) axis, the sidebar shows a **Level** section with the current
-layer readout, `◂ Prev`/`Next ▸` steppers, and a scrollable list of levels; `[`/`]` step the layer
-from anywhere, and `Tab` focuses the level list so `↑`/`↓` move a cursor and `Enter` applies it
+variable with a vertical (depth/level) axis, a full-width **Level** bar sits above the time bar
+showing the current layer (`index/N` plus the CF label, or the dimension name when the file has
+none); click or drag it to seek, scroll over it to step, and use `[`/`]` from anywhere. The
+sidebar also shows a **Level** section with the layer list, `◂ Prev`/`Next ▸` steppers, and a
+scrollable list; `Tab` focuses the level list so `↑`/`↓` move a cursor and `Enter` applies it
 (`Tab`/`Esc` leave focus). Press
 `Ctrl-P` or `:` for a searchable command palette; `?` opens the keyboard/mouse help. In the limits dialog, type directly to replace the selected
 minimum or maximum, use Tab to switch fields, and press Enter to apply (Esc cancels). `q` exits
