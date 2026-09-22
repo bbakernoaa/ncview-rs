@@ -35,7 +35,12 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Open the release PR with the PAT so it is authored by a human
+          # member rather than `github-actions[bot]`. A bot-authored PR makes
+          # GitHub hold its CI for approval ("required approval ... expired"),
+          # and events caused by GITHUB_TOKEN never trigger downstream
+          # workflows. Falls back to GITHUB_TOKEN when the secret is unset.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
       # `main` has no branch protection here, so the release PR is mergeable
       # the moment it is opened. Merge it straight away to complete the

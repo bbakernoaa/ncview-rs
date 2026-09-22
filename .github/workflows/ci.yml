@@ -10,10 +10,16 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Release PRs (branch `release-plz-*`) contain only version/changelog edits and
+# are auto-merged the instant they open, so a full cross-platform build there is
+# pure waste. Worse, they are opened by `github-actions[bot]`, which makes GitHub
+# hold the run for approval ("required approval ... expired"). Skip them here;
+# the same commits are fully built by the push-to-main run that follows the merge.
 jobs:
   quality:
     name: Format, lint, and test
     runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -27,6 +33,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +90,7 @@ jobs:
   dependency-audit:
     name: Dependency audit
     runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -92,6 +100,7 @@ jobs:
   musl:
     name: Build static Linux x86_64
     runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     steps:
       - uses: actions/checkout@v4
       - name: Build x86_64-unknown-linux-musl
