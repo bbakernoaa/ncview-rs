@@ -100,6 +100,7 @@ pub struct SidebarBoxes {
     pub variables: Rect,
     pub level: Rect,
     pub scale: Rect,
+    pub dimensions: Rect,
 }
 
 /// Split the sidebar `area` into stacked bordered boxes. Every box is fixed
@@ -110,23 +111,35 @@ pub fn sidebar_boxes(area: Rect, show_level: bool) -> SidebarBoxes {
     use ratatui::layout::{Constraint, Direction, Layout};
     let file = Constraint::Length(5);
     let controls = Constraint::Length(6);
-    let variables = Constraint::Length(11);
+    let variables = Constraint::Length(13);
+    let dimensions = Constraint::Length(7);
     let level = if show_level {
         Constraint::Length(6)
     } else {
         Constraint::Length(0)
     };
-    let scale = Constraint::Length(7);
+    // The Scale box keeps a fixed row layout (limits, mask, stats, scope) so
+    // the mouse hit-test rows never shift with the content.
+    let scale = Constraint::Length(9);
     let splits = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([file, controls, variables, level, scale, Constraint::Min(0)])
+        .constraints([
+            file,
+            controls,
+            variables,
+            dimensions,
+            level,
+            scale,
+            Constraint::Min(0),
+        ])
         .split(area);
     SidebarBoxes {
         file: splits[0],
         controls: splits[1],
         variables: splits[2],
-        level: splits[3],
-        scale: splits[4],
+        level: splits[4],
+        scale: splits[5],
+        dimensions: splits[3],
     }
 }
 
@@ -140,6 +153,82 @@ fn format_scale_value(value: f64) -> String {
     } else {
         format!("{value:.4}")
     }
+}
+
+/// Render one `label  value` row inside a sidebar box. The sidebar is only
+/// ~30 columns wide, so every readout is laid out as a label in a fixed
+/// column with the value truncated to whatever room remains, instead of
+/// cramming label and value onto one line that gets clipped by the border.
+fn labeled_row(label: &str, value: &str, content_width: usize) -> Line<'static> {
+    // All labels share one column so a box's values line up vertically.
+    const LABEL_COLUMN: usize = 10;
+    let label_width = LABEL_COLUMN.min(content_width.saturating_sub(4));
+    let value_width = content_width.saturating_sub(label_width + 4);
+    let label_text = format!("{:<label_width$}", truncate_text(label, label_width));
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(label_text, theme::muted_style()),
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(value, value_width),
+            Style::default().fg(theme::TEXT),
+        ),
+    ])
+}
+
+/// Break a long string into lines no wider than `width`, preferring word
+/// boundaries and hard-breaking words that are themselves too long. Used so
+/// metadata (descriptions, dimension shapes) wraps instead of being clipped
+/// by the sidebar's narrow right border.
+fn wrap_text(value: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in value.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let mut chunk = String::new();
+            let mut chunk_len = 0;
+            for ch in word.chars() {
+                if chunk_len == width {
+                    lines.push(std::mem::take(&mut chunk));
+                    chunk_len = 0;
+                }
+                chunk.push(ch);
+                chunk_len += 1;
+            }
+            if !chunk.is_empty() {
+                lines.push(chunk);
+            }
+            continue;
+        }
+        let extra = if current.is_empty() {
+            word_len
+        } else {
+            word_len + 1
+        };
+        if current.chars().count() + extra > width {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -215,10 +304,10 @@ pub fn render_with_search(
     if let Some(panel) = level {
         render_level_box(frame, boxes.level, panel, content_width);
     }
+    render_dimensions_box(frame, boxes.dimensions, metadata);
     render_scale_box(
         frame,
         boxes.scale,
-        metadata,
         limits,
         filter_range,
         color_scale_scope,
@@ -364,18 +453,27 @@ fn render_variables_box(
                 Style::default().fg(theme::TEXT),
             ),
         ]));
-        // Description line: prefer the CF long name, fall back to the standard
+        // Description: prefer the CF long name, fall back to the standard
         // name so the field is still recognisable when a producer omits it.
+        // Wrapped (max two lines) rather than truncated: the sidebar is far
+        // too narrow for a full long_name on one line.
         if let Some(description) = variable
             .long_name
             .as_deref()
             .or(variable.standard_name.as_deref())
         {
-            lines.push(muted(format!("  {description}")));
+            for chunk in wrap_text(description, content_width.saturating_sub(2))
+                .into_iter()
+                .take(2)
+            {
+                lines.push(muted(format!("  {chunk}")));
+            }
         }
         let units = variable.units.as_deref().unwrap_or("-");
-        lines.push(muted(format!("  units: {units}")));
+        lines.push(labeled_row("units", units, content_width));
         // Dimension shape with lengths, e.g. "date(11) lat(48) lon(64)".
+        // Long shapes wrap onto continuation lines aligned under the value
+        // column instead of running off the border.
         let shape = variable
             .dimensions
             .iter()
@@ -391,7 +489,13 @@ fn render_variables_box(
             })
             .collect::<Vec<_>>()
             .join(" ");
-        lines.push(muted(format!("  {shape}")));
+        let mut shape_lines = wrap_text(&shape, content_width.saturating_sub(15)).into_iter();
+        if let Some(first) = shape_lines.next() {
+            lines.push(labeled_row("shape", &first, content_width));
+        }
+        for chunk in shape_lines.take(1) {
+            lines.push(muted(format!("{}{chunk}", " ".repeat(14))));
+        }
     } else if plottable.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no fields",
@@ -527,11 +631,50 @@ fn render_level_box(frame: &mut Frame, area: Rect, panel: LevelPanel<'_>, conten
     );
 }
 
+/// Dataset dimensions (`name = length`), restored to its own box so long
+/// dimension lists scroll-free and never crowd the color-scale readout.
+fn render_dimensions_box(frame: &mut Frame, area: Rect, metadata: &DatasetMetadata) {
+    let block = theme::panel("Dimensions", theme::BLUE);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if area.height < 2 || area.width < 2 {
+        return;
+    }
+    let content_width = usize::from(inner.width);
+    let lines: Vec<Line> = if metadata.dimensions.is_empty() {
+        vec![Line::from(Span::styled(
+            "  no dimensions",
+            theme::muted_style(),
+        ))]
+    } else {
+        let name_width = content_width.saturating_sub(8).clamp(4, 18);
+        let rest = content_width.saturating_sub(name_width + 2);
+        metadata
+            .dimensions
+            .iter()
+            .take(usize::from(inner.height).max(1))
+            .map(|dimension| {
+                Line::from(Span::styled(
+                    format!(
+                        "  {:<name_width$}{:>rest$}",
+                        truncate_text(&dimension.name, name_width),
+                        dimension.length
+                    ),
+                    Style::default().fg(theme::TEXT),
+                ))
+            })
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        inner,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_scale_box(
     frame: &mut Frame,
     area: Rect,
-    metadata: &DatasetMetadata,
     limits: Option<(f64, f64)>,
     filter_range: Option<(f64, f64)>,
     color_scale_scope: ColorScaleScope,
@@ -544,68 +687,65 @@ fn render_scale_box(
     if area.height < 2 || area.width < 2 {
         return;
     }
+    // Fixed row layout so the mouse hit-test offsets never shift with the
+    // content. Limits and mask fit on one line each; the whole-image
+    // statistics are the long readout, so each figure gets its own line
+    // instead of being clipped by the sidebar's narrow right border.
+    //   row  0  : colour-scale limits (min … max)
+    //   row  1  : value mask (min … max)
+    //   rows 2-5: whole-image statistics (min, max, mean, count)
+    //   row  6  : colour-scale scope
+    let mut lines = Vec::new();
     let limit_text = limits.map_or_else(
-        || "  ↕ limits  auto".to_string(),
-        |(min, max)| {
-            format!(
-                "  ↕ limits  {} … {}",
-                format_scale_value(min),
-                format_scale_value(max)
-            )
-        },
+        || "auto".to_string(),
+        |(min, max)| format!("{} … {}", format_scale_value(min), format_scale_value(max)),
     );
+    lines.push(labeled_row("limits", &limit_text, content_width));
     let mask_text = filter_range.map_or_else(
-        || "  ▪ mask    off".to_string(),
-        |(min, max)| {
-            format!(
-                "  ▪ mask    {} … {}",
-                format_scale_value(min),
-                format_scale_value(max)
-            )
-        },
+        || "off".to_string(),
+        |(min, max)| format!("{} … {}", format_scale_value(min), format_scale_value(max)),
     );
-    let dims_summary = if metadata.dimensions.is_empty() {
-        "no dimensions".to_string()
-    } else {
-        metadata
-            .dimensions
-            .iter()
-            .map(|dimension| format!("{}={}", dimension.name, dimension.length))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let stats_text = slice.and_then(|slice| slice.statistics).map_or_else(
-        || "  stats   no data".to_string(),
-        |stats| {
-            format!(
-                "  stats   mean {}  n {}",
-                format_scale_value(stats.mean),
-                stats.finite_count
-            )
-        },
-    );
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("{}  {}", theme::ICON_DIMENSION, dims_summary),
-            theme::muted_style(),
-        )),
-        Line::from(Span::styled(
-            truncate_text(&limit_text, content_width),
-            theme::muted_style(),
-        )),
-        Line::from(Span::styled(
-            truncate_text(&mask_text, content_width),
-            theme::muted_style(),
-        )),
-        Line::from(Span::styled(
-            truncate_text(&stats_text, content_width),
-            theme::muted_style(),
-        )),
-        Line::from(Span::styled(
-            format!("  scope: {}  [z]", color_scale_scope.name()),
-            theme::muted_style(),
-        )),
-    ];
+    lines.push(labeled_row("mask", &mask_text, content_width));
+    match slice.and_then(|slice| slice.statistics) {
+        Some(stats) => {
+            lines.push(labeled_row(
+                "stats min",
+                &format_scale_value(stats.min),
+                content_width,
+            ));
+            lines.push(labeled_row(
+                "stats max",
+                &format_scale_value(stats.max),
+                content_width,
+            ));
+            lines.push(labeled_row(
+                "stats mean",
+                &format_scale_value(stats.mean),
+                content_width,
+            ));
+            lines.push(labeled_row(
+                "stats n",
+                &stats.finite_count.to_string(),
+                content_width,
+            ));
+        }
+        None => {
+            lines.push(labeled_row("stats", "no data", content_width));
+            for _ in 0..3 {
+                lines.push(labeled_row("", "", content_width));
+            }
+        }
+    }
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{:<10}", "scope"), theme::muted_style()),
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(color_scale_scope.name(), content_width.saturating_sub(19)),
+            Style::default().fg(theme::TEXT),
+        ),
+        Span::styled("  [z]", theme::title_style(theme::TEAL)),
+    ]));
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
         inner,
@@ -626,15 +766,28 @@ mod tests {
     }
 
     fn render_sidebar(level: Option<crate::ui::level::LevelPanel<'_>>) -> String {
+        render_sidebar_with(level, &empty_metadata(), None)
+    }
+
+    /// Render the sidebar into a string with custom metadata and an optional
+    /// loaded slice, so tests can assert on the Dimensions and Scale boxes.
+    fn render_sidebar_with(
+        level: Option<crate::ui::level::LevelPanel<'_>>,
+        metadata: &crate::data::DatasetMetadata,
+        slice: Option<&crate::data::slice::Slice2D>,
+    ) -> String {
         use ratatui::{Terminal, backend::TestBackend};
-        let mut terminal = Terminal::new(TestBackend::new(32, 30)).unwrap();
+        // Tall enough that every box keeps its natural height; ratatui
+        // squeezes all fixed-height boxes down when their total exceeds the
+        // area, which would hide the rows these tests check for.
+        let mut terminal = Terminal::new(TestBackend::new(32, 46)).unwrap();
         terminal
             .draw(|frame| {
                 super::render_with_search(
                     frame,
                     frame.area(),
                     "f.nc",
-                    &empty_metadata(),
+                    metadata,
                     None,
                     &crate::render::colors::Palette::Viridis,
                     None,
@@ -644,7 +797,7 @@ mod tests {
                     "",
                     false,
                     &[],
-                    None,
+                    slice,
                     level,
                 )
             })
@@ -678,6 +831,69 @@ mod tests {
     fn level_section_is_absent_without_levels() {
         let rendered = render_sidebar(None);
         assert!(!rendered.contains("Level"), "{rendered}");
+    }
+
+    #[test]
+    fn dimensions_box_lists_each_dataset_dimension() {
+        let metadata = crate::data::DatasetMetadata {
+            path: "f.nc".into(),
+            format: crate::data::DatasetFormat::NetCdf4,
+            dimensions: vec![
+                crate::data::Dimension {
+                    name: "time".into(),
+                    length: 11,
+                    role: crate::data::AxisRole::Time,
+                },
+                crate::data::Dimension {
+                    name: "latitude".into(),
+                    length: 48,
+                    role: crate::data::AxisRole::Latitude,
+                },
+                crate::data::Dimension {
+                    name: "longitude".into(),
+                    length: 64,
+                    role: crate::data::AxisRole::Longitude,
+                },
+            ],
+            variables: Vec::new(),
+        };
+        let rendered = render_sidebar_with(None, &metadata, None);
+        assert!(rendered.contains("Dimensions"), "{rendered}");
+        assert!(rendered.contains("latitude"), "{rendered}");
+        assert!(rendered.contains("48"), "{rendered}");
+        assert!(rendered.contains("longitude"), "{rendered}");
+        assert!(rendered.contains("64"), "{rendered}");
+    }
+
+    #[test]
+    fn scale_box_stacks_statistics_on_separate_lines() {
+        let slice = crate::data::slice::Slice2D {
+            values: ndarray::Array2::from_elem((2, 2), 1.0),
+            validity: ndarray::Array2::from_elem((2, 2), crate::data::slice::Validity::Finite),
+            source_bounds: crate::data::slice::Bounds {
+                row_start: 0,
+                row_end: 2,
+                col_start: 0,
+                col_end: 2,
+            },
+            statistics: Some(crate::data::slice::Statistics {
+                min: -12.5,
+                max: 345.678,
+                mean: 100.25,
+                finite_count: 4,
+            }),
+            coordinates: None,
+        };
+        let rendered = render_sidebar_with(None, &empty_metadata(), Some(&slice));
+        // Each statistic is labelled on its own line rather than packed onto
+        // one long line that the narrow sidebar would clip.
+        assert!(rendered.contains("stats min"), "{rendered}");
+        assert!(rendered.contains("stats max"), "{rendered}");
+        assert!(rendered.contains("stats mean"), "{rendered}");
+        assert!(rendered.contains("stats n"), "{rendered}");
+        assert!(rendered.contains("-12.5"), "{rendered}");
+        assert!(rendered.contains("345.678"), "{rendered}");
+        assert!(rendered.contains("100.25"), "{rendered}");
     }
 
     #[test]

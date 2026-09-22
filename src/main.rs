@@ -1477,12 +1477,12 @@ fn translate_sidebar_position(
             return Some(Command::SetDepth(index));
         }
     }
-    // Scale box: dimensions, limits, mask, stats, scope.
+    // Scale box: fixed rows — limits, mask, stats (4), scope.
     if y >= boxes.scale.y && y < boxes.scale.bottom() {
         return match y.saturating_sub(boxes.scale.y) {
-            2 => Some(Command::OpenLimits),
-            3 => Some(Command::OpenFilter),
-            5 => Some(Command::ToggleColorScaleScope),
+            1 => Some(Command::OpenLimits),
+            2 => Some(Command::OpenFilter),
+            7 => Some(Command::ToggleColorScaleScope),
             _ => None,
         };
     }
@@ -3116,7 +3116,9 @@ mod sidebar_hit_tests {
     use ncview_rs::app::{AppState, Command};
     use ratatui::layout::Rect;
 
-    const SIDEBAR: Rect = Rect::new(0, 0, 32, 30);
+    // Tall enough that all six boxes keep their natural height; ratatui
+    // squeezes every Length box down when their total exceeds the area.
+    const SIDEBAR: Rect = Rect::new(0, 0, 32, 46);
 
     fn state_with_levels() -> AppState {
         let mut state = AppState::default();
