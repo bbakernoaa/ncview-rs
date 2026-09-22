@@ -3182,13 +3182,7 @@ mod sidebar_hit_tests {
         );
         // Outside the sidebar: ignored.
         assert_eq!(
-            translate_scroll(
-                SIDEBAR.x + 120,
-                SIDEBAR.y + 13,
-                -1,
-                SIDEBAR,
-                &state.view,
-            ),
+            translate_scroll(SIDEBAR.x + 120, SIDEBAR.y + 13, -1, SIDEBAR, &state.view,),
             None
         );
     }

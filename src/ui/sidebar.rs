@@ -227,7 +227,13 @@ pub fn render_with_search(
     );
 }
 
-fn render_file_box(frame: &mut Frame, area: Rect, filename: &str, palette: &Palette, scale: ScaleMode) {
+fn render_file_box(
+    frame: &mut Frame,
+    area: Rect,
+    filename: &str,
+    palette: &Palette,
+    scale: ScaleMode,
+) {
     let block = theme::panel("File", theme::BLUE);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -241,7 +247,10 @@ fn render_file_box(frame: &mut Frame, area: Rect, filename: &str, palette: &Pale
     };
     let lines = vec![
         Line::from(vec![
-            Span::styled(format!("{} ", theme::ICON_FILE), theme::title_style(theme::BLUE)),
+            Span::styled(
+                format!("{} ", theme::ICON_FILE),
+                theme::title_style(theme::BLUE),
+            ),
             Span::styled(
                 truncate_path(filename, usize::from(inner.width.saturating_sub(2))),
                 theme::muted_style(),
@@ -253,19 +262,22 @@ fn render_file_box(frame: &mut Frame, area: Rect, filename: &str, palette: &Pale
                 Style::default().fg(theme::PEACH),
             ),
             Span::styled(
-                truncate_text(&palette_label, usize::from(inner.width.saturating_sub(6)).max(1)),
+                truncate_text(
+                    &palette_label,
+                    usize::from(inner.width.saturating_sub(6)).max(1),
+                ),
                 Style::default().fg(theme::TEXT),
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                format!("  scale: {}  ", scale.name()),
-                theme::muted_style(),
-            ),
+            Span::styled(format!("  scale: {}  ", scale.name()), theme::muted_style()),
             Span::styled("[s]", theme::title_style(theme::TEAL)),
         ]),
     ];
-    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)), inner);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        inner,
+    );
 }
 
 fn render_controls_box(frame: &mut Frame, area: Rect) {
@@ -275,7 +287,12 @@ fn render_controls_box(frame: &mut Frame, area: Rect) {
     if area.height < 2 || area.width < 2 {
         return;
     }
-    let button = |label: &str| Span::styled(label.to_string(), Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT));
+    let button = |label: &str| {
+        Span::styled(
+            label.to_string(),
+            Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT),
+        )
+    };
     let lines = vec![
         Line::from(vec![
             button("[c] MAP"),
@@ -306,9 +323,13 @@ fn render_controls_box(frame: &mut Frame, area: Rect) {
             button("[z]SCALE"),
         ]),
     ];
-    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)), inner);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        inner,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_variables_box(
     frame: &mut Frame,
     area: Rect,
@@ -333,8 +354,8 @@ fn render_variables_box(
         ))
     };
     let mut lines = Vec::new();
-    let selected = selected_variable
-        .and_then(|name| plottable.iter().find(|variable| variable.name == name));
+    let selected =
+        selected_variable.and_then(|name| plottable.iter().find(|variable| variable.name == name));
     if let Some(variable) = selected {
         lines.push(Line::from(vec![
             Span::styled("  ▶ ", theme::title_style(theme::TEAL)),
@@ -372,7 +393,10 @@ fn render_variables_box(
             .join(" ");
         lines.push(muted(format!("  {shape}")));
     } else if plottable.is_empty() {
-        lines.push(Line::from(Span::styled("  no fields", theme::muted_style())));
+        lines.push(Line::from(Span::styled(
+            "  no fields",
+            theme::muted_style(),
+        )));
     } else {
         lines.push(Line::from(Span::styled(
             "  none selected",
@@ -425,7 +449,11 @@ fn render_variables_box(
 }
 
 fn render_level_box(frame: &mut Frame, area: Rect, panel: LevelPanel<'_>, content_width: usize) {
-    let accent = if panel.focused { theme::TEAL } else { theme::BLUE };
+    let accent = if panel.focused {
+        theme::TEAL
+    } else {
+        theme::BLUE
+    };
     let block = theme::panel("Level", accent);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -434,7 +462,12 @@ fn render_level_box(frame: &mut Frame, area: Rect, panel: LevelPanel<'_>, conten
         return;
     };
     let (top, len) = level_window(panel.labels.len(), section.list_rows, panel.cursor);
-    let button = |label: &str| Span::styled(label.to_string(), Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT));
+    let button = |label: &str| {
+        Span::styled(
+            label.to_string(),
+            Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT),
+        )
+    };
     let readout = panel
         .labels
         .get(panel.selected)
@@ -443,16 +476,17 @@ fn render_level_box(frame: &mut Frame, area: Rect, panel: LevelPanel<'_>, conten
     let mut lines = vec![
         Line::from(Span::styled(
             truncate_text(
-                &format!("{} [{} / {}]", readout, panel.selected + 1, panel.labels.len()),
+                &format!(
+                    "{} [{} / {}]",
+                    readout,
+                    panel.selected + 1,
+                    panel.labels.len()
+                ),
                 content_width,
             ),
             Style::default().fg(theme::TEXT),
         )),
-        Line::from(vec![
-            button("◂ Prev"),
-            Span::raw("  "),
-            button("Next ▸"),
-        ]),
+        Line::from(vec![button("◂ Prev"), Span::raw("  "), button("Next ▸")]),
     ];
     for index in top..top + len {
         let label = panel
@@ -471,15 +505,26 @@ fn render_level_box(frame: &mut Frame, area: Rect, panel: LevelPanel<'_>, conten
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{marker} "),
-                theme::title_style(if is_cursor || is_selected { theme::TEAL } else { theme::SURFACE_ALT }),
+                theme::title_style(if is_cursor || is_selected {
+                    theme::TEAL
+                } else {
+                    theme::SURFACE_ALT
+                }),
             ),
             Span::styled(
                 truncate_text(&label, content_width.saturating_sub(2)),
-                Style::default().fg(if is_selected { theme::TEXT } else { theme::SUBTEXT }),
+                Style::default().fg(if is_selected {
+                    theme::TEXT
+                } else {
+                    theme::SUBTEXT
+                }),
             ),
         ]));
     }
-    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)), inner);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        inner,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -561,7 +606,10 @@ fn render_scale_box(
             theme::muted_style(),
         )),
     ];
-    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)), inner);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+        inner,
+    );
 }
 
 #[cfg(test)]

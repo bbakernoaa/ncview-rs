@@ -252,12 +252,44 @@ generated exports are ignored by Git; they should not be committed to the reposi
 
 ## Releases and Versioning
 
-This project strictly adheres to [Semantic Versioning 2.0.0](https://semver.org/).
+This project strictly adheres to [Semantic Versioning 2.0.0](https://semver.org/), and version
+bumps are automated with [release-plz](https://release-plz.dev):
+
+1. Merge a pull request into `main`. The Release-plz workflow reads the
+   [Conventional Commit](https://www.conventionalcommits.org/) messages
+   (`fix:` → patch, `feat:` → minor, `!`/`BREAKING CHANGE:` → major) and opens or updates a
+   `chore: release v0.x.y` pull request that bumps `Cargo.toml` and prepends the `CHANGELOG.md`
+   entry.
+2. Merge that release pull request. Release-plz creates the `v0.x.y` Git tag.
+3. The tag push triggers the Release workflow, which builds and publishes the binaries.
+
+So the only manual step is merging the release PR — the version number, changelog, tag, and
+binaries all follow automatically. Non-conventional commit messages are still released (as a
+patch bump) and listed under an "Other" changelog section.
+
 Cross-platform binary archives (Linux x86_64 glibc, Linux x86_64 musl/static, macOS arm64, and
 Windows x86_64) and SHA256 checksums are automatically built and published via GitHub Actions
-whenever a Git tag following the `v*` pattern (e.g. `v0.1.0`) is pushed to the repository. The
+whenever a Git tag following the `v*` pattern (e.g. `v0.5.1`) is pushed to the repository. The
 musl archive is intended for older HPC distributions whose glibc is too old for the regular Linux
 build. The latest pre-built releases are accessible on the [GitHub Releases Page](https://github.com/bbakernoaa/ncview-rs/releases).
+
+Each versioned release also re-points a floating `latest` Git tag and a matching "Latest release"
+GitHub Release at the newest build, so installers can pin a stable URL without knowing the version
+number, for example
+`https://github.com/bbakernoaa/ncview-rs/releases/download/latest/ncv-linux-x86_64.tar.gz`. Prefer
+the numbered tag when you need a reproducible download; use `latest` when you always want the most
+recent binary.
+
+### One-time setup for the Release-plz workflow
+
+- Repository **Settings → Actions → General → Workflow permissions**: select
+  "Read and write permissions" so release-plz can open the release PR.
+- Create a fine-grained personal access token with **Contents: Read and write** on this
+  repository and store it as the `RELEASE_PLZ_TOKEN` repository secret. GitHub ignores workflow
+  events caused by the default `GITHUB_TOKEN`, so without a PAT the `v*` tag would be created but
+  the Release workflow would not run.
+- The crate is not published to crates.io; release-plz runs in git-only mode and derives the
+  current version from the existing `v*` tags.
 
 ## License
 

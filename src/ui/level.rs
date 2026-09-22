@@ -51,7 +51,11 @@ pub fn level_section(area: Rect, label_count: usize, stepper_span: u16) -> Optio
     let header = inner_top;
     let stepper = inner_top.saturating_add(ROW);
     let list_top = inner_top.saturating_add(LEVEL_CHROME_ROWS);
-    let list_rows = usize::from(inner_top.saturating_add(inner_height).saturating_sub(list_top));
+    let list_rows = usize::from(
+        inner_top
+            .saturating_add(inner_height)
+            .saturating_sub(list_top),
+    );
     if list_rows == 0 {
         return None;
     }

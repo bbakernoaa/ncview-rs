@@ -35,6 +35,7 @@ pub fn render(
     render_with_search(frame, area, view, filename, metadata, plottable, "", false);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_with_search(
     frame: &mut Frame,
     area: Rect,
@@ -272,7 +273,15 @@ pub fn render_with_search_and_image(
         status
     };
     status::render(frame, areas.status, &status);
-    popup::render(frame, area, view, metadata, plottable, variable_query, chart_graphics);
+    popup::render(
+        frame,
+        area,
+        view,
+        metadata,
+        plottable,
+        variable_query,
+        chart_graphics,
+    );
     if view.help_visible {
         help::render(frame, area);
     }

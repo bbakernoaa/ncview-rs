@@ -1,0 +1,38 @@
+# Semantic-version automation (https://release-plz.dev).
+#
+# Flow:
+#   1. A PR merges to main. The release-plz workflow reads the Conventional
+#      Commit messages (`fix:` -> patch, `feat:` -> minor, `!`/BREAKING ->
+#      major) and opens/updates a "chore: release X.Y.Z" pull request that
+#      bumps Cargo.toml and prepends CHANGELOG.md entries.
+#   2. Merging that release PR makes release-plz create the `vX.Y.Z` git tag.
+#   3. The tag push triggers .github/workflows/release.yml, which builds the
+#      cross-platform binaries and publishes the versioned + floating
+#      `latest` GitHub Releases.
+#
+# GitHub Releases stay owned by release.yml, so release-plz only manages the
+# version bump, changelog, and tag.
+
+[workspace]
+# The crate is not published to crates.io: derive the current version from
+# the `v*` git tags and skip `cargo publish` entirely.
+git_only = true
+# release.yml creates the GitHub Release (with assets); don't create an
+# empty one here.
+git_release_enable = false
+# Only release when the release PR is merged, not on every push to main.
+release_always = false
+# This is an application; API-compatibility linting would only add noise and
+# spurious major bumps.
+semver_check = false
+pr_labels = ["release"]
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented here. Versions follow
+[Semantic Versioning](https://semver.org) and are applied automatically from
+Conventional Commit messages.
+
+"""

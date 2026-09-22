@@ -1,0 +1,70 @@
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Inspect commits merged since the last release. If anything is unreleased,
+  # open (or update) a "chore: release X.Y.Z" pull request that bumps
+  # Cargo.toml and CHANGELOG.md according to Conventional Commits.
+  release-pr:
+    name: Open release PR
+    runs-on: ubuntu-latest
+    # Skip on forks so PRs aren't opened against the wrong repository.
+    if: github.repository_owner == 'bbakernoaa'
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz (release PR)
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # When the release PR is merged, create the `vX.Y.Z` tag. The tag push then
+  # triggers release.yml, which builds and publishes the binaries. No
+  # crates.io token is needed because the package runs in git-only mode.
+  release:
+    name: Tag release
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'bbakernoaa'
+    concurrency:
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz (release)
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          # The action passes GITHUB_TOKEN to `release-plz release --git-token`,
+          # which is what pushes the `vX.Y.Z` tag. GitHub never runs a workflow
+          # in response to an event caused by the default GITHUB_TOKEN, so a
+          # tag pushed with it would silently fail to trigger release.yml.
+          # Supply a fine-grained PAT (read/write "Contents" on this repo) as
+          # the RELEASE_PLZ_TOKEN secret so the tag push chains into the build.
+          # Falls back to GITHUB_TOKEN when the secret is unset (the tag is
+          # still created, but release.yml must be run manually).
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
