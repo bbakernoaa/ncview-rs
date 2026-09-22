@@ -195,7 +195,9 @@ points are rendered on the image. The header reports the active renderer (`Kitty
 truecolor`, `iTerm2 truecolor`, or `cell fallback`). iTerm2 itself uses the iTerm2 image
 protocol rather than Kitty/Sixel. If a multiplexer blocks capability probing, set
 `NCVIEW_IMAGE_PROTOCOL=kitty`, `NCVIEW_IMAGE_PROTOCOL=sixel`, or `NCVIEW_IMAGE_PROTOCOL=iterm2`
-to request a protocol explicitly.
+to request a protocol explicitly. Note that WezTerm does not implement the Kitty graphics
+protocol at all; a Kitty request there is automatically downgraded to Sixel so the map renders
+instead of printing escape-sequence garbage.
 Half-block Unicode rendering remains available as the portable fallback, including over OpenSSH
 and tmux.
 No X11 forwarding, native NetCDF/HDF5 runtime, or Chafa installation is required.
