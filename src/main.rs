@@ -45,6 +45,9 @@ use ncview_rs::{
 struct Cli {
     #[command(subcommand)]
     command: Option<CliCommand>,
+    /// Do not restore previous session state for the dataset(s).
+    #[arg(long)]
+    no_restore: bool,
     /// One or more NetCDF-4 or GRIB2 datasets to inspect. Shell globs are supported.
     #[arg(value_name = "DATASET", num_args = 0..)]
     dataset: Vec<String>,
@@ -138,14 +141,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if let Err(error) = run(&cli.dataset) {
+    if let Err(error) = run(&cli.dataset, cli.no_restore) {
         eprintln!("ncv: {error}");
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
 }
 
-fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn run(datasets: &[String], no_restore: bool) -> Result<(), Box<dyn std::error::Error>> {
     let datasets = datasets.to_vec();
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
@@ -372,11 +375,18 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             datasets.len()
         ));
     }
+    if !no_restore && let Some(saved) = ncview_rs::storage::session::load_session(&datasets) {
+        let catalog = state.view.palette_catalog.clone();
+        let restored_active = saved.apply_to(&mut state, &catalog);
+        if restored_active < sources.len() {
+            active_file = restored_active;
+        }
+    }
     let (slice_tx, slice_rx) = std::sync::mpsc::channel::<RemoteSliceMessage>();
     let mut slice_cancelled = Arc::new(AtomicBool::new(false));
     let (plot_tx, plot_rx) = std::sync::mpsc::channel::<RemotePlotMessage>();
     let mut plot_cancelled = Arc::new(AtomicBool::new(false));
-    select_initial_variable(&mut state, initial_source.metadata());
+    select_initial_variable(&mut state, sources[active_file].metadata());
     configure_timeline(&mut state, &sources, &manifest, active_file);
     terminal.draw(|frame| {
         status::render_loading(
@@ -563,6 +573,7 @@ fn run(datasets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    let _ = ncview_rs::storage::session::save_session(&datasets, &state, active_file);
     cancelled.store(true, Ordering::Release);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
