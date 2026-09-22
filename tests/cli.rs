@@ -11,7 +11,12 @@ fn help_and_version_identify_ncv() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("ncv"));
     let version = ncv().arg("--version").output().unwrap();
     assert!(version.status.success());
-    assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "ncv 0.1.0");
+    // Compare against the package version rather than a literal so release
+    // bumps never require editing this test.
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        format!("ncv {}", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]

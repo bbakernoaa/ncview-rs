@@ -95,7 +95,9 @@ fn variable_selection_moves_between_plottable_fields() {
         ..AppState::default()
     };
     state.view.selected_variable = Some("MACCity".into());
-    state.reduce(Command::SelectVariable(0));
+    // The list is alphabetical, so MACCity sorts before Pixel_area; moving
+    // down from the first field lands on the second.
+    state.reduce(Command::SelectVariable(1));
     assert_eq!(state.view.selected_variable.as_deref(), Some("Pixel_area"));
 }
 
@@ -125,9 +127,11 @@ fn variable_browser_moves_without_loading_until_submit() {
     state.view.selected_variable = Some("temperature".into());
     state.reduce(Command::OpenVariableSearch);
 
-    assert!(state.reduce(Command::SelectVariable(1)).is_none());
+    // Alphabetical order is [humidity, temperature], so the cursor opens on
+    // temperature (index 1); moving up targets humidity without loading.
+    assert!(state.reduce(Command::SelectVariable(0)).is_none());
     assert_eq!(state.view.selected_variable.as_deref(), Some("temperature"));
-    assert_eq!(state.view.variable_browser_index, 1);
+    assert_eq!(state.view.variable_browser_index, 0);
 
     let effect = state.reduce(Command::SubmitVariableSearch);
     assert!(matches!(effect, Some(Effect::ReadSlice { .. })));
