@@ -33,6 +33,7 @@ coverage/
 .agents/
 specs/
 .specify/
+docs/superpowers/
 
 *.grib2
 *.grib

@@ -24,11 +24,12 @@ pub fn render(
     area: Rect,
     view: &ViewModel,
     metadata: &DatasetMetadata,
+    plottable: &[Variable],
     variable_query: &str,
     chart_graphics: Option<&mut GraphicsRenderer>,
 ) {
     if view.variable_search_active {
-        render_variable_browser(frame, area, view, metadata, variable_query);
+        render_variable_browser(frame, area, view, plottable, variable_query);
         return;
     }
     let Some(overlay) = view.overlay else { return };
@@ -319,7 +320,7 @@ fn render_variable_browser(
     frame: &mut Frame,
     area: Rect,
     view: &ViewModel,
-    metadata: &DatasetMetadata,
+    plottable: &[Variable],
     variable_query: &str,
 ) {
     let width = area.width.saturating_mul(4).saturating_div(5).max(1);
@@ -344,13 +345,9 @@ fn render_variable_browser(
 
     let block = popup_panel("Variables", theme::MAUVE);
     let inner = block.inner(popup);
-    let plottable = metadata
-        .variables
-        .iter()
-        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
-        .cloned()
-        .collect::<Vec<Variable>>();
-    let filtered = sidebar::filter_variables(&plottable, variable_query);
+    // The browser lists exactly the selectable set (the cross-file plottable
+    // union), so a click or Enter always resolves to the row that is shown.
+    let filtered = sidebar::filter_variables(plottable, variable_query);
     let selected = view
         .variable_browser_index
         .min(filtered.len().saturating_sub(1));

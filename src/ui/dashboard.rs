@@ -30,16 +30,19 @@ pub fn render(
     view: &ViewModel,
     filename: &str,
     metadata: &DatasetMetadata,
+    plottable: &[crate::data::Variable],
 ) {
-    render_with_search(frame, area, view, filename, metadata, "", false);
+    render_with_search(frame, area, view, filename, metadata, plottable, "", false);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_with_search(
     frame: &mut Frame,
     area: Rect,
     view: &ViewModel,
     filename: &str,
     metadata: &DatasetMetadata,
+    plottable: &[crate::data::Variable],
     variable_query: &str,
     variable_search_active: bool,
 ) {
@@ -49,6 +52,7 @@ pub fn render_with_search(
         view,
         filename,
         metadata,
+        plottable,
         variable_query,
         variable_search_active,
         None,
@@ -63,6 +67,7 @@ pub fn render_with_search_and_image(
     view: &ViewModel,
     filename: &str,
     metadata: &DatasetMetadata,
+    plottable: &[crate::data::Variable],
     variable_query: &str,
     variable_search_active: bool,
     graphics: Option<&mut GraphicsRenderer>,
@@ -85,7 +90,10 @@ pub fn render_with_search_and_image(
     frame.render_widget(header, areas.header);
     let header_line = Line::from(vec![
         Span::styled(" ncv ", theme::title_style(theme::MAUVE)),
-        Span::styled("v0.1.0", Style::default().fg(theme::SUBTEXT)),
+        Span::styled(
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(theme::SUBTEXT),
+        ),
         Span::styled("  ", Style::default()),
         Span::styled(theme::ICON_FILE, theme::title_style(theme::BLUE)),
         Span::styled(format!(" {filename}"), Style::default().fg(theme::TEXT)),
@@ -122,6 +130,8 @@ pub fn render_with_search_and_image(
         view.color_scale_scope,
         variable_query,
         variable_search_active,
+        plottable,
+        view.slice.as_ref(),
         (view.depth_length > 1).then(|| crate::ui::level::LevelPanel {
             labels: &view.level_labels,
             selected: view.depth_index,
@@ -263,7 +273,15 @@ pub fn render_with_search_and_image(
         status
     };
     status::render(frame, areas.status, &status);
-    popup::render(frame, area, view, metadata, variable_query, chart_graphics);
+    popup::render(
+        frame,
+        area,
+        view,
+        metadata,
+        plottable,
+        variable_query,
+        chart_graphics,
+    );
     if view.help_visible {
         help::render(frame, area);
     }
