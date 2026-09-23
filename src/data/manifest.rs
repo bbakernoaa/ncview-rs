@@ -493,11 +493,7 @@ impl DataSource for ManifestSource {
 
         let validity = ndarray::Array2::from_shape_fn((target_rows, target_cols), |(r, c)| {
             let val = array[(r, c)];
-            if val.is_finite()
-                && meta
-                    .fill_value
-                    .map_or(true, |fill| (val - fill).abs() > 1e-9)
-            {
+            if val.is_finite() && meta.fill_value.is_none_or(|fill| (val - fill).abs() > 1e-9) {
                 Validity::Finite
             } else {
                 Validity::Fill
@@ -561,6 +557,7 @@ fn resolve_chunk_key(
     None
 }
 
+#[allow(clippy::manual_slice_size_calculation)]
 fn decode_numeric_chunk(bytes: &[u8], dtype: &str) -> Result<Vec<f64>> {
     let dt = dtype.trim();
     if dt.contains("f4") || dt.contains("float32") || dt.ends_with("f") {

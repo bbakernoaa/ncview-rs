@@ -79,7 +79,7 @@ fn opens_icechunk_virtual_store_manifest() {
 
     // Sample raw binary float data in a backing file
     let backing_file = dir.path().join("data.bin");
-    let sample_floats: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+    let sample_floats: [f32; 6] = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
     let bytes: Vec<u8> = sample_floats.iter().flat_map(|f| f.to_le_bytes()).collect();
     fs::write(&backing_file, &bytes).unwrap();
 
@@ -176,12 +176,7 @@ fn handles_subregion_slicing_and_strides() {
     };
 
     let slice = source.read_slice(&request).unwrap();
-    // Grid:
-    //  1  2  3  4
-    //  5  6  7  8
-    //  9 10 11 12
-    // 13 14 15 16
-    // Subgrid rows 1..3, cols 1..3 is [[6, 7], [10, 11]]
+
     assert_eq!(slice.values[(0, 0)], 6.0);
     assert_eq!(slice.values[(0, 1)], 7.0);
     assert_eq!(slice.values[(1, 0)], 10.0);
@@ -194,7 +189,7 @@ fn handles_big_endian_and_integer_dtypes() {
     let manifest_path = dir.path().join("dtypes_manifest.json");
 
     let backing_file = dir.path().join("be_integers.bin");
-    let sample_ints: Vec<i16> = vec![100, 200, 300, 400];
+    let sample_ints: [i16; 4] = [100, 200, 300, 400];
     let bytes: Vec<u8> = sample_ints.iter().flat_map(|i| i.to_be_bytes()).collect();
     fs::write(&backing_file, &bytes).unwrap();
 
@@ -238,23 +233,17 @@ fn handles_multi_chunk_spanning_and_missing_chunks() {
     let dir = tempdir().unwrap();
     let manifest_path = dir.path().join("multichunk_manifest.json");
 
-    // Create 2 chunks for a 4x4 array split into 2x2 chunks
-    // Chunk (0,0): [[1, 2], [3, 4]]
-    // Chunk (0,1): [[5, 6], [7, 8]]
-    // Chunk (1,0): Missing (should fill with -999.0)
-    // Chunk (1,1): [[13, 14], [15, 16]]
-
-    let chunk00 = vec![1.0f32, 2.0, 3.0, 4.0];
+    let chunk00 = [1.0f32, 2.0, 3.0, 4.0];
     let bytes00: Vec<u8> = chunk00.iter().flat_map(|f| f.to_le_bytes()).collect();
     let file00 = dir.path().join("c00.bin");
     fs::write(&file00, &bytes00).unwrap();
 
-    let chunk01 = vec![5.0f32, 6.0, 7.0, 8.0];
+    let chunk01 = [5.0f32, 6.0, 7.0, 8.0];
     let bytes01: Vec<u8> = chunk01.iter().flat_map(|f| f.to_le_bytes()).collect();
     let file01 = dir.path().join("c01.bin");
     fs::write(&file01, &bytes01).unwrap();
 
-    let chunk11 = vec![13.0f32, 14.0, 15.0, 16.0];
+    let chunk11 = [13.0f32, 14.0, 15.0, 16.0];
     let bytes11: Vec<u8> = chunk11.iter().flat_map(|f| f.to_le_bytes()).collect();
     let file11 = dir.path().join("c11.bin");
     fs::write(&file11, &bytes11).unwrap();
@@ -273,7 +262,6 @@ fn handles_multi_chunk_spanning_and_missing_chunks() {
             },
             "grid/0.0": { "path": file00.file_name().unwrap().to_str().unwrap(), "offset": 0, "length": bytes00.len() },
             "grid/0.1": { "path": file01.file_name().unwrap().to_str().unwrap(), "offset": 0, "length": bytes01.len() },
-            // grid/1.0 is omitted (missing chunk)
             "grid/1.1": { "path": file11.file_name().unwrap().to_str().unwrap(), "offset": 0, "length": bytes11.len() }
         }
     });
@@ -281,7 +269,6 @@ fn handles_multi_chunk_spanning_and_missing_chunks() {
 
     let source = ManifestSource::open(&manifest_path).unwrap();
 
-    // Read full 4x4 bounding box spanning all 4 chunks
     let request = SliceRequest {
         variable: "grid".into(),
         time: 0,
@@ -291,25 +278,21 @@ fn handles_multi_chunk_spanning_and_missing_chunks() {
 
     let slice = source.read_slice(&request).unwrap();
 
-    // Row 0 (from chunks 0,0 and 0,1)
     assert_eq!(slice.values[(0, 0)], 1.0);
     assert_eq!(slice.values[(0, 1)], 2.0);
     assert_eq!(slice.values[(0, 2)], 5.0);
     assert_eq!(slice.values[(0, 3)], 6.0);
 
-    // Row 1 (from chunks 0,0 and 0,1)
     assert_eq!(slice.values[(1, 0)], 3.0);
     assert_eq!(slice.values[(1, 1)], 4.0);
     assert_eq!(slice.values[(1, 2)], 7.0);
     assert_eq!(slice.values[(1, 3)], 8.0);
 
-    // Row 2 (from missing chunk 1,0 and chunk 1,1)
     assert_eq!(slice.values[(2, 0)], -999.0);
     assert_eq!(slice.values[(2, 1)], -999.0);
     assert_eq!(slice.values[(2, 2)], 13.0);
     assert_eq!(slice.values[(2, 3)], 14.0);
 
-    // Row 3 (from missing chunk 1,0 and chunk 1,1)
     assert_eq!(slice.values[(3, 0)], -999.0);
     assert_eq!(slice.values[(3, 1)], -999.0);
     assert_eq!(slice.values[(3, 2)], 15.0);
