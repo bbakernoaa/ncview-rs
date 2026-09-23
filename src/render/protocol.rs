@@ -172,10 +172,10 @@ impl GraphicsRenderer {
         }
         let key = image_hash(&image);
         let image_is_needed = self.image_key != Some(key)
-            && !self
+            && self
                 .pending
                 .as_ref()
-                .is_some_and(|pending| pending.key == key);
+                .is_none_or(|pending| pending.key != key);
         if image_is_needed {
             self.raster = Some((key, image));
         }
