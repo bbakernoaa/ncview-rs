@@ -8,6 +8,7 @@ pub mod grib2_identity;
 pub mod grib2_index;
 pub mod grib2_manifest;
 pub mod grib2_types;
+pub mod manifest;
 pub mod netcdf4;
 pub mod remote;
 pub mod remote_grib2;
@@ -30,6 +31,7 @@ use crate::storage::location::SourceLocation;
 pub enum DatasetFormat {
     NetCdf4,
     Grib2,
+    VirtualManifest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +195,8 @@ pub fn open(path: impl AsRef<Path>) -> Result<Box<dyn DataSource>> {
         .is_ok_and(|magic| magic == *b"GRIB");
     if extension_matches || magic_matches {
         grib2::Grib2Source::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
+    } else if manifest::is_manifest_file(path) {
+        manifest::ManifestSource::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
     } else {
         netcdf4::NetCdf4Source::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
     }
