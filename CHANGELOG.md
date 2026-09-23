@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.3](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.2...v0.5.3) - 2026-09-23
+
+### Other
+
+- Add session saving and restoration for datasets ([#20](https://github.com/bbakernoaa/ncview-rs/pull/20))
+
 ## [0.5.2](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.1...v0.5.2) - 2026-09-23
 
 ### Other
