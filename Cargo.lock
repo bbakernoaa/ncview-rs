@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "ncview-rs"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "ab_glyph",
  "base64-simd",
