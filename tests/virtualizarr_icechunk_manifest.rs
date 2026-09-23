@@ -80,10 +80,7 @@ fn opens_icechunk_virtual_store_manifest() {
     // Sample raw binary float data in a backing file
     let backing_file = dir.path().join("data.bin");
     let sample_floats: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
-    let bytes: Vec<u8> = sample_floats
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    let bytes: Vec<u8> = sample_floats.iter().flat_map(|f| f.to_le_bytes()).collect();
     fs::write(&backing_file, &bytes).unwrap();
 
     let json_content = serde_json::json!({
@@ -198,10 +195,7 @@ fn handles_big_endian_and_integer_dtypes() {
 
     let backing_file = dir.path().join("be_integers.bin");
     let sample_ints: Vec<i16> = vec![100, 200, 300, 400];
-    let bytes: Vec<u8> = sample_ints
-        .iter()
-        .flat_map(|i| i.to_be_bytes())
-        .collect();
+    let bytes: Vec<u8> = sample_ints.iter().flat_map(|i| i.to_be_bytes()).collect();
     fs::write(&backing_file, &bytes).unwrap();
 
     let json_content = serde_json::json!({

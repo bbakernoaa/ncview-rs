@@ -86,7 +86,8 @@ impl ManifestSource {
 
         if let Some(refs) = value.get("refs").and_then(Value::as_object) {
             refs_map = refs.clone();
-        } else if let Some(virtual_chunks) = value.get("virtual_chunks").and_then(Value::as_object) {
+        } else if let Some(virtual_chunks) = value.get("virtual_chunks").and_then(Value::as_object)
+        {
             // Icechunk / VirtualiZarr store representation
             for (key, chunk_val) in virtual_chunks {
                 refs_map.insert(key.clone(), chunk_val.clone());
@@ -149,9 +150,7 @@ impl ManifestSource {
                         })
                     })
                     .unwrap_or(false)
-                    || zattrs
-                        .and_then(|a| a.get("grib2_discipline"))
-                        .is_some();
+                    || zattrs.and_then(|a| a.get("grib2_discipline")).is_some();
 
                 let dim_names = zattrs
                     .and_then(|a| a.get("_ARRAY_DIMENSIONS"))
@@ -162,11 +161,7 @@ impl ManifestSource {
                             .map(String::from)
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(|| {
-                        (0..shape.len())
-                            .map(|i| format!("dim_{i}"))
-                            .collect()
-                    });
+                    .unwrap_or_else(|| (0..shape.len()).map(|i| format!("dim_{i}")).collect());
 
                 let units = zattrs
                     .and_then(|a| a.get("units"))
@@ -258,7 +253,11 @@ impl ManifestSource {
     fn read_chunk_bytes(&self, chunk_ref: &ChunkReference) -> Result<Vec<u8>> {
         match chunk_ref {
             ChunkReference::Inline(bytes) => Ok(bytes.clone()),
-            ChunkReference::ByteRange { uri, offset, length } => {
+            ChunkReference::ByteRange {
+                uri,
+                offset,
+                length,
+            } => {
                 if uri.contains("://") && !uri.starts_with("file://") {
                     // Remote object fetch
                     let location = SourceLocation::parse(uri)?;
@@ -269,11 +268,15 @@ impl ManifestSource {
                         offset + length,
                     )?;
                     let runtime = crate::storage::StorageRuntime::spawn()?;
-                    let remote = crate::storage::object_store::RemoteStore::new(location.clone(), store.clone());
-                    let identity = crate::storage::receive(&runtime, async move {
-                        remote.head().await
-                    })??;
-                    let remote = Arc::new(crate::storage::object_store::RemoteStore::new(location, store));
+                    let remote = crate::storage::object_store::RemoteStore::new(
+                        location.clone(),
+                        store.clone(),
+                    );
+                    let identity =
+                        crate::storage::receive(&runtime, async move { remote.head().await })??;
+                    let remote = Arc::new(crate::storage::object_store::RemoteStore::new(
+                        location, store,
+                    ));
                     let bytes = crate::storage::receive(&runtime, async move {
                         remote.read_range(&identity, range).await
                     })??;
@@ -294,15 +297,17 @@ impl ManifestSource {
                         path: file_path.clone(),
                         source,
                     })?;
-                    file.seek(SeekFrom::Start(*offset)).map_err(|source| NcvError::Io {
-                        path: file_path.clone(),
-                        source,
-                    })?;
+                    file.seek(SeekFrom::Start(*offset))
+                        .map_err(|source| NcvError::Io {
+                            path: file_path.clone(),
+                            source,
+                        })?;
                     let mut buffer = vec![0_u8; *length as usize];
-                    file.read_exact(&mut buffer).map_err(|source| NcvError::Io {
-                        path: file_path,
-                        source,
-                    })?;
+                    file.read_exact(&mut buffer)
+                        .map_err(|source| NcvError::Io {
+                            path: file_path,
+                            source,
+                        })?;
                     Ok(buffer)
                 }
             }
@@ -409,10 +414,11 @@ impl DataSource for ManifestSource {
                         reason: "GRIB2 message contains no submessage".into(),
                     })?;
 
-                    let (cols, rows) = submessage.grid_shape().map_err(|error| NcvError::Grib2 {
-                        path: PathBuf::from(&self.path),
-                        reason: error.to_string(),
-                    })?;
+                    let (cols, rows) =
+                        submessage.grid_shape().map_err(|error| NcvError::Grib2 {
+                            path: PathBuf::from(&self.path),
+                            reason: error.to_string(),
+                        })?;
 
                     let flip_rows = submessage
                         .latlons()
@@ -487,7 +493,11 @@ impl DataSource for ManifestSource {
 
         let validity = ndarray::Array2::from_shape_fn((target_rows, target_cols), |(r, c)| {
             let val = array[(r, c)];
-            if val.is_finite() && meta.fill_value.map_or(true, |fill| (val - fill).abs() > 1e-9) {
+            if val.is_finite()
+                && meta
+                    .fill_value
+                    .map_or(true, |fill| (val - fill).abs() > 1e-9)
+            {
                 Validity::Finite
             } else {
                 Validity::Fill
@@ -667,7 +677,11 @@ fn parse_chunk_ref(val: &Value) -> Option<ChunkReference> {
             let uri = arr[0].as_str()?.to_string();
             let offset = arr[1].as_u64()?;
             let length = arr[2].as_u64()?;
-            return Some(ChunkReference::ByteRange { uri, offset, length });
+            return Some(ChunkReference::ByteRange {
+                uri,
+                offset,
+                length,
+            });
         }
     } else if let Some(obj) = val.as_object() {
         let uri = obj
@@ -677,7 +691,11 @@ fn parse_chunk_ref(val: &Value) -> Option<ChunkReference> {
             .to_string();
         let offset = obj.get("offset").and_then(Value::as_u64)?;
         let length = obj.get("length").and_then(Value::as_u64)?;
-        return Some(ChunkReference::ByteRange { uri, offset, length });
+        return Some(ChunkReference::ByteRange {
+            uri,
+            offset,
+            length,
+        });
     } else if let Some(s) = val.as_str() {
         if let Some(b64) = s.strip_prefix("base64:") {
             if let Ok(bytes) = base64_simd::STANDARD.decode_to_vec(b64) {
@@ -696,9 +714,17 @@ fn infer_axis_role(name: &str) -> AxisRole {
         AxisRole::Latitude
     } else if lower.contains("lon") || lower == "x" || lower.contains("east") {
         AxisRole::Longitude
-    } else if lower.contains("time") || lower == "t" || lower.contains("step") || lower.contains("grib") {
+    } else if lower.contains("time")
+        || lower == "t"
+        || lower.contains("step")
+        || lower.contains("grib")
+    {
         AxisRole::Time
-    } else if lower.contains("depth") || lower.contains("lev") || lower == "z" || lower.contains("height") {
+    } else if lower.contains("depth")
+        || lower.contains("lev")
+        || lower == "z"
+        || lower.contains("height")
+    {
         AxisRole::Depth
     } else {
         AxisRole::Other
