@@ -866,6 +866,7 @@ fn handle_command(
 
         *active_file = bounded_file_index(*active_file, delta, sources.len());
         let source = sources[*active_file].as_ref();
+        let previous_point = state.view.timeline.get(state.view.time_index).cloned();
         *state = state_for_source(source);
         state.view.collection_diagnostics = manifest.diagnostics().to_vec();
         state.view.collection_progress = Some((finished, datasets.len()));
@@ -879,6 +880,13 @@ fn handle_command(
 
         select_initial_variable(state, source.metadata());
         configure_timeline(state, sources, manifest, *active_file);
+        state.view.time_index =
+            anchored_time_index(previous_point.as_ref(), &state.view.timeline, *active_file);
+        state.view.time_label = state
+            .view
+            .timeline
+            .get(state.view.time_index)
+            .map(|point| point.label.clone());
         load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
         state.view.status = format!(
             "opened file {}/{}: {}",
@@ -2064,6 +2072,32 @@ fn map_drawable(
             inner.height.min(u16::try_from(rows).unwrap_or(u16::MAX)),
         ))
     }
+}
+
+/// Choose the timeline slot to display after switching files. The time
+/// position is anchored to the newly selected file (keeping the local time
+/// index where that file has one) rather than the collection's earliest
+/// frame. Without this, a file switch resets the index to 0, and because the
+/// active file is derived from `timeline[time_index].source_index`, the viewer
+/// silently snaps back to the first source and the displayed data never
+/// changes.
+fn anchored_time_index(
+    previous_point: Option<&TimelinePoint>,
+    timeline: &[TimelinePoint],
+    source_index: usize,
+) -> usize {
+    let slots: Vec<usize> = timeline
+        .iter()
+        .enumerate()
+        .filter(|(_, point)| point.source_index == source_index)
+        .map(|(index, _)| index)
+        .collect();
+    let offset = previous_point.map_or(0, |point| point.local_index);
+    slots
+        .get(offset)
+        .copied()
+        .or_else(|| slots.first().copied())
+        .unwrap_or(0)
 }
 
 fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
@@ -3335,6 +3369,58 @@ mod timeline_order_tests {
         assert_eq!(
             compare_time_labels("2026-09-10T12:00:00Z", "coordinate index"),
             std::cmp::Ordering::Less
+        );
+    }
+}
+
+#[cfg(test)]
+mod file_switch_timeline_tests {
+    use super::anchored_time_index;
+    use ncview_rs::app::TimelinePoint;
+
+    fn point(source_index: usize, local_index: usize, label: &str) -> TimelinePoint {
+        TimelinePoint {
+            source_index,
+            local_index,
+            label: label.to_owned(),
+        }
+    }
+
+    #[test]
+    fn switching_files_anchors_to_the_new_files_frame_not_the_earliest() {
+        // One frame per file sorted by time: the GEFS collection case. After
+        // switching files the view must show the newly selected file's frame;
+        // resetting to the global frame 0 snaps the active file back to 1/3
+        // and the displayed data never changes.
+        let timeline = vec![point(0, 0, "t0"), point(1, 0, "t1"), point(2, 0, "t2")];
+        let previous = point(0, 0, "t0");
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 2), 2);
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 1), 1);
+    }
+
+    #[test]
+    fn switching_files_preserves_the_local_time_position() {
+        let timeline = vec![
+            point(0, 0, "a0"),
+            point(0, 1, "a1"),
+            point(0, 2, "a2"),
+            point(1, 0, "b0"),
+            point(1, 1, "b1"),
+            point(1, 2, "b2"),
+        ];
+        let previous = point(0, 2, "a2");
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 1), 5);
+        let previous = point(0, 0, "a0");
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 1), 3);
+    }
+
+    #[test]
+    fn missing_frames_fall_back_to_the_first_slot() {
+        let timeline = vec![point(0, 0, "a0"), point(1, 0, "b0")];
+        assert_eq!(anchored_time_index(None, &timeline, 1), 1);
+        assert_eq!(
+            anchored_time_index(Some(&point(2, 0, "x")), &timeline, 2),
+            0
         );
     }
 }
