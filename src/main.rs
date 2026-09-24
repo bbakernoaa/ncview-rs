@@ -111,17 +111,17 @@ fn expand_glob_pattern(pattern: &str) -> Vec<String> {
     let mut matches = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir_path) {
         for entry in entries.flatten() {
-            if let Ok(file_name) = entry.file_name().into_string() {
-                if wild_match(file_pattern, &file_name) {
-                    let full_path = if dir_path == "." {
-                        file_name
-                    } else if dir_path == "/" {
-                        format!("/{file_name}")
-                    } else {
-                        format!("{dir_path}/{file_name}")
-                    };
-                    matches.push(full_path);
-                }
+            if let Ok(file_name) = entry.file_name().into_string()
+                && wild_match(file_pattern, &file_name)
+            {
+                let full_path = if dir_path == "." {
+                    file_name
+                } else if dir_path == "/" {
+                    format!("/{file_name}")
+                } else {
+                    format!("{dir_path}/{file_name}")
+                };
+                matches.push(full_path);
             }
         }
     }
@@ -158,8 +158,6 @@ fn resolve_diff_inputs(cli: &Cli) -> Result<(Vec<String>, Vec<String>), String> 
             set2_raw.push(val.to_string());
         } else if set1_raw.is_empty() {
             set1_raw.push(item.clone());
-        } else if set2_raw.is_empty() {
-            set2_raw.push(item.clone());
         } else {
             set2_raw.push(item.clone());
         }
@@ -503,9 +501,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         finished = datasets.len();
     }
     let (datasets, mut sources) = if let Some((set1_files, set2_files)) = diff_mapping {
-        let count = if set1_files.len() == set2_files.len() {
-            set1_files.len()
-        } else if set2_files.len() == 1 {
+        let count = if set1_files.len() == set2_files.len() || set2_files.len() == 1 {
             set1_files.len()
         } else if set1_files.len() == 1 {
             set2_files.len()

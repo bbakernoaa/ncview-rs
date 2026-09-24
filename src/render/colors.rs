@@ -569,6 +569,7 @@ pub fn color_for_value_with_limits_and_filter_and_scale(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn color_for_value_with_limits_and_filter_and_scale_and_diff(
     value: f64,
     validity: Validity,

@@ -27,12 +27,11 @@ impl DiffSource {
             if !v1.numeric || v1.dimensions.len() < 2 {
                 continue;
             }
-            if let Some(v2) = meta2.variables.iter().find(|v| v.name == v1.name) {
-                if v1.dimensions == v2.dimensions
-                    && dimensions_lengths_match(meta1, meta2, &v1.dimensions)
-                {
-                    diff_variables.push(v1.clone());
-                }
+            if let Some(v2) = meta2.variables.iter().find(|v| v.name == v1.name)
+                && v1.dimensions == v2.dimensions
+                && dimensions_lengths_match(meta1, meta2, &v1.dimensions)
+            {
+                diff_variables.push(v1.clone());
             }
         }
 
