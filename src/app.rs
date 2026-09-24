@@ -199,6 +199,7 @@ pub struct ViewModel {
     pub show_land_borders: bool,
     pub scale_mode: ScaleMode,
     pub color_scale_scope: ColorScaleScope,
+    pub is_diff: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +430,7 @@ impl Default for ViewModel {
             show_land_borders: false,
             scale_mode: ScaleMode::Linear,
             color_scale_scope: ColorScaleScope::CurrentView,
+            is_diff: false,
         }
     }
 }
@@ -735,7 +737,11 @@ impl AppState {
             Command::AutomaticLimits => {
                 self.view.limits_manual = false;
                 self.view.limits = if self.view.scale_mode == ScaleMode::Log {
-                    self.view.slice.as_ref().and_then(positive_slice_limits)
+                    if self.view.is_diff {
+                        self.view.slice.as_ref().and_then(absolute_slice_limits)
+                    } else {
+                        self.view.slice.as_ref().and_then(positive_slice_limits)
+                    }
                 } else {
                     self.view
                         .slice
@@ -1425,7 +1431,11 @@ impl AppState {
             Command::ToggleScale => {
                 self.view.scale_mode = match self.view.scale_mode {
                     ScaleMode::Linear => {
-                        if self
+                        if self.view.is_diff {
+                            self.view.limits =
+                                self.view.slice.as_ref().and_then(absolute_slice_limits);
+                            self.view.limits_manual = false;
+                        } else if self
                             .view
                             .limits
                             .is_some_and(|(min, max)| min <= 0.0 || max <= 0.0)
@@ -1584,6 +1594,19 @@ pub fn positive_slice_limits(slice: &crate::data::slice::Slice2D) -> Option<(f64
         if slice.validity[(row, col)] == crate::data::slice::Validity::Finite && *value > 0.0 {
             min = min.min(*value);
             max = max.max(*value);
+        }
+    }
+    min.is_finite().then_some((min, max))
+}
+
+pub fn absolute_slice_limits(slice: &crate::data::slice::Slice2D) -> Option<(f64, f64)> {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for ((row, col), value) in slice.values.indexed_iter() {
+        let abs_val = value.abs();
+        if slice.validity[(row, col)] == crate::data::slice::Validity::Finite && abs_val > 0.0 {
+            min = min.min(abs_val);
+            max = max.max(abs_val);
         }
     }
     min.is_finite().then_some((min, max))

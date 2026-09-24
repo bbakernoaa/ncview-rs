@@ -1,6 +1,7 @@
 //! Read-only dataset and slice abstractions.
 
 pub mod coordinates;
+pub mod diff;
 pub mod fixtures;
 pub mod grib2;
 pub mod grib2_catalog;

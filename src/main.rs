@@ -48,9 +48,143 @@ struct Cli {
     /// Do not restore previous session state for the dataset(s).
     #[arg(long)]
     no_restore: bool,
+    /// Enable difference mode between two files or two sets of files.
+    #[arg(long)]
+    diff: bool,
+    /// First file or glob pattern for diff mode.
+    #[arg(long)]
+    first: Option<String>,
+    /// Second file or glob pattern for diff mode.
+    #[arg(long)]
+    second: Option<String>,
     /// One or more NetCDF-4 or GRIB2 datasets to inspect. Shell globs are supported.
     #[arg(value_name = "DATASET", num_args = 0..)]
     dataset: Vec<String>,
+}
+
+fn wild_match(pattern: &str, s: &str) -> bool {
+    let p_chars: Vec<char> = pattern.chars().collect();
+    let s_chars: Vec<char> = s.chars().collect();
+    let mut px = 0;
+    let mut sx = 0;
+    let mut next_px = 0;
+    let mut next_sx = 0;
+
+    while px < p_chars.len() || sx < s_chars.len() {
+        if px < p_chars.len() {
+            let c = p_chars[px];
+            if c == '*' {
+                next_px = px + 1;
+                next_sx = sx + 1;
+                px += 1;
+                continue;
+            }
+            if sx < s_chars.len() && (c == '?' || c == s_chars[sx]) {
+                px += 1;
+                sx += 1;
+                continue;
+            }
+        }
+        if next_sx > 0 && next_sx <= s_chars.len() {
+            px = next_px;
+            sx = next_sx;
+            next_sx += 1;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn expand_glob_pattern(pattern: &str) -> Vec<String> {
+    let unquoted = pattern.trim_matches('"').trim_matches('\'');
+    if !unquoted.contains(['*', '?']) {
+        return vec![unquoted.to_string()];
+    }
+
+    let (dir_path, file_pattern) = if let Some((d, f)) = unquoted.rsplit_once('/') {
+        (if d.is_empty() { "/" } else { d }, f)
+    } else {
+        (".", unquoted)
+    };
+
+    let mut matches = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir_path) {
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                if wild_match(file_pattern, &file_name) {
+                    let full_path = if dir_path == "." {
+                        file_name
+                    } else if dir_path == "/" {
+                        format!("/{file_name}")
+                    } else {
+                        format!("{dir_path}/{file_name}")
+                    };
+                    matches.push(full_path);
+                }
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        vec![unquoted.to_string()]
+    } else {
+        matches.sort();
+        matches
+    }
+}
+
+fn resolve_diff_inputs(cli: &Cli) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut set1_raw = Vec::new();
+    let mut set2_raw = Vec::new();
+
+    if let Some(first) = &cli.first {
+        set1_raw.push(first.clone());
+    }
+    if let Some(second) = &cli.second {
+        set2_raw.push(second.clone());
+    }
+
+    for item in &cli.dataset {
+        if let Some(val) = item.strip_prefix("first=").or_else(|| item.strip_prefix("1=")) {
+            set1_raw.push(val.to_string());
+        } else if let Some(val) = item.strip_prefix("second=").or_else(|| item.strip_prefix("2=")) {
+            set2_raw.push(val.to_string());
+        } else if set1_raw.is_empty() {
+            set1_raw.push(item.clone());
+        } else if set2_raw.is_empty() {
+            set2_raw.push(item.clone());
+        } else {
+            set2_raw.push(item.clone());
+        }
+    }
+
+    if set1_raw.is_empty() || set2_raw.is_empty() {
+        return Err(
+            "diff mode requires two files or file sets (e.g. ncv --diff file1 file2 or ncv --diff first=\"files1*\" second=\"files2*\")"
+                .into(),
+        );
+    }
+
+    let mut set1_files = Vec::new();
+    for pat in set1_raw {
+        set1_files.extend(expand_glob_pattern(&pat));
+    }
+    let mut set2_files = Vec::new();
+    for pat in set2_raw {
+        set2_files.extend(expand_glob_pattern(&pat));
+    }
+
+    set1_files.sort();
+    set1_files.dedup();
+    set2_files.sort();
+    set2_files.dedup();
+
+    if set1_files.is_empty() || set2_files.is_empty() {
+        return Err("diff mode found no matching files for one or both file sets".into());
+    }
+
+    Ok((set1_files, set2_files))
 }
 
 #[derive(Debug, Subcommand)]
@@ -129,27 +263,49 @@ fn main() -> ExitCode {
             }
         };
     }
-    if cli.dataset.is_empty() {
+    let is_diff = cli.diff || cli.first.is_some() || cli.second.is_some();
+    if !is_diff && cli.dataset.is_empty() {
         let mut command = Cli::command();
         let _ = command.print_help();
         println!();
         return ExitCode::SUCCESS;
     }
-    for dataset in &cli.dataset {
-        if let Err(error) = ncview_rs::storage::location::SourceLocation::parse(dataset) {
-            eprintln!("ncv: {dataset}: {error}");
+    if is_diff {
+        if let Err(error) = resolve_diff_inputs(&cli) {
+            eprintln!("ncv: {error}");
             return ExitCode::from(2);
         }
+    } else {
+        for dataset in &cli.dataset {
+            if let Err(error) = ncview_rs::storage::location::SourceLocation::parse(dataset) {
+                eprintln!("ncv: {dataset}: {error}");
+                return ExitCode::from(2);
+            }
+        }
     }
-    if let Err(error) = run(&cli.dataset, cli.no_restore) {
+    if let Err(error) = run(&cli) {
         eprintln!("ncv: {error}");
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
 }
 
-fn run(datasets: &[String], no_restore: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let datasets = datasets.to_vec();
+fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let is_diff = cli.diff || cli.first.is_some() || cli.second.is_some();
+    let no_restore = cli.no_restore;
+
+    let (datasets, diff_mapping) = if is_diff {
+        let (set1_files, set2_files) = resolve_diff_inputs(cli)?;
+        let mut all_unique = Vec::new();
+        for f in set1_files.iter().chain(set2_files.iter()) {
+            if !all_unique.contains(f) {
+                all_unique.push(f.clone());
+            }
+        }
+        (all_unique, Some((set1_files, set2_files)))
+    } else {
+        (cli.dataset.clone(), None)
+    };
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         use std::io::Write;
@@ -340,13 +496,46 @@ fn run(datasets: &[String], no_restore: bool) -> Result<(), Box<dyn std::error::
         loaded = datasets.len();
         finished = datasets.len();
     }
-    let mut sources = pending_sources
-        .into_iter()
-        .enumerate()
-        .map(|(index, source)| {
-            source.unwrap_or_else(|| placeholder_source(datasets[index].clone()))
-        })
-        .collect::<Vec<Arc<dyn data::DataSource>>>();
+    let (datasets, mut sources) = if let Some((set1_files, set2_files)) = diff_mapping {
+        let count = if set1_files.len() == set2_files.len() {
+            set1_files.len()
+        } else if set2_files.len() == 1 {
+            set1_files.len()
+        } else if set1_files.len() == 1 {
+            set2_files.len()
+        } else {
+            set1_files.len().min(set2_files.len())
+        };
+
+        let mut diff_sources = Vec::new();
+        let mut diff_labels = Vec::new();
+
+        for i in 0..count {
+            let f1 = if set1_files.len() == 1 { &set1_files[0] } else { &set1_files[i] };
+            let f2 = if set2_files.len() == 1 { &set2_files[0] } else { &set2_files[i] };
+
+            let idx1 = datasets.iter().position(|d| d == f1).ok_or_else(|| format!("source {f1} failed to load"))?;
+            let idx2 = datasets.iter().position(|d| d == f2).ok_or_else(|| format!("source {f2} failed to load"))?;
+
+            let s1 = pending_sources[idx1].clone().ok_or_else(|| format!("source {f1} failed to load"))?;
+            let s2 = pending_sources[idx2].clone().ok_or_else(|| format!("source {f2} failed to load"))?;
+
+            let diff_source: Arc<dyn data::DataSource> = Arc::new(data::diff::DiffSource::new(s1, s2));
+            diff_sources.push(diff_source);
+            diff_labels.push(format!("diff: {f1} vs {f2}"));
+        }
+
+        (diff_labels, diff_sources)
+    } else {
+        let sources = pending_sources
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                source.unwrap_or_else(|| placeholder_source(datasets[index].clone()))
+            })
+            .collect::<Vec<Arc<dyn data::DataSource>>>();
+        (datasets, sources)
+    };
     let source_refs = sources
         .iter()
         .map(|source| source.as_ref())
@@ -355,6 +544,10 @@ fn run(datasets: &[String], no_restore: bool) -> Result<(), Box<dyn std::error::
     let mut active_file = earliest_source_index(&sources);
     let initial_source = sources[active_file].as_ref();
     let mut state = state_for_source(initial_source);
+    if is_diff {
+        state.view.is_diff = true;
+        state.view.palette = ncview_rs::render::colors::Palette::CoolWarm;
+    }
     state.view.collection_diagnostics = manifest.diagnostics().to_vec();
     state.view.collection_progress = Some((finished, datasets.len()));
     state.view.collection_diagnostics.extend(
@@ -2252,7 +2445,11 @@ fn slice_limits(
     scale: ncview_rs::app::ScaleMode,
 ) -> Option<(f64, f64)> {
     if scale == ncview_rs::app::ScaleMode::Log {
-        ncview_rs::app::positive_slice_limits(slice)
+        if slice.is_diff {
+            ncview_rs::app::absolute_slice_limits(slice)
+        } else {
+            ncview_rs::app::positive_slice_limits(slice)
+        }
     } else {
         slice.statistics.map(|stats| (stats.min, stats.max))
     }
