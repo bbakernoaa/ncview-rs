@@ -558,6 +558,7 @@ fn resolve_chunk_key(
 }
 
 #[allow(
+    unknown_lints,
     clippy::manual_slice_size_calculation,
     clippy::chunks_exact_to_as_chunks
 )]
