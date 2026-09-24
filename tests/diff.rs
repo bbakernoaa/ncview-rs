@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use ndarray::Array2;
 use ncview_rs::app::{AppState, ScaleMode, absolute_slice_limits};
 use ncview_rs::data::diff::DiffSource;
 use ncview_rs::data::slice::{Bounds, Slice2D, SliceRequest, Validity};
-use ncview_rs::data::{
-    AxisRole, DataSource, DatasetFormat, DatasetMetadata, Dimension, Variable,
-};
+use ncview_rs::data::{AxisRole, DataSource, DatasetFormat, DatasetMetadata, Dimension, Variable};
 use ncview_rs::render::colors::{ColorMapper, Palette};
+use ndarray::Array2;
 
 struct MockSource {
     metadata: DatasetMetadata,
@@ -25,7 +23,12 @@ impl DataSource for MockSource {
     }
 }
 
-fn create_metadata(path: &str, var_name: &str, dim_names: &[&str], shape: (usize, usize)) -> DatasetMetadata {
+fn create_metadata(
+    path: &str,
+    var_name: &str,
+    dim_names: &[&str],
+    shape: (usize, usize),
+) -> DatasetMetadata {
     let dimensions = vec![
         Dimension {
             name: dim_names[0].into(),
@@ -167,7 +170,13 @@ fn log_scale_diff_uses_absolute_differences() {
     assert_eq!(limits, (10.0, 100.0));
 
     let stats = slice.statistics.unwrap();
-    let mapper = ColorMapper::new(&Palette::CoolWarm, stats, Some(limits), ScaleMode::Log, true);
+    let mapper = ColorMapper::new(
+        &Palette::CoolWarm,
+        stats,
+        Some(limits),
+        ScaleMode::Log,
+        true,
+    );
 
     // -10.0 and +10.0 have same absolute difference (10.0), so mapper returns identical colors
     let col_neg10 = mapper.map_value(-10.0);

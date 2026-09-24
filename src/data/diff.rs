@@ -130,9 +130,9 @@ impl DataSource for DiffSource {
             fixed_axes,
             Arc::clone(&cancelled),
         )?;
-        let slice2 = self.source2.read_slice_on_axes_cancellable(
-            request, row_axis, col_axis, fixed_axes, cancelled,
-        )?;
+        let slice2 = self
+            .source2
+            .read_slice_on_axes_cancellable(request, row_axis, col_axis, fixed_axes, cancelled)?;
 
         if slice1.values.dim() != slice2.values.dim() {
             return Err(NcvError::InvalidSlice(
@@ -151,7 +151,10 @@ impl DataSource for DiffSource {
                 let m1 = slice1.validity[(row, col)];
                 let m2 = slice2.validity[(row, col)];
 
-                if m1 == Validity::Finite && m2 == Validity::Finite && v1.is_finite() && v2.is_finite()
+                if m1 == Validity::Finite
+                    && m2 == Validity::Finite
+                    && v1.is_finite()
+                    && v2.is_finite()
                 {
                     diff_values[(row, col)] = v1 - v2;
                     diff_validity[(row, col)] = Validity::Finite;
@@ -163,9 +166,7 @@ impl DataSource for DiffSource {
 
         let mut diff_slice = Slice2D::new(diff_values, diff_validity, request.bounds)?;
         diff_slice.is_diff = true;
-        let coords = slice1
-            .coordinates
-            .or(slice2.coordinates);
+        let coords = slice1.coordinates.or(slice2.coordinates);
         Ok(if let Some(c) = coords {
             diff_slice.with_coordinates(c)
         } else {

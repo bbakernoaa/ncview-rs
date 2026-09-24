@@ -146,9 +146,15 @@ fn resolve_diff_inputs(cli: &Cli) -> Result<(Vec<String>, Vec<String>), String> 
     }
 
     for item in &cli.dataset {
-        if let Some(val) = item.strip_prefix("first=").or_else(|| item.strip_prefix("1=")) {
+        if let Some(val) = item
+            .strip_prefix("first=")
+            .or_else(|| item.strip_prefix("1="))
+        {
             set1_raw.push(val.to_string());
-        } else if let Some(val) = item.strip_prefix("second=").or_else(|| item.strip_prefix("2=")) {
+        } else if let Some(val) = item
+            .strip_prefix("second=")
+            .or_else(|| item.strip_prefix("2="))
+        {
             set2_raw.push(val.to_string());
         } else if set1_raw.is_empty() {
             set1_raw.push(item.clone());
@@ -511,16 +517,35 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let mut diff_labels = Vec::new();
 
         for i in 0..count {
-            let f1 = if set1_files.len() == 1 { &set1_files[0] } else { &set1_files[i] };
-            let f2 = if set2_files.len() == 1 { &set2_files[0] } else { &set2_files[i] };
+            let f1 = if set1_files.len() == 1 {
+                &set1_files[0]
+            } else {
+                &set1_files[i]
+            };
+            let f2 = if set2_files.len() == 1 {
+                &set2_files[0]
+            } else {
+                &set2_files[i]
+            };
 
-            let idx1 = datasets.iter().position(|d| d == f1).ok_or_else(|| format!("source {f1} failed to load"))?;
-            let idx2 = datasets.iter().position(|d| d == f2).ok_or_else(|| format!("source {f2} failed to load"))?;
+            let idx1 = datasets
+                .iter()
+                .position(|d| d == f1)
+                .ok_or_else(|| format!("source {f1} failed to load"))?;
+            let idx2 = datasets
+                .iter()
+                .position(|d| d == f2)
+                .ok_or_else(|| format!("source {f2} failed to load"))?;
 
-            let s1 = pending_sources[idx1].clone().ok_or_else(|| format!("source {f1} failed to load"))?;
-            let s2 = pending_sources[idx2].clone().ok_or_else(|| format!("source {f2} failed to load"))?;
+            let s1 = pending_sources[idx1]
+                .clone()
+                .ok_or_else(|| format!("source {f1} failed to load"))?;
+            let s2 = pending_sources[idx2]
+                .clone()
+                .ok_or_else(|| format!("source {f2} failed to load"))?;
 
-            let diff_source: Arc<dyn data::DataSource> = Arc::new(data::diff::DiffSource::new(s1, s2));
+            let diff_source: Arc<dyn data::DataSource> =
+                Arc::new(data::diff::DiffSource::new(s1, s2));
             diff_sources.push(diff_source);
             diff_labels.push(format!("diff: {f1} vs {f2}"));
         }
