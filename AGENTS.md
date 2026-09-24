@@ -4,7 +4,17 @@
 
 ---
 
-## 1. Testing Guidelines
+## 1. Test-Driven Development (TDD) Workflow
+
+* **Practice TDD:** When adding new features, format parsers, or fixing bugs, write or update failing tests *first* before implementing the solution:
+  1. **Red:** Write a failing test in `tests/` or a module `#[cfg(test)]` block that specifies the expected behavior, edge cases, or bug condition.
+  2. **Green:** Implement the minimal code required to make the test pass cleanly.
+  3. **Refactor:** Clean up the implementation while ensuring all unit and integration tests remain passing and clippy checks pass.
+* **Test Isolation:** Ensure tests are deterministic, standalone, and cleanup temporary test artifacts using `tempfile`.
+
+---
+
+## 2. Testing Guidelines
 
 * **Run Full Test Suite:** Before submitting changes, always run:
   ```bash
@@ -16,11 +26,11 @@
   ```
 * **Test Coverage:**
   * Any new feature, data reader, or bug fix must include automated tests in `tests/` or unit tests within module `mod tests`.
-  * Test edge cases such as empty dimensions, boundary conditions, sub-region bounds, and missing chunks/fill values.
+  * Test edge cases such as empty dimensions, boundary conditions, sub-region bounds, multi-chunk spanning, endianness, and missing chunks/fill values.
 
 ---
 
-## 2. Formatting and Linting
+## 3. Formatting and Linting
 
 * **Code Formatting:** Code must be formatted with `rustfmt`:
   ```bash
@@ -36,7 +46,7 @@
 
 ---
 
-## 3. Semantic Versioning, Commit, and PR Conventions
+## 4. Semantic Versioning, Commit, and PR Conventions
 
 Commit messages and PR titles must adhere to [Conventional Commits](https://www.conventionalcommits.org/) to support semantic versioning (`MAJOR.MINOR.PATCH`):
 
@@ -54,11 +64,11 @@ Commit messages and PR titles must adhere to [Conventional Commits](https://www.
 ### Examples:
 * `feat: Add support for VirtualiZarr and Icechunk reference manifests`
 * `fix: Correct multi-chunk stride calculation for sub-region slice requests`
-* `docs: Add AGENTS.md workflow and testing guidelines`
+* `docs: Add TDD, testing, and semantic versioning guidelines to AGENTS.md`
 
 ---
 
-## 4. Best Practices for Rust Code in ncview-rs
+## 5. Best Practices for Rust Code in ncview-rs
 
 1. **Safety and Robustness:**
    * Prefer safe Rust. Avoid `unsafe` blocks unless strictly necessary and thoroughly documented.
