@@ -40,6 +40,7 @@ pub enum Palette {
     Cividis,
     Cool,
     Warm,
+    CoolWarm,
     Cubehelix,
     Spectral,
     /// A palette loaded from a three-column `.ncmap` file.  The format is
@@ -65,7 +66,46 @@ pub enum PaletteSampler<'a> {
         map: &'a ScientificColorMap,
         reversed: bool,
     },
+    ColorList {
+        colors: &'static [[u8; 3]],
+        reversed: bool,
+    },
 }
+
+const COOLWARM_COLORS: &[[u8; 3]] = &[
+    [59, 76, 192],
+    [68, 90, 204],
+    [77, 104, 215],
+    [87, 117, 225],
+    [98, 130, 234],
+    [108, 142, 241],
+    [119, 154, 247],
+    [130, 165, 251],
+    [141, 176, 254],
+    [152, 185, 255],
+    [163, 194, 255],
+    [174, 201, 253],
+    [184, 208, 249],
+    [194, 213, 244],
+    [204, 217, 238],
+    [213, 220, 230],
+    [221, 221, 221],
+    [229, 216, 209],
+    [236, 210, 197],
+    [241, 202, 185],
+    [245, 193, 172],
+    [247, 182, 158],
+    [247, 171, 144],
+    [246, 158, 129],
+    [243, 144, 114],
+    [238, 128, 99],
+    [231, 111, 84],
+    [223, 92, 69],
+    [213, 71, 54],
+    [202, 47, 39],
+    [189, 12, 25],
+    [180, 4, 38],
+];
 
 impl<'a> PaletteSampler<'a> {
     pub fn new(palette: &'a Palette) -> Self {
@@ -75,12 +115,17 @@ impl<'a> PaletteSampler<'a> {
             reversed = !reversed;
             curr = inner;
         }
-        if let Some(gradient) = curr.gradient() {
-            Self::Gradient { gradient, reversed }
-        } else if let Palette::Custom(map) = curr {
+        if let Palette::Custom(map) = curr {
             Self::Custom { map, reversed }
+        } else if matches!(curr, Palette::CoolWarm) {
+            Self::ColorList {
+                colors: COOLWARM_COLORS,
+                reversed,
+            }
+        } else if let Some(gradient) = curr.gradient() {
+            Self::Gradient { gradient, reversed }
         } else {
-            unreachable!("all non-custom palettes have a gradient")
+            unreachable!("all non-custom palettes have a sampler")
         }
     }
 
@@ -119,6 +164,26 @@ impl<'a> PaletteSampler<'a> {
                     (a[2] as f64 + (b[2] as f64 - a[2] as f64) * fraction).round() as u8,
                 ]
             }
+            Self::ColorList { colors, .. } => {
+                if colors.is_empty() {
+                    return [0, 0, 0];
+                }
+                let max_idx = colors.len().saturating_sub(1);
+                let scaled = pos * (max_idx as f64);
+                let lower = scaled.floor() as usize;
+                let upper = scaled.ceil() as usize;
+                if lower == upper {
+                    return colors[lower];
+                }
+                let fraction = scaled - lower as f64;
+                let a = colors[lower];
+                let b = colors[upper];
+                [
+                    (a[0] as f64 + (b[0] as f64 - a[0] as f64) * fraction).round() as u8,
+                    (a[1] as f64 + (b[1] as f64 - a[1] as f64) * fraction).round() as u8,
+                    (a[2] as f64 + (b[2] as f64 - a[2] as f64) * fraction).round() as u8,
+                ]
+            }
         }
     }
 }
@@ -142,6 +207,7 @@ impl Palette {
             Self::Cividis => "Cividis",
             Self::Cool => "Cool",
             Self::Warm => "Warm",
+            Self::CoolWarm => "CoolWarm",
             Self::Cubehelix => "Cubehelix",
             Self::Spectral => "Spectral",
             Self::Custom(map) => &map.name,
@@ -169,6 +235,7 @@ impl Palette {
             Self::Cividis => Some(CIVIDIS),
             Self::Cool => Some(COOL),
             Self::Warm => Some(WARM),
+            Self::CoolWarm => None,
             Self::Cubehelix => Some(CUBEHELIX),
             Self::Spectral => Some(SPECTRAL),
             Self::Custom(_) => None,
@@ -185,7 +252,8 @@ impl Palette {
             Self::Magma => Self::Cividis,
             Self::Cividis => Self::Cool,
             Self::Cool => Self::Warm,
-            Self::Warm => Self::Cubehelix,
+            Self::Warm => Self::CoolWarm,
+            Self::CoolWarm => Self::Cubehelix,
             Self::Cubehelix => Self::Spectral,
             Self::Spectral => Self::Viridis,
             Self::Custom(_) => Self::Viridis,
@@ -208,6 +276,7 @@ pub struct ColorMapper<'a> {
     min: f64,
     inv_range: f64,
     scale: ScaleMode,
+    is_diff: bool,
     raw_min: f64,
     raw_max: f64,
     lut: [[u8; 3]; 256],
@@ -219,6 +288,7 @@ impl<'a> ColorMapper<'a> {
         stats: crate::data::slice::Statistics,
         limits: Option<(f64, f64)>,
         scale: ScaleMode,
+        is_diff: bool,
     ) -> Self {
         let sampler = palette.sampler();
         let (raw_min, raw_max) = limits.unwrap_or((stats.min, stats.max));
@@ -249,6 +319,7 @@ impl<'a> ColorMapper<'a> {
             min,
             inv_range,
             scale,
+            is_diff,
             raw_min,
             raw_max,
             lut,
@@ -258,10 +329,11 @@ impl<'a> ColorMapper<'a> {
     #[inline]
     pub fn map_value(&self, value: f64) -> [u8; 3] {
         if self.scale == ScaleMode::Log {
-            if value <= 0.0 || self.raw_min <= 0.0 || self.raw_max <= 0.0 {
+            let val_to_log = if self.is_diff { value.abs() } else { value };
+            if val_to_log <= 0.0 || self.raw_min <= 0.0 || self.raw_max <= 0.0 {
                 return [80, 80, 80];
             }
-            let val = value.log10();
+            let val = val_to_log.log10();
             let norm = normalize_fast(val, self.min, self.inv_range);
             let idx = (norm * 255.0).round() as usize;
             self.lut[idx.min(255)]
@@ -324,6 +396,7 @@ pub fn discover_colormaps() -> Vec<Palette> {
         Palette::Cividis,
         Palette::Cool,
         Palette::Warm,
+        Palette::CoolWarm,
         Palette::Cubehelix,
         Palette::Spectral,
     ];
@@ -470,7 +543,7 @@ pub fn color_for_with_limits_and_filter_and_scale(
         mean: 0.5,
         finite_count: 0,
     });
-    color_for_value_with_limits_and_filter_and_scale(
+    color_for_value_with_limits_and_filter_and_scale_and_diff(
         slice.values[(row, col)],
         slice.validity[(row, col)],
         stats,
@@ -478,6 +551,7 @@ pub fn color_for_with_limits_and_filter_and_scale(
         limits,
         filter,
         scale,
+        slice.is_diff,
     )
 }
 
@@ -490,6 +564,22 @@ pub fn color_for_value_with_limits_and_filter_and_scale(
     filter: Option<(f64, f64)>,
     scale: ScaleMode,
 ) -> [u8; 3] {
+    color_for_value_with_limits_and_filter_and_scale_and_diff(
+        value, validity, stats, palette, limits, filter, scale, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn color_for_value_with_limits_and_filter_and_scale_and_diff(
+    value: f64,
+    validity: Validity,
+    stats: crate::data::slice::Statistics,
+    palette: &Palette,
+    limits: Option<(f64, f64)>,
+    filter: Option<(f64, f64)>,
+    scale: ScaleMode,
+    is_diff: bool,
+) -> [u8; 3] {
     if validity != Validity::Finite || !value.is_finite() {
         return [80, 80, 80];
     }
@@ -497,14 +587,15 @@ pub fn color_for_value_with_limits_and_filter_and_scale(
         return [30, 30, 46];
     }
     let (min, max) = limits.unwrap_or((stats.min, stats.max));
-    if scale == ScaleMode::Log && (value <= 0.0 || min <= 0.0 || max <= 0.0) {
+    let val_to_log = if is_diff { value.abs() } else { value };
+    if scale == ScaleMode::Log && (val_to_log <= 0.0 || min <= 0.0 || max <= 0.0) {
         return [80, 80, 80];
     }
-    let (value, min, max) = match scale {
+    let (val_to_map, min, max) = match scale {
         ScaleMode::Linear => (value, min, max),
-        ScaleMode::Log => (value.log10(), min.log10(), max.log10()),
+        ScaleMode::Log => (val_to_log.log10(), min.log10(), max.log10()),
     };
-    palette.sample(normalize(value, min, max))
+    palette.sample(normalize(val_to_map, min, max))
 }
 
 pub fn legend(palette: Palette, min: f64, max: f64) -> [(String, [u8; 3]); 3] {

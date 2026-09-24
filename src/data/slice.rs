@@ -225,6 +225,7 @@ pub struct Slice2D {
     pub source_bounds: Bounds,
     pub statistics: Option<Statistics>,
     pub coordinates: Option<CoordinateGrid>,
+    pub is_diff: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -332,6 +333,7 @@ impl Slice2D {
             source_bounds,
             statistics,
             coordinates: None,
+            is_diff: false,
         })
     }
 

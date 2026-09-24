@@ -883,6 +883,7 @@ mod tests {
                 finite_count: 4,
             }),
             coordinates: None,
+            is_diff: false,
         };
         let rendered = render_sidebar_with(None, &empty_metadata(), Some(&slice));
         // Each statistic is labelled on its own line rather than packed onto
