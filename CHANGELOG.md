@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.5](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.4...v0.5.5) - 2026-09-24
+
+### Other
+
+- Add support for dataset diff viewing (--diff) ([#28](https://github.com/bbakernoaa/ncview-rs/pull/28))
+
 ## [0.5.4](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.3...v0.5.4) - 2026-09-24
 
 ### Added
