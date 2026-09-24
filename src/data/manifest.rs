@@ -557,7 +557,10 @@ fn resolve_chunk_key(
     None
 }
 
-#[allow(clippy::manual_slice_size_calculation)]
+#[allow(
+    clippy::manual_slice_size_calculation,
+    clippy::chunks_exact_to_as_chunks
+)]
 fn decode_numeric_chunk(bytes: &[u8], dtype: &str) -> Result<Vec<f64>> {
     let dt = dtype.trim();
     if dt.contains("f4") || dt.contains("float32") || dt.ends_with("f") {
