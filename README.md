@@ -139,7 +139,12 @@ with an actionable diagnostic.
 Explicit S3, GCS, and Azure Blob locations are accepted with the forms
 `s3://bucket/key`, `gs://bucket/key`, `az://container/key`, and
 `abfs[s]://container@account.endpoint/key`. Provider credentials are read from the ambient
-provider configuration; secrets are not accepted in arguments or persisted. The terminal starts
+provider configuration; secrets are not accepted in arguments or persisted. When no ambient
+credentials are configured and the cloud instance metadata service is unreachable (for example
+on a laptop), public buckets such as `s3://noaa-gefs-pds/...` are read with anonymous
+(credential-free) access instead of stalling on metadata-endpoint retries. Set
+`NCVIEW_ANONYMOUS_ACCESS=1` to force this mode, or `0` to keep signed-only access.
+The terminal starts
 before remote opening completes, and remote GRIB2 objects use bounded `HEAD`/range requests plus
 an optional colocated `.idx` sidecar. A large unindexed GRIB2 object is refused rather than
 silently downloaded in full.
@@ -173,6 +178,7 @@ The most useful runtime settings are environment variables:
 | `NCVIEW_IMAGE_PROTOCOL` | `kitty`, `sixel`, `iterm2`, `cells` | Override graphics capability detection |
 | `NCVIEW_SCIENTIFIC_RENDERING` | `1`/`0` | Keep scientific nearest-neighbor rendering enabled or allow interpolation |
 | `NCVIEW_IMAGE_FILTER` | `nearest`, `lanczos3`, `catmull-rom`, `triangle`, `gaussian` | Select the unlocked image filter |
+| `NCVIEW_ANONYMOUS_ACCESS` | `1`/`0` | Force or disable credential-free access for public S3/GCS/Azure objects |
 | `NCVIEW_LAND_DETAIL` | `110m`/`50m`/`10m`/`auto` | Select coastline resolution after enabling `b` |
 | `NCVIEW_COLORMAPS` | directory | Add `.ncmap` files to the palette catalog |
 | `NCVIEW_EXPORT_DIR` | directory | Choose where `e` writes exports |
