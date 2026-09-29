@@ -3,13 +3,15 @@
 [![CI](https://github.com/bbakernoaa/ncview-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/bbakernoaa/ncview-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`ncv` is a terminal-native, read-only scientific viewer for local NetCDF-4 files stored in HDF5.
+`ncv` is a terminal-native, read-only scientific viewer for local NetCDF-4 files stored in HDF5 and GRIB2.
 It is designed for SSH sessions on HPC systems and is distributed as a single Rust binary with no
 native NetCDF/HDF5 runtime dependency.
 
 The project focuses on fast inspection rather than data editing: slice a variable, inspect exact
 values, compare time/depth frames, and export a publication-ready view without leaving the
 terminal.
+
+<img width="2147" height="1085" alt="image" src="https://github.com/user-attachments/assets/7e80f3dc-0b33-4a71-8bbd-e5ea8a59501a" />
 
 ## Quick start
 
@@ -34,6 +36,9 @@ ncv path/to/data.nc
 The release workflow publishes Linux x86_64, a glibc-independent static Linux x86_64 (musl),
 macOS arm64, and Windows x86_64 archives for tags named `v*`. Each release includes a
 `SHA256SUMS` file. On older HPC distributions, use `ncv-linux-x86_64-musl.tar.gz`.
+
+
+
 
 ## Screenshots
 
