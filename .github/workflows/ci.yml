@@ -18,10 +18,10 @@ env:
 jobs:
   quality:
     name: Format, lint, and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -39,7 +39,7 @@ jobs:
       matrix:
         include:
           - name: Linux x86_64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - name: macOS arm64
             os: macos-latest
@@ -49,7 +49,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -89,20 +89,20 @@ jobs:
 
   dependency-audit:
     name: Dependency audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
 
   musl:
     name: Build static Linux x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build x86_64-unknown-linux-musl
         shell: bash
         run: |
