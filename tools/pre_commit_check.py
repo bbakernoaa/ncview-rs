@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
 
 
@@ -37,6 +38,19 @@ def main(paths: list[str]) -> int:
         for violation in violations:
             print(f"  - {violation}", file=sys.stderr)
         return 1
+
+    repo_root = Path(__file__).resolve().parent.parent
+    validator = repo_root / "tools" / "docs" / "validate_docs.py"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(validator), str(repo_root)],
+            check=False,
+        )
+    except OSError as error:
+        print(f"pre-commit could not run docs validator: {error}", file=sys.stderr)
+        return 2
+    if result.returncode != 0:
+        return result.returncode
     return 0
 
 

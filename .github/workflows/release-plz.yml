@@ -15,7 +15,7 @@ jobs:
   # Cargo.toml and CHANGELOG.md according to Conventional Commits.
   release-pr:
     name: Open release PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Skip on forks so PRs aren't opened against the wrong repository.
     if: github.repository_owner == 'bbakernoaa'
     concurrency:
@@ -73,7 +73,7 @@ jobs:
   # crates.io token is needed because the package runs in git-only mode.
   release:
     name: Tag release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.repository_owner == 'bbakernoaa'
     concurrency:
       group: release-plz-release-${{ github.ref }}
