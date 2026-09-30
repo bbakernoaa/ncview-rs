@@ -16,6 +16,8 @@ The complete user guide — quickstart, how-to guides, keyboard/CLI/environment 
 explanations of data fidelity, terminal protocols, and remote access — is published at
 **<https://bbakernoaa.github.io/ncview-rs/>** (source in [`docs/`](docs/)).
 
+<img width="2147" height="1085" alt="image" src="https://github.com/user-attachments/assets/7e80f3dc-0b33-4a71-8bbd-e5ea8a59501a" />
+
 ## Quick start
 
 Download a platform archive from the repository's [GitHub Releases](https://github.com/bbakernoaa/ncview-rs/releases) page, unpack it, and put `ncv`
@@ -39,6 +41,9 @@ ncv path/to/data.nc
 The release workflow publishes Linux x86_64, a glibc-independent static Linux x86_64 (musl),
 macOS arm64, and Windows x86_64 archives for tags named `v*`. Each release includes a
 `SHA256SUMS` file. On older HPC distributions, use `ncv-linux-x86_64-musl.tar.gz`.
+
+
+
 
 ## Screenshots
 
