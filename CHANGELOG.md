@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.8](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.7...v0.5.8) - 2026-09-30
+
+### Added
+
+- add mkBook documentation site  ([#34](https://github.com/bbakernoaa/ncview-rs/pull/34))
+
 ## [0.5.7](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.6...v0.5.7) - 2026-09-29
 
 ### Other
