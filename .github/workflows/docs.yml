@@ -55,7 +55,7 @@ jobs:
           python-version: "3.12"
 
       - name: Cache pinned doc tooling
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: tool-cache
         with:
           path: ${{ github.workspace }}/.docs-tools
