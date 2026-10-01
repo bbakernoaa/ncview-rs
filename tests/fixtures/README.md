@@ -20,6 +20,20 @@ regression test reads both variables and checks their 4×5 slices. Regenerate it
 ncgen -4 -o tests/fixtures/coards-float32.nc4 tests/fixtures/coards-float32.cdl
 ```
 
+## Raw-Dimension Display Fixture
+
+Feature 007 builds deterministic synthetic NetCDF-4 fixtures in temporary directories rather than
+requiring the local VIIRS product file. The raw 2D, VIIRS-like 3D, and 4D test inputs are defined in
+`tests/raw_dimension_view.rs`. Values in the 3D case are `row * 100 + column * 10 + kernel`, so
+the kernel planes are independently observable. These fixtures have no geographic coordinate
+variables; height and width are the plane axes and the remaining dimension is selectable.
+
+An optional integration regression reads the real `VIIRS_BRDF_LSA_NBAR_2025057_h19v19.nc` from
+the repository root when supplied locally. It is not copied, modified, or required in CI. A packed
+synthetic end-to-end fixture is not currently committed because the lightweight writer cannot
+create it and the current reader does not expose the packed primary variable in the attempted
+`ncgen` output; packed decoding remains covered separately by decoder fidelity tests.
+
 Generated fixture hashes (SHA-256):
 
 - `regular.nc4`: `9759f4bc44bc326c93dc0f8aeefda44f945a2673f207d7696f61c901d5fbcd48`

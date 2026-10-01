@@ -7,12 +7,137 @@ use ncview_rs::{
     data::remote_hdf5::RemoteByteSource,
     storage::{location::SourceLocation, object_store::RemoteStore},
 };
+use oxinetcdf::{NcFileWriter, NcType};
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
+}
+
+#[test]
+fn range_backed_raw_dimensions_select_named_plane_and_fixed_kernel() {
+    let directory = tempfile::tempdir().unwrap();
+    let local_path = directory.path().join("raw-dimensions.nc4");
+    let mut writer = NcFileWriter::new();
+    let rows = writer.def_dim("SAT_Tile_Height", 3).unwrap();
+    let columns = writer.def_dim("SAT_Tile_Width", 4).unwrap();
+    let kernels = writer.def_dim("Kernel_Num", 3).unwrap();
+    let field = writer
+        .def_var(
+            "BRDF_Parameter_Band1",
+            &[rows, columns, kernels],
+            NcType::Float64,
+        )
+        .unwrap();
+    writer
+        .put_var_f64(
+            field,
+            &(0..3)
+                .flat_map(|row| {
+                    (0..4).flat_map(move |col| {
+                        (0..3).map(move |kernel| (kernel * 100 + row * 10 + col) as f64)
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    writer.close(&local_path).unwrap();
+    let local = data::open(&local_path).unwrap();
+    let bytes = std::fs::read(&local_path).unwrap();
+    let store = Arc::new(InMemory::new());
+    runtime().block_on(async {
+        store
+            .put(
+                &ObjectPath::from("raw-dimensions.nc4"),
+                PutPayload::from(bytes),
+            )
+            .await
+            .unwrap();
+    });
+    let remote = data::remote::open_remote_with_store(
+        SourceLocation::parse("s3://bucket/raw-dimensions.nc4").unwrap(),
+        store,
+    )
+    .unwrap();
+    let request = data::slice::SliceRequest {
+        variable: "BRDF_Parameter_Band1".into(),
+        time: 0,
+        depth: 0,
+        bounds: data::slice::Bounds::new(0, 2, 0, 3).unwrap(),
+    };
+    let fixed = [("Kernel_Num".into(), 2)];
+    let local_slice = local
+        .read_slice_on_axes(
+            &request,
+            Some("SAT_Tile_Height"),
+            Some("SAT_Tile_Width"),
+            &fixed,
+        )
+        .unwrap();
+    let remote_slice = remote
+        .read_slice_on_axes(
+            &request,
+            Some("SAT_Tile_Height"),
+            Some("SAT_Tile_Width"),
+            &fixed,
+        )
+        .unwrap();
+    assert_eq!(remote.metadata().dimensions, local.metadata().dimensions);
+    assert_eq!(remote_slice.values, local_slice.values);
+    assert_eq!(remote_slice.validity, local_slice.validity);
+    assert_eq!(local_slice.value_at_source(1, 2), Some(212.0));
+    assert_eq!(remote_slice.value_at_source(1, 2), Some(212.0));
+    assert_eq!(remote_slice.validity, local_slice.validity);
+}
+
+#[test]
+fn supplied_viirs_packed_raw_dimension_slice_matches_range_backed_source() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("VIIRS_BRDF_LSA_NBAR_2025057_h19v19.nc");
+    if !path.exists() {
+        return;
+    }
+    let local = data::open(&path).unwrap();
+    let variable = local
+        .metadata()
+        .variables
+        .iter()
+        .find(|variable| variable.name == "BRDF_Parameter_Band1")
+        .unwrap();
+    let row_axis = variable.dimensions[0].clone();
+    let col_axis = variable.dimensions[1].clone();
+    let fixed = variable.dimensions[2..]
+        .iter()
+        .map(|name| (name.clone(), 2))
+        .collect::<Vec<_>>();
+    let bytes = std::fs::read(&path).unwrap();
+    let store = Arc::new(InMemory::new());
+    runtime().block_on(async {
+        store
+            .put(&ObjectPath::from("viirs.nc"), PutPayload::from(bytes))
+            .await
+            .unwrap();
+    });
+    let remote = data::remote::open_remote_with_store(
+        SourceLocation::parse("s3://bucket/viirs.nc").unwrap(),
+        store,
+    )
+    .unwrap();
+    let request = data::slice::SliceRequest {
+        variable: variable.name.clone(),
+        time: 0,
+        depth: 0,
+        bounds: data::slice::Bounds::new(0, 300, 0, 600).unwrap(),
+    };
+    let local_slice = local
+        .read_slice_on_axes(&request, Some(&row_axis), Some(&col_axis), &fixed)
+        .unwrap();
+    let remote_slice = remote
+        .read_slice_on_axes(&request, Some(&row_axis), Some(&col_axis), &fixed)
+        .unwrap();
+    assert_eq!(remote_slice.values, local_slice.values);
+    assert_eq!(remote_slice.validity, local_slice.validity);
 }
 
 #[test]

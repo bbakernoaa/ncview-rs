@@ -4,6 +4,7 @@ use crate::app::{
     ViewModel, palette_matches,
 };
 use crate::data::{DatasetMetadata, Variable};
+use crate::render::colors::Palette;
 use crate::render::protocol::GraphicsRenderer;
 use ratatui::{
     Frame,
@@ -40,6 +41,7 @@ pub fn render(
         Overlay::TimeSeries => "Time series",
         Overlay::Plot => "Plot",
         Overlay::CommandPalette => "Command Palette",
+        Overlay::PalettePicker => "Colormap",
     };
     let message = match overlay {
         Overlay::Limits => "Type to replace the selected value; Tab switches fields",
@@ -48,23 +50,25 @@ pub fn render(
         Overlay::TimeSeries => "Values across the time dimension",
         Overlay::Plot => "Choose a plot and its axes",
         Overlay::CommandPalette => "Type to filter commands; Enter runs the selected action",
+        Overlay::PalettePicker => "Choose a colormap; Enter applies it",
     };
-    let width = if matches!(overlay, Overlay::CommandPalette | Overlay::Plot) {
+    let width = if matches!(
+        overlay,
+        Overlay::CommandPalette | Overlay::Plot | Overlay::PalettePicker
+    ) {
         area.width.saturating_mul(3) / 4
     } else {
         area.width.saturating_mul(3) / 5
     };
-    let height = if matches!(overlay, Overlay::CommandPalette | Overlay::Plot) {
+    let height = if matches!(
+        overlay,
+        Overlay::CommandPalette | Overlay::Plot | Overlay::PalettePicker
+    ) {
         area.height.saturating_mul(3) / 5
     } else {
         area.height.saturating_mul(2) / 5
     };
-    let popup = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    };
+    let popup = overlay_popup_rect(area, overlay, width, height);
     let shadow = Rect {
         x: popup.x.saturating_add(1),
         y: popup.y.saturating_add(1),
@@ -99,6 +103,8 @@ pub fn render(
             Paragraph::new(lines.join("\n")).block(popup_panel(title, theme::MAUVE)),
             popup,
         );
+    } else if matches!(overlay, Overlay::PalettePicker) {
+        render_palette_picker(frame, popup, title, view);
     } else if matches!(overlay, Overlay::Limits | Overlay::Filter) {
         let draft = view.limit_draft.as_ref();
         let min = draft.map_or("".to_string(), |draft| draft.min.clone());
@@ -188,6 +194,121 @@ pub fn render(
             popup,
         );
     }
+}
+
+fn overlay_popup_rect(area: Rect, overlay: Overlay, width: u16, height: u16) -> Rect {
+    if overlay == Overlay::PalettePicker && (area.width < 54 || area.height < 12) {
+        return area;
+    }
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+pub fn picker_popup_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(3) / 4;
+    let height = area.height.saturating_mul(3) / 5;
+    overlay_popup_rect(area, Overlay::PalettePicker, width, height)
+}
+
+fn render_palette_picker(frame: &mut Frame, popup: Rect, title: &str, view: &ViewModel) {
+    let block = popup_panel(title, theme::MAUVE);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let focused = view
+        .palette_picker
+        .as_ref()
+        .map(|picker| &picker.focused_palette);
+    let focus_index = focused
+        .and_then(|palette| {
+            view.palette_catalog
+                .iter()
+                .position(|item| palette_identity_eq(item, palette))
+        })
+        .unwrap_or(0);
+    let compact = inner.width < 54 || inner.height < 7;
+    let (list_area, preview_area, instruction_area) = if compact {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(2)])
+            .split(inner);
+        (sections[0], None, sections[1])
+    } else {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(2),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        (sections[0], Some(sections[1]), sections[2])
+    };
+    let first = visible_palette_start(
+        view.palette_catalog.len(),
+        focus_index,
+        usize::from(list_area.height),
+    );
+    let end = first
+        .saturating_add(usize::from(list_area.height))
+        .min(view.palette_catalog.len());
+    let list = view
+        .palette_catalog
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(end.saturating_sub(first))
+        .map(|(_, palette)| {
+            let is_focused = focused.is_some_and(|focused| palette_identity_eq(palette, focused));
+            let is_applied = palette_identity_eq(palette, &view.palette);
+            let marker = if is_focused { ">" } else { " " };
+            let state = match (is_applied, is_focused) {
+                (true, true) => "applied, focused",
+                (true, false) => "applied",
+                (false, true) => "focused",
+                (false, false) => "",
+            };
+            let reversed = is_focused && focused.is_some_and(|focused| focused.is_reversed());
+            format!(
+                "{marker} {:<24} {state}{}",
+                palette.name(),
+                if reversed { ", reversed" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>();
+    let list = if list.is_empty() {
+        vec!["No colormaps available".into()]
+    } else {
+        list
+    };
+    frame.render_widget(
+        Paragraph::new(list.join("\n")).wrap(Wrap { trim: true }),
+        list_area,
+    );
+    if let (Some(focused), Some(preview_area)) = (focused, preview_area) {
+        super::colorbar::render_preview(frame, preview_area, focused, view.limits, view.scale_mode);
+    }
+    let instructions = if compact {
+        "↑↓ browse  Enter apply\nEsc cancel  v reverse"
+    } else {
+        "↑↓ choose   v reverse   Enter apply   Esc cancel"
+    };
+    frame.render_widget(Paragraph::new(instructions), instruction_area);
+}
+
+fn visible_palette_start(total: usize, focus: usize, visible: usize) -> usize {
+    if total <= visible || visible == 0 {
+        0
+    } else {
+        focus.saturating_sub(visible / 2).min(total - visible)
+    }
+}
+
+fn palette_identity_eq(left: &Palette, right: &Palette) -> bool {
+    left.name() == right.name()
 }
 
 fn render_plot(
@@ -447,4 +568,129 @@ fn visible_window_start(entries: &[Vec<Line<'_>>], selected: usize, height: usiz
         used += entries[start].len();
     }
     start
+}
+
+#[cfg(test)]
+mod palette_picker_tests {
+    use super::render;
+    use crate::{
+        app::{AppState, Overlay, PalettePickerState},
+        data::{DatasetFormat, DatasetMetadata},
+        render::colors::{Palette, ScaleMode},
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn picker_popup_shows_applied_and_focused_palette_preview_and_controls() {
+        let mut state = AppState::default();
+        state.view.palette = Palette::Viridis;
+        state.view.palette_catalog = vec![Palette::Viridis, Palette::Plasma];
+        state.view.palette_picker = Some(PalettePickerState {
+            focused_palette: Palette::Plasma,
+        });
+        state.view.overlay = Some(Overlay::PalettePicker);
+        state.view.limits = Some((0.0, 10.0));
+        state.view.scale_mode = ScaleMode::Linear;
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<String>();
+        assert!(text.contains("Viridis"));
+        assert!(text.contains("Plasma"));
+        assert!(text.contains("applied"));
+        assert!(text.contains("focused"));
+        assert!(text.contains("Enter"));
+        assert!(text.contains("Esc"));
+        assert!(text.contains("v reverse"));
+        assert!(text.contains("linear"));
+        assert!(text.contains("10"));
+        let first_sample = Palette::Plasma.sample(0.0);
+        assert!(buffer.content().iter().any(|cell| {
+            cell.style().bg
+                == Some(ratatui::style::Color::Rgb(
+                    first_sample[0],
+                    first_sample[1],
+                    first_sample[2],
+                ))
+        }));
+    }
+
+    #[test]
+    fn long_picker_catalog_scrolls_focus_into_view_and_small_popup_keeps_text_controls() {
+        use crate::render::colors::ScientificColorMap;
+        use std::sync::Arc;
+
+        let choices = (0..24)
+            .map(|index| {
+                Palette::Custom(Arc::new(ScientificColorMap {
+                    name: format!("Choice{index:02}"),
+                    colors: vec![[12, 34, 56], [200, 201, 202]],
+                }))
+            })
+            .collect::<Vec<_>>();
+        let mut state = AppState::default();
+        state.view.palette = choices[0].clone();
+        state.view.palette_catalog = choices.clone();
+        state.view.palette_picker = Some(PalettePickerState {
+            focused_palette: choices[20].clone(),
+        });
+        state.view.overlay = Some(Overlay::PalettePicker);
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+
+        let render_text = |width, height| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<String>();
+            let has_preview_color = buffer
+                .content()
+                .iter()
+                .any(|cell| cell.style().bg == Some(ratatui::style::Color::Rgb(12, 34, 56)));
+            (text, has_preview_color)
+        };
+
+        let (normal, normal_preview) = render_text(80, 16);
+        assert!(normal.contains("Choice20"));
+        assert!(normal.contains("focused"));
+        assert!(normal_preview);
+        let constrained_area = ratatui::layout::Rect::new(0, 0, 48, 9);
+        let popup = super::picker_popup_rect(constrained_area);
+        assert!(popup.width <= constrained_area.width);
+        assert!(popup.height <= constrained_area.height);
+        assert!(popup.x + popup.width <= constrained_area.width);
+        assert!(popup.y + popup.height <= constrained_area.height);
+        let (constrained, constrained_preview) = render_text(48, 9);
+        assert!(constrained.contains("Choice20"));
+        assert!(constrained.contains("Enter"));
+        assert!(constrained.contains("Esc"));
+        assert!(constrained.contains("v reverse"));
+        assert!(!constrained_preview);
+    }
 }
