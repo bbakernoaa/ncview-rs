@@ -42,6 +42,15 @@ The release workflow publishes Linux x86_64, a glibc-independent static Linux x8
 macOS arm64, and Windows x86_64 archives for tags named `v*`. Each release includes a
 `SHA256SUMS` file. On older HPC distributions, use `ncv-linux-x86_64-musl.tar.gz`.
 
+Derive new fields across files with the VERDI-style formula editor (press `=`), or headlessly:
+
+```bash
+ncv --formula "dO3 = O3[1] - O3[2]" base.nc sensitivity.nc
+ncv --batch --export-dir plots --formula "avg = mean(O3)" base.nc
+```
+
+See [Derive variables with formulas](docs/how-to/derive-variables-with-formulas.md).
+
 
 
 

@@ -129,6 +129,10 @@ pub enum Command {
     TickPlayback,
     PreviousFile,
     NextFile,
+    OpenFormulaEditor,
+    SubmitFormula,
+    FormulaMove(isize),
+    RemoveFormula,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +204,16 @@ pub struct ViewModel {
     pub scale_mode: ScaleMode,
     pub color_scale_scope: ColorScaleScope,
     pub is_diff: bool,
+    /// Expression being typed in the formula editor.
+    pub formula_draft: String,
+    /// Formulas defined this session, as entered (`name = expr` or `expr`).
+    pub formulas: Vec<String>,
+    pub formula_index: Option<usize>,
+    /// Labels of opened datasets, addressed in formulas as `NAME[n]`.
+    pub formula_datasets: Vec<String>,
+    /// Variable to select once the formula sources are rebuilt.
+    pub formula_request: Option<String>,
+    pub formulas_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +242,7 @@ pub enum Overlay {
     TimeSeries,
     Plot,
     CommandPalette,
+    Formula,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,9 +261,11 @@ impl ViewModel {
             InputMode::VariableSearch
         } else if let Some(overlay) = self.overlay {
             match overlay {
-                Overlay::Limits | Overlay::Filter | Overlay::Axis | Overlay::CommandPalette => {
-                    InputMode::TextOverlay(overlay)
-                }
+                Overlay::Limits
+                | Overlay::Filter
+                | Overlay::Axis
+                | Overlay::CommandPalette
+                | Overlay::Formula => InputMode::TextOverlay(overlay),
                 Overlay::Plot | Overlay::TimeSeries => InputMode::PlotOverlay,
             }
         } else if self.help_visible {
@@ -431,6 +448,12 @@ impl Default for ViewModel {
             scale_mode: ScaleMode::Linear,
             color_scale_scope: ColorScaleScope::CurrentView,
             is_diff: false,
+            formula_draft: String::new(),
+            formulas: Vec::new(),
+            formula_index: None,
+            formula_datasets: Vec::new(),
+            formula_request: None,
+            formulas_changed: false,
         }
     }
 }
@@ -555,7 +578,76 @@ impl AppState {
             | Command::ToggleLandBorders
             | Command::ToggleColorScaleScope
             | Command::ToggleScale) => self.reduce_commands(command),
+            command @ (Command::OpenFormulaEditor
+            | Command::SubmitFormula
+            | Command::FormulaMove(_)
+            | Command::RemoveFormula) => self.reduce_formula(command),
         }
+    }
+
+    fn reduce_formula(&mut self, command: Command) -> Option<Effect> {
+        match command {
+            Command::OpenFormulaEditor => {
+                self.view.help_visible = false;
+                self.view.formula_index = None;
+                self.view.overlay = Some(Overlay::Formula);
+                self.view.status =
+                    "formula editor: type an expression, Enter plots it, Esc closes".into();
+            }
+            Command::SubmitFormula => {
+                let text = self.view.formula_draft.trim().to_owned();
+                let definition = match crate::data::formula::FormulaDefinition::parse(&text) {
+                    Ok(definition) => definition,
+                    Err(error) => {
+                        self.view.status = error.to_string();
+                        return None;
+                    }
+                };
+                let existing = self.view.formulas.iter().position(|stored| {
+                    crate::data::formula::FormulaDefinition::parse(stored)
+                        .is_ok_and(|stored| stored.name == definition.name)
+                });
+                match existing {
+                    Some(index) if self.view.formulas[index] == text => {}
+                    Some(index) => {
+                        self.view.formulas[index] = text;
+                        self.view.formulas_changed = true;
+                    }
+                    None => {
+                        self.view.formulas.push(text);
+                        self.view.formulas_changed = true;
+                    }
+                }
+                self.view.formula_request = Some(definition.name);
+                self.view.formula_index = None;
+                self.view.overlay = None;
+            }
+            Command::FormulaMove(delta) => {
+                let length = self.view.formulas.len();
+                if length == 0 {
+                    return None;
+                }
+                let index = match self.view.formula_index {
+                    Some(index) => bounded_index(index, delta, length),
+                    None if delta < 0 => length - 1,
+                    None => 0,
+                };
+                self.view.formula_index = Some(index);
+                self.view.formula_draft = self.view.formulas[index].clone();
+            }
+            Command::RemoveFormula => {
+                let index = self.view.formula_index?;
+                if index < self.view.formulas.len() {
+                    let removed = self.view.formulas.remove(index);
+                    self.view.formula_draft.clear();
+                    self.view.formula_index = None;
+                    self.view.formulas_changed = true;
+                    self.view.status = format!("removed formula {removed}");
+                }
+            }
+            _ => unreachable!("formula reducer received unrelated command"),
+        }
+        None
     }
 
     fn reduce_navigation(&mut self, command: Command) -> Option<Effect> {
@@ -977,6 +1069,11 @@ impl AppState {
                         self.view.palette_query.push(character);
                         self.view.palette_index = 0;
                     }
+                } else if matches!(self.view.overlay, Some(Overlay::Formula)) {
+                    if !character.is_control() && self.view.formula_draft.len() < 256 {
+                        self.view.formula_draft.push(character);
+                        self.view.formula_index = None;
+                    }
                 } else if self.view.variable_search_active
                     && (character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
                 {
@@ -1022,6 +1119,9 @@ impl AppState {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     self.view.palette_query.pop();
                     self.view.palette_index = 0;
+                } else if matches!(self.view.overlay, Some(Overlay::Formula)) {
+                    self.view.formula_draft.pop();
+                    self.view.formula_index = None;
                 } else if self.view.variable_search_active {
                     self.variable_query.pop();
                     self.view.variable_browser_index = 0;
@@ -1234,6 +1334,9 @@ impl AppState {
             Command::ActivatePoint => {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     return self.reduce(Command::ExecuteCommandPalette);
+                }
+                if matches!(self.view.overlay, Some(Overlay::Formula)) {
+                    return self.reduce(Command::SubmitFormula);
                 }
                 if matches!(self.view.overlay, Some(Overlay::Axis)) {
                     let draft = self.view.axis_draft.clone()?;
@@ -1457,7 +1560,7 @@ impl AppState {
         }
     }
 
-    fn select_variable(&mut self, variable: String) -> Option<Effect> {
+    pub fn select_variable(&mut self, variable: String) -> Option<Effect> {
         self.view.variable_search_active = false;
         self.variable_query.clear();
         self.view.variable_browser_index = 0;
@@ -1741,6 +1844,10 @@ pub const COMMAND_PALETTE: &[PaletteEntry] = &[
         label: "Next file",
         shortcut: "}",
     },
+    PaletteEntry {
+        label: "Open formula editor",
+        shortcut: "=",
+    },
 ];
 
 pub fn palette_matches(query: &str) -> Vec<usize> {
@@ -1793,6 +1900,7 @@ fn palette_command(index: usize) -> Command {
         24 => Command::OpenVariableSearch,
         25 => Command::PreviousFile,
         26 => Command::NextFile,
+        27 => Command::OpenFormulaEditor,
         _ => Command::ToggleHelp,
     }
 }

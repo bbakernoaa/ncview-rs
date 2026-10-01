@@ -26,6 +26,7 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 | `v` | reverse colormap |
 | `i` | cycle interpolation (set `NCVIEW_SCIENTIFIC_RENDERING=0` to unlock) |
 | `e` | export current slice (PNG + SVG + JSON) |
+| `=` | formula editor — derive variables such as `O3[1]-O3[2]` or `mean(T)` |
 | `a` | automatic limits |
 | `l` | edit min/max limits |
 | `f` | mask data outside a range |
