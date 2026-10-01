@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.11](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.10...v0.5.11) - 2026-10-01
+
+### Other
+
+- *(deps)* bump actions/cache from 5 to 6 in /.github/workflows ([#36](https://github.com/bbakernoaa/ncview-rs/pull/36))
+- *(deps)* bump actions/setup-python from 6 to 7 in /.github/workflows ([#38](https://github.com/bbakernoaa/ncview-rs/pull/38))
+
 ## [0.5.10](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.9...v0.5.10) - 2026-10-01
 
 ### Other
