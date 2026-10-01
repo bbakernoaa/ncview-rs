@@ -463,7 +463,10 @@ pub fn leading_lengths(metadata: &DatasetMetadata, variable: &Variable) -> (usiz
 }
 
 /// Positions of the logical time and depth axes within `variable.dimensions`.
-pub fn leading_axes(metadata: &DatasetMetadata, variable: &Variable) -> (Option<usize>, Option<usize>) {
+pub fn leading_axes(
+    metadata: &DatasetMetadata,
+    variable: &Variable,
+) -> (Option<usize>, Option<usize>) {
     let row_index = variable
         .dimensions
         .iter()

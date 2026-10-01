@@ -258,8 +258,7 @@ fn tokenize(text: &str) -> Result<Vec<Token>> {
                 }
                 if index < characters.len() && matches!(characters[index], 'e' | 'E') {
                     let mut lookahead = index + 1;
-                    if lookahead < characters.len() && matches!(characters[lookahead], '+' | '-')
-                    {
+                    if lookahead < characters.len() && matches!(characters[lookahead], '+' | '-') {
                         lookahead += 1;
                     }
                     if lookahead < characters.len() && characters[lookahead].is_ascii_digit() {
@@ -392,8 +391,8 @@ impl Parser {
             Some(Token::Ident(name)) => {
                 if matches!(self.peek(), Some(Token::LParen)) {
                     self.position += 1;
-                    let callable =
-                        callable(&name).ok_or_else(|| error(format!("unknown function {name}()")))?;
+                    let callable = callable(&name)
+                        .ok_or_else(|| error(format!("unknown function {name}()")))?;
                     if matches!(self.peek(), Some(Token::RParen)) {
                         return Err(error(format!("{name}() needs one argument")));
                     }
@@ -486,7 +485,8 @@ pub fn depends_on(expr: &Expr, axis: AggregateAxis) -> bool {
         Expr::Number(_) => false,
         Expr::Variable(_) => true,
         Expr::Aggregate { kind, argument } => kind.axis() != axis && depends_on(argument, axis),
-        Expr::Negate(inner) | Expr::Function {
+        Expr::Negate(inner)
+        | Expr::Function {
             argument: inner, ..
         } => depends_on(inner, axis),
         Expr::Binary { left, right, .. } => depends_on(left, axis) || depends_on(right, axis),
@@ -508,7 +508,7 @@ struct Grid {
     values: Array2<f64>,
     missing: Array2<bool>,
     bounds: Bounds,
-    coordinates: Option<CoordinateGrid>,
+    coordinates: Option<Box<CoordinateGrid>>,
 }
 
 enum Value {
@@ -575,14 +575,12 @@ fn eval(expr: &Expr, inputs: &dyn FormulaInputs, time: usize, depth: usize) -> R
             )?;
             let missing = Zip::from(&slice.values)
                 .and(&slice.validity)
-                .map_collect(|value, validity| {
-                    *validity != Validity::Finite || !value.is_finite()
-                });
+                .map_collect(|value, validity| *validity != Validity::Finite || !value.is_finite());
             Value::Grid(Grid {
                 values: slice.values,
                 missing,
                 bounds: slice.source_bounds,
-                coordinates: slice.coordinates,
+                coordinates: slice.coordinates.map(Box::new),
             })
         }
         Expr::Negate(inner) => map(eval(inner, inputs, time, depth)?, |value| -value),
@@ -785,7 +783,7 @@ fn into_slice(grid: Grid) -> Result<Slice2D> {
         });
     let slice = Slice2D::new(values, validity, grid.bounds)?;
     Ok(match grid.coordinates {
-        Some(coordinates) => slice.with_coordinates(coordinates),
+        Some(coordinates) => slice.with_coordinates(*coordinates),
         None => slice,
     })
 }

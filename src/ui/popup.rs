@@ -315,7 +315,10 @@ fn render_formula_editor(frame: &mut Frame, popup: Rect, view: &ViewModel, plott
     let heading = |text: &'static str| Span::styled(text, theme::title_style(theme::TEAL));
     let mut lines = vec![Line::from(heading("Datasets"))];
     if view.formula_datasets.is_empty() {
-        lines.push(Line::from(Span::styled("  [1] current dataset", theme::muted_style())));
+        lines.push(Line::from(Span::styled(
+            "  [1] current dataset",
+            theme::muted_style(),
+        )));
     }
     for (index, dataset) in view.formula_datasets.iter().enumerate() {
         lines.push(Line::from(Span::styled(

@@ -192,7 +192,10 @@ fn cross_dataset_references_combine_multiple_files() {
     let first = open_fixture();
     let second = open_fixture();
     let source = formula_source(
-        &["delta = MACCity[1] - MACCity[2]", "ratio = MACCity[2] / Pixel_area[1]"],
+        &[
+            "delta = MACCity[1] - MACCity[2]",
+            "ratio = MACCity[2] / Pixel_area[1]",
+        ],
         vec![first, second],
     );
     let delta = source.read_slice(&request("delta", 0)).unwrap();
@@ -308,9 +311,24 @@ fn batch_formula_exports_images_without_a_terminal() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
-    assert!(names.iter().any(|name| name.ends_with("avg_t0000_z0000.png")), "{names:?}");
-    assert!(names.iter().any(|name| name.ends_with("avg_t0000_z0000.svg")), "{names:?}");
-    assert!(names.iter().any(|name| name.ends_with("avg_t0000_z0000.json")), "{names:?}");
+    assert!(
+        names
+            .iter()
+            .any(|name| name.ends_with("avg_t0000_z0000.png")),
+        "{names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name.ends_with("avg_t0000_z0000.svg")),
+        "{names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name.ends_with("avg_t0000_z0000.json")),
+        "{names:?}"
+    );
 }
 
 #[test]

@@ -670,9 +670,11 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     state.view.formula_datasets = datasets.clone();
-    state.view.formula_request = parse_formulas(&formula_texts)
-        .ok()
-        .and_then(|definitions| definitions.first().map(|definition| definition.name.clone()));
+    state.view.formula_request = parse_formulas(&formula_texts).ok().and_then(|definitions| {
+        definitions
+            .first()
+            .map(|definition| definition.name.clone())
+    });
     state.view.formulas = formula_texts;
     apply_formula_changes(
         &mut state,
@@ -1150,9 +1152,11 @@ fn apply_formula_changes(
         );
         state.view.collection_diagnostics = manifest.diagnostics().to_vec();
         state.variables = collection_variables(sources);
-        let selected_exists = state.view.selected_variable.as_deref().is_some_and(|name| {
-            state.variables.iter().any(|variable| variable.name == name)
-        });
+        let selected_exists = state
+            .view
+            .selected_variable
+            .as_deref()
+            .is_some_and(|name| state.variables.iter().any(|variable| variable.name == name));
         if !selected_exists && state.view.formula_request.is_none() {
             select_initial_variable(state, sources[*active_file].metadata());
             configure_timeline(state, sources, manifest, *active_file);
@@ -1661,7 +1665,16 @@ fn export_slice_to(
         .view
         .limits
         .or_else(|| slice.statistics.map(|stats| (stats.min, stats.max)))
-        .filter(|(min, max)| min.is_finite() && max.is_finite() && max > min)
+        .filter(|(min, max)| min.is_finite() && max.is_finite() && max >= min)
+        .map(|(min, max)| {
+            // A constant field (e.g. a zero difference) still needs a drawable range.
+            if max > min {
+                (min, max)
+            } else {
+                let pad = min.abs().max(1.0) * 0.5;
+                (min - pad, max + pad)
+            }
+        })
         .ok_or("current slice has no finite color range")?;
     let raster = ncview_rs::render::raster::rgb_raster_with_options(
         slice,
