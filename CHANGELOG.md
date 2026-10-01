@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.10](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.9...v0.5.10) - 2026-10-01
+
+### Other
+
+- *(deps)* bump tiny-skia from 0.11.4 to 0.12.0 ([#40](https://github.com/bbakernoaa/ncview-rs/pull/40))
+
 ## [0.5.9](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.8...v0.5.9) - 2026-10-01
 
 ### Other
