@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.9](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.8...v0.5.9) - 2026-10-01
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.5.8](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.7...v0.5.8) - 2026-09-30
 
 ### Added
