@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.13](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.12...v0.5.13) - 2026-10-01
+
+### Other
+
+- Refactor sidebar rendering and enhance fixed dimension handling ([#48](https://github.com/bbakernoaa/ncview-rs/pull/48))
+
 ## [0.5.12](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.11...v0.5.12) - 2026-10-01
 
 ### Other
