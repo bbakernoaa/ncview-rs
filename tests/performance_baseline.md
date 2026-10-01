@@ -83,6 +83,24 @@ The range/cache benchmark completed successfully. The in-memory provider is not 
 network latency, bandwidth, Linux RSS, SSH rendering, or a 1 GiB object; those measurements remain
 explicit deployment validation items.
 
+## Raw-dimension slice smoke evidence (2026-10-01)
+
+The optional `raw_300x600_fixed_dimension_slice` Criterion target was run against the supplied local
+VIIRS product. Host: macOS 25.3.0, arm64 (Apple T8132); Rust 1.98.1. Input SHA-256:
+`0525f3bfffdc87bdd0dd50a2a4edff9c8a6ed424ca5fcc7b8c85151c26f5abdf`. With 10 samples and a
+0.5-second requested measurement period, Criterion reported `[22.858 ms, 30.620 ms, 35.067 ms]`
+(lower estimate, median, upper estimate). This is slice-read latency only; it is not the full UI
+view-load or dimension-change p95, and no RSS measurement was collected. The approved Linux
+reference-host performance gate remains outstanding.
+
+Command:
+
+```bash
+NCVIEW_RAW_DIMENSION_BENCH_FILE="$PWD/VIIRS_BRDF_LSA_NBAR_2025057_h19v19.nc" \
+  cargo bench --bench interactive_paths -- raw_300x600_fixed_dimension_slice \
+  --noplot --warm-up-time 0.1 --measurement-time 0.5 --sample-size 10
+```
+
 ## Local macOS arm64 smoke run (2026-09-10)
 
 `cargo bench --locked --bench interactive_paths -- --noplot` completed successfully under Rust
@@ -90,3 +108,21 @@ explicit deployment validation items.
 rasterization 221.55 µs, normalization 1.2351 ns, regular-grid mapping 2.1109 ns, and KD-tree
 query 75.026 µs. These are component-level smoke measurements, not the full 30-run application
 startup, resident-set, or SSH protocol gates.
+
+## Palette chooser interaction smoke evidence (2026-10-01)
+
+The `palette_picker_64_open_focus_preview` Criterion case opens the picker, moves focus in a
+64-choice catalog, renders the focused preview and list into a 100×30 Ratatui `TestBackend`, and
+cancels. Host: macOS 25.3.0, arm64 Apple T8132, Rust 1.98.1, Cargo 1.98.1. Criterion used 100
+samples, a 0.1-second warmup, and a 0.5-second requested measurement. The raw per-sample average
+latencies yield p50 44.764 µs and p95 152.5 µs (linear interpolation of the sorted sample values);
+Criterion's slope estimate was [44.269 µs, 44.862 µs, 45.800 µs], with 11/100 outliers. The p95 is
+below the feature's 100 ms smoke target. This is a TestBackend component benchmark, not physical
+terminal latency or an x86_64 Linux release-gate result.
+
+Command:
+
+```bash
+cargo bench --bench interactive_paths -- palette_picker_64_open_focus_preview \
+  --noplot --warm-up-time 0.1 --measurement-time 0.5 --sample-size 100
+```

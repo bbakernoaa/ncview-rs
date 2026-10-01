@@ -20,10 +20,12 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 | `-` / `+` | decrease / increase playback speed |
 | `{` / `}` | previous / next file |
 | `[` / `]` | previous / next depth slice |
+| `,` / `.` | select previous / next extra dimension |
+| `;` / `'` | previous / next index in selected dimension |
 | `Tab` | focus the sidebar level list (`Tab`/`Esc` leave it); in dialogs/plot chooser it switches field/axis |
 | `Shift`+arrows | pan the zoomed map |
-| `c` | cycle colormap |
-| `v` | reverse colormap |
+| `c` | open colormap chooser with a focused preview |
+| `v` | reverse the active colormap; in the chooser, reverse the focused preview |
 | `i` | cycle interpolation (set `NCVIEW_SCIENTIFIC_RENDERING=0` to unlock) |
 | `e` | export current slice (PNG + SVG + JSON) |
 | `a` | automatic limits |

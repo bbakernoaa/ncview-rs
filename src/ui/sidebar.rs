@@ -247,7 +247,7 @@ pub fn render(
     let plottable = metadata
         .variables
         .iter()
-        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+        .filter(|variable| variable.numeric)
         .cloned()
         .collect::<Vec<_>>();
     render_with_search(
@@ -266,6 +266,8 @@ pub fn render(
         &plottable,
         None,
         None,
+        &[],
+        0,
     );
 }
 
@@ -286,6 +288,8 @@ pub fn render_with_search(
     plottable: &[Variable],
     slice: Option<&Slice2D>,
     level: Option<LevelPanel<'_>>,
+    fixed_dimensions: &[crate::app::FixedDimension],
+    focused_fixed_dimension: usize,
 ) {
     let boxes = sidebar_boxes(area, level.is_some());
     let content_width = usize::from(area.width.saturating_sub(2));
@@ -304,7 +308,13 @@ pub fn render_with_search(
     if let Some(panel) = level {
         render_level_box(frame, boxes.level, panel, content_width);
     }
-    render_dimensions_box(frame, boxes.dimensions, metadata);
+    render_dimensions_box(
+        frame,
+        boxes.dimensions,
+        metadata,
+        fixed_dimensions,
+        focused_fixed_dimension,
+    );
     render_scale_box(
         frame,
         boxes.scale,
@@ -517,8 +527,8 @@ fn render_variables_box(
     for variable in plottable {
         *counts.entry(variable.dimensions.len()).or_default() += 1;
     }
-    let max_rank = counts.keys().next_back().copied().unwrap_or(2).max(4);
-    for rank in 2..=max_rank {
+    let max_rank = counts.keys().next_back().copied().unwrap_or(0).max(4);
+    for rank in 0..=max_rank {
         lines.push(muted(format!(
             "  {rank}D variables: {}",
             counts.get(&rank).copied().unwrap_or(0)
@@ -633,7 +643,13 @@ fn render_level_box(frame: &mut Frame, area: Rect, panel: LevelPanel<'_>, conten
 
 /// Dataset dimensions (`name = length`), restored to its own box so long
 /// dimension lists scroll-free and never crowd the color-scale readout.
-fn render_dimensions_box(frame: &mut Frame, area: Rect, metadata: &DatasetMetadata) {
+fn render_dimensions_box(
+    frame: &mut Frame,
+    area: Rect,
+    metadata: &DatasetMetadata,
+    fixed_dimensions: &[crate::app::FixedDimension],
+    focused: usize,
+) {
     let block = theme::panel("Dimensions", theme::BLUE);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -641,7 +657,7 @@ fn render_dimensions_box(frame: &mut Frame, area: Rect, metadata: &DatasetMetada
         return;
     }
     let content_width = usize::from(inner.width);
-    let lines: Vec<Line> = if metadata.dimensions.is_empty() {
+    let mut lines: Vec<Line> = if metadata.dimensions.is_empty() {
         vec![Line::from(Span::styled(
             "  no dimensions",
             theme::muted_style(),
@@ -652,7 +668,11 @@ fn render_dimensions_box(frame: &mut Frame, area: Rect, metadata: &DatasetMetada
         metadata
             .dimensions
             .iter()
-            .take(usize::from(inner.height).max(1))
+            .take(
+                usize::from(inner.height)
+                    .saturating_sub(fixed_dimensions.len())
+                    .max(1),
+            )
             .map(|dimension| {
                 Line::from(Span::styled(
                     format!(
@@ -663,8 +683,25 @@ fn render_dimensions_box(frame: &mut Frame, area: Rect, metadata: &DatasetMetada
                     Style::default().fg(theme::TEXT),
                 ))
             })
-            .collect()
+            .collect::<Vec<_>>()
     };
+    for (index, dimension) in fixed_dimensions.iter().enumerate() {
+        let marker = if index == focused { ">" } else { " " };
+        lines.push(Line::from(Span::styled(
+            truncate_text(
+                &format!(
+                    "{marker} {} [{}/{}]",
+                    dimension.name, dimension.index, dimension.length
+                ),
+                content_width,
+            ),
+            Style::default().fg(if index == focused {
+                theme::TEAL
+            } else {
+                theme::TEXT
+            }),
+        )));
+    }
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
         inner,
@@ -776,11 +813,33 @@ mod tests {
         metadata: &crate::data::DatasetMetadata,
         slice: Option<&crate::data::slice::Slice2D>,
     ) -> String {
+        render_sidebar_with_dimensions(level, metadata, slice, &[], 0)
+    }
+
+    fn render_sidebar_with_dimensions(
+        level: Option<crate::ui::level::LevelPanel<'_>>,
+        metadata: &crate::data::DatasetMetadata,
+        slice: Option<&crate::data::slice::Slice2D>,
+        fixed_dimensions: &[crate::app::FixedDimension],
+        focused: usize,
+    ) -> String {
+        render_sidebar_at_size(level, metadata, slice, fixed_dimensions, focused, 32, 46)
+    }
+
+    fn render_sidebar_at_size(
+        level: Option<crate::ui::level::LevelPanel<'_>>,
+        metadata: &crate::data::DatasetMetadata,
+        slice: Option<&crate::data::slice::Slice2D>,
+        fixed_dimensions: &[crate::app::FixedDimension],
+        focused: usize,
+        width: u16,
+        height: u16,
+    ) -> String {
         use ratatui::{Terminal, backend::TestBackend};
         // Tall enough that every box keeps its natural height; ratatui
         // squeezes all fixed-height boxes down when their total exceeds the
         // area, which would hide the rows these tests check for.
-        let mut terminal = Terminal::new(TestBackend::new(32, 46)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 super::render_with_search(
@@ -799,6 +858,8 @@ mod tests {
                     &[],
                     slice,
                     level,
+                    fixed_dimensions,
+                    focused,
                 )
             })
             .unwrap();
@@ -863,6 +924,38 @@ mod tests {
         assert!(rendered.contains("48"), "{rendered}");
         assert!(rendered.contains("longitude"), "{rendered}");
         assert!(rendered.contains("64"), "{rendered}");
+    }
+
+    #[test]
+    fn dimensions_box_shows_fixed_selection_and_singleton_indices() {
+        let metadata = empty_metadata();
+        let fixed = vec![
+            crate::app::FixedDimension {
+                name: "Kernel_Num".into(),
+                index: 2,
+                length: 3,
+            },
+            crate::app::FixedDimension {
+                name: "Singleton".into(),
+                index: 0,
+                length: 1,
+            },
+        ];
+        let rendered = render_sidebar_with_dimensions(None, &metadata, None, &fixed, 0);
+        assert!(rendered.contains("> Kernel_Num [2/3]"), "{rendered}");
+        assert!(rendered.contains("Singleton [0/1]"), "{rendered}");
+    }
+
+    #[test]
+    fn fixed_dimensions_remain_render_safe_in_constrained_sidebar() {
+        let metadata = empty_metadata();
+        let fixed = vec![crate::app::FixedDimension {
+            name: "Kernel_Num".into(),
+            index: 1,
+            length: 3,
+        }];
+        let rendered = render_sidebar_at_size(None, &metadata, None, &fixed, 0, 18, 8);
+        assert!(rendered.contains("File"), "{rendered}");
     }
 
     #[test]

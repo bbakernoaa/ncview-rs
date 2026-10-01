@@ -177,6 +177,55 @@ pub fn render_with_metadata(
     frame.render_widget(Paragraph::new(lines), legend);
 }
 
+/// Draw a compact horizontal palette swatch with the view's range labels.
+pub fn render_preview(
+    frame: &mut Frame,
+    area: Rect,
+    palette: &Palette,
+    limits: Option<(f64, f64)>,
+    scale: ScaleMode,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let samples = preview_samples(palette, usize::from(area.width));
+    let swatch = Line::from(
+        samples
+            .into_iter()
+            .map(|rgb| Span::styled(" ", Style::default().bg(Color::Rgb(rgb[0], rgb[1], rgb[2]))))
+            .collect::<Vec<_>>(),
+    );
+    frame.render_widget(
+        Paragraph::new(swatch),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height > 1 {
+        let labels = preview_labels(limits, scale)
+            .map(|(min, max, scale)| format!("{min}  {scale}  {max}"))
+            .unwrap_or_else(|| "no finite range".into());
+        frame.render_widget(
+            Paragraph::new(labels),
+            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        );
+    }
+}
+
+fn preview_samples(palette: &Palette, width: usize) -> Vec<[u8; 3]> {
+    colorbar(palette, width)
+}
+
+fn preview_labels(
+    limits: Option<(f64, f64)>,
+    scale: ScaleMode,
+) -> Option<(String, String, String)> {
+    let (min, max) = limits.filter(|(min, max)| min.is_finite() && max.is_finite() && max > min)?;
+    Some((
+        format_tick(min, max),
+        format_tick(max, max),
+        scale.name().into(),
+    ))
+}
+
 fn push_metadata_lines(lines: &mut Vec<(String, bool)>, value: &str, title: bool, width: usize) {
     for (index, line) in wrap_metadata(value, width).into_iter().enumerate() {
         lines.push((line, title && index == 0));
@@ -329,6 +378,15 @@ fn format_tick(value: f64, step: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ScaleMode, format_tick, ticks, wrap_metadata};
+
+    #[test]
+    fn picker_preview_samples_use_focused_palette_and_current_scale_labels() {
+        let palette = crate::render::colors::Palette::Plasma;
+        let samples = super::preview_samples(&palette, 5);
+        assert_eq!(samples, crate::render::colors::colorbar(&palette, 5));
+        let labels = super::preview_labels(Some((-2.5, 12.0)), ScaleMode::Log);
+        assert_eq!(labels, Some(("-2.500".into(), "12".into(), "log10".into())));
+    }
 
     #[test]
     fn linear_ticks_are_nice_and_include_bounds() {

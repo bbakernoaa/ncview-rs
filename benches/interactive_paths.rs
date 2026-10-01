@@ -1,16 +1,19 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ncview_rs::{
     analysis::{mapping::screen_to_source, projection::ProjectionIndex},
-    data::{fixtures::regular_values, slice::Bounds},
+    app::{AppState, Command},
+    data::{DatasetFormat, DatasetMetadata, fixtures::regular_values, slice::Bounds},
     render::{
-        colors::{Palette, ScaleMode, normalize},
+        colors::{Palette, ScaleMode, ScientificColorMap, normalize},
         landmask::Detail,
         map_background,
         raster::{rgb_raster, rgb_raster_with_options_for_view},
     },
 };
 use ratatui::layout::Rect;
-use std::hint::black_box;
+use ratatui::{Terminal, backend::TestBackend};
+use std::path::Path;
+use std::{hint::black_box, sync::Arc};
 
 fn startup_scaffold(criterion: &mut Criterion) {
     criterion.bench_function("startup_scaffold", |bencher| {
@@ -66,9 +69,111 @@ fn interactive_paths(criterion: &mut Criterion) {
     });
 }
 
+fn raw_dimension_slice(criterion: &mut Criterion) {
+    let Ok(path) = std::env::var("NCVIEW_RAW_DIMENSION_BENCH_FILE") else {
+        return;
+    };
+    let Ok(source) = ncview_rs::data::open(Path::new(&path)) else {
+        eprintln!("Skipping raw-dimension benchmark: cannot open {path}");
+        return;
+    };
+    let metadata = source.metadata();
+    let dimensions = &metadata.dimensions;
+    let candidate = metadata.variables.iter().find_map(|variable| {
+        if !variable.numeric || variable.dimensions.len() < 2 {
+            return None;
+        }
+        let shape = variable
+            .dimensions
+            .iter()
+            .map(|name| dimensions.iter().find(|dimension| dimension.name == *name))
+            .collect::<Option<Vec<_>>>()?;
+        let row = shape.iter().position(|dimension| dimension.length == 300)?;
+        let col = shape
+            .iter()
+            .position(|dimension| dimension.length == 600 && dimension.name != shape[row].name)?;
+        Some((variable.name.clone(), shape, row, col))
+    });
+    let Some((variable, shape, row, col)) = candidate else {
+        eprintln!(
+            "Skipping raw-dimension benchmark: no numeric 300-by-600 variable found in {path}"
+        );
+        return;
+    };
+    let row_name = shape[row].name.clone();
+    let col_name = shape[col].name.clone();
+    let fixed = shape
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != row && *index != col)
+        .map(|(_, dimension)| (dimension.name.clone(), 0))
+        .collect::<Vec<_>>();
+    let request = ncview_rs::data::slice::SliceRequest {
+        variable,
+        time: 0,
+        depth: 0,
+        bounds: Bounds::new(0, 300, 0, 600).expect("constant bounds are valid"),
+    };
+    criterion.bench_function("raw_300x600_fixed_dimension_slice", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                source
+                    .read_slice_on_axes(&request, Some(&row_name), Some(&col_name), &fixed)
+                    .expect("benchmark slice read succeeds"),
+            )
+        })
+    });
+}
+
+fn palette_picker_interaction(criterion: &mut Criterion) {
+    let mut state = AppState::default();
+    state.view.palette_catalog = (0..64)
+        .map(|index| {
+            Palette::Custom(Arc::new(ScientificColorMap {
+                name: format!("Benchmark{index:02}"),
+                colors: vec![[10, 20, 30], [120, 140, 160], [240, 230, 220]],
+            }))
+        })
+        .collect();
+    let metadata = DatasetMetadata {
+        path: "benchmark".into(),
+        format: DatasetFormat::NetCdf4,
+        dimensions: Vec::new(),
+        variables: Vec::new(),
+    };
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal builds");
+    criterion.bench_function("palette_picker_64_open_focus_preview", |bencher| {
+        bencher.iter(|| {
+            state.reduce(Command::OpenPalettePicker);
+            state.reduce(Command::MovePalettePicker(32));
+            terminal
+                .draw(|frame| {
+                    ncview_rs::ui::popup::render(
+                        frame,
+                        frame.area(),
+                        &state.view,
+                        &metadata,
+                        &[],
+                        "",
+                        None,
+                    );
+                })
+                .expect("picker render succeeds");
+            let selected = state
+                .view
+                .palette_picker
+                .as_ref()
+                .map(|draft| &draft.focused_palette);
+            black_box(selected);
+            state.reduce(Command::CancelPalettePicker);
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().without_plots();
-    targets = startup_scaffold, slice_and_raster, interactive_paths
+    targets = startup_scaffold, slice_and_raster, interactive_paths, raw_dimension_slice,
+        palette_picker_interaction
 }
 criterion_main!(benches);

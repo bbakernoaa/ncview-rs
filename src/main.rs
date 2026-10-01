@@ -21,8 +21,8 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use ncview_rs::{
     analysis::mapping::screen_to_source_with_row_flip,
     app::{
-        AppState, AxisField, ColorScaleScope, Command, Generation, LimitField, Overlay, PlotSeries,
-        TimelinePoint,
+        AppState, AxisField, ColorScaleScope, Command, FixedDimension, Generation, LimitField,
+        Overlay, PlotSeries, TimelinePoint,
     },
     data::{
         self, AxisRole, DatasetFormat, DatasetMetadata, Variable,
@@ -911,6 +911,7 @@ fn handle_command(
                 | Command::MoveDepth(_)
                 | Command::SetDepth(_)
                 | Command::ApplyDepthCursor
+                | Command::MoveFixedDimension(_)
                 | Command::CyclePlotAxis(_)
                 | Command::SetPlotKind(_)
                 | Command::TogglePointSelection
@@ -929,6 +930,7 @@ fn handle_command(
             | Command::MoveDepth(_)
             | Command::SetDepth(_)
             | Command::ApplyDepthCursor
+            | Command::MoveFixedDimension(_)
             | Command::TickPlayback
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
@@ -962,7 +964,20 @@ fn handle_command(
         Command::ActivatePoint => state.view.selected_point,
         _ => None,
     };
+    let previous_variable = state.view.selected_variable.clone();
     let _ = state.reduce(command);
+    if state.view.selected_variable != previous_variable
+        && let Some(variable_name) = state.view.selected_variable.as_deref()
+        && let Some(variable) = source
+            .metadata()
+            .variables
+            .iter()
+            .find(|item| item.name == variable_name)
+    {
+        let (x, y) = default_display_axes(source.metadata(), variable);
+        state.view.x_axis = Some(x);
+        state.view.y_axis = Some(y);
+    }
     if cycle_image_filter {
         if graphics.cycle_filter() {
             state.view.status = format!("image interpolation: {}", graphics.filter_label());
@@ -1054,7 +1069,7 @@ fn collection_variables(sources: &[Arc<dyn data::DataSource>]) -> Vec<Variable> 
             .metadata()
             .variables
             .iter()
-            .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+            .filter(|variable| variable.numeric)
         {
             if !variables
                 .iter()
@@ -1187,7 +1202,7 @@ impl LazyRemoteGribSource {
             .metadata()
             .variables
             .get(ordinal)
-            .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+            .filter(|variable| variable.numeric)
             .map(|variable| variable.name.clone())
             .ok_or_else(|| {
                 format!(
@@ -1348,7 +1363,7 @@ fn state_for_source(source: &dyn data::DataSource) -> AppState {
             .metadata()
             .variables
             .iter()
-            .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
+            .filter(|variable| variable.numeric)
             .cloned()
             .collect(),
         ..AppState::default()
@@ -1881,6 +1896,7 @@ fn translate_overlay_mouse(
     }
     match overlay {
         Overlay::CommandPalette => translate_command_palette_click(x, y, clicked, popup, view),
+        Overlay::PalettePicker => Command::Pointer { x, y },
         Overlay::Limits | Overlay::Filter => translate_limit_overlay_click(x, y, clicked, popup),
         Overlay::Axis => translate_axis_overlay_click(x, y, clicked, popup),
         Overlay::Plot => translate_plot_overlay_click(x, y, clicked, popup),
@@ -1997,6 +2013,9 @@ fn help_rect(area: Rect) -> Rect {
 }
 
 fn overlay_rect(area: Rect, overlay: Overlay) -> Rect {
+    if overlay == Overlay::PalettePicker {
+        return ncview_rs::ui::popup::picker_popup_rect(area);
+    }
     let large = matches!(overlay, Overlay::CommandPalette | Overlay::Plot);
     let width = if large {
         area.width.saturating_mul(3) / 4
@@ -2109,6 +2128,7 @@ fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
             let area_penalty = variable.name.to_ascii_lowercase().contains("area");
             (variable.dimensions.len(), !area_penalty)
         })
+        .or_else(|| state.variables.iter().find(|variable| variable.numeric))
         .map(|variable| variable.name.clone());
     state.view.selected_variable = selected;
     if let Some(variable) = state.view.selected_variable.clone()
@@ -2116,6 +2136,14 @@ fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
             metadata.variables.iter().find(|item| item.name == variable)
     {
         state.view.axis_options = metadata_variable.dimensions.clone();
+        if metadata_variable.dimensions.len() >= 2 {
+            let (x, y) = default_display_axes(metadata, metadata_variable);
+            state.view.x_axis = Some(x);
+            state.view.y_axis = Some(y);
+        } else {
+            state.view.x_axis = None;
+            state.view.y_axis = None;
+        }
         let (time_length, depth_length) = leading_lengths(metadata, metadata_variable);
         state.view.time_length = time_length;
         state.view.depth_length = depth_length;
@@ -2301,15 +2329,37 @@ fn load_selected(
     else {
         return;
     };
-    let Some((full_bounds, _time_length, depth_length)) = plane_bounds(
+    let Some((full_bounds, _time_length, mut depth_length)) = plane_bounds(
         metadata,
         variable,
         state.view.x_axis.as_deref(),
         state.view.y_axis.as_deref(),
     ) else {
-        state.view.status = format!("{variable_name}: needs at least two dimensions");
+        let axes = state.view.x_axis.clone().zip(state.view.y_axis.clone());
+        report_unavailable_plane(
+            &mut state.view,
+            variable,
+            metadata,
+            axes.as_ref().map(|(x, y)| (x.as_str(), y.as_str())),
+        );
         return;
     };
+    if state
+        .view
+        .x_axis
+        .as_deref()
+        .into_iter()
+        .chain(state.view.y_axis.as_deref())
+        .any(|axis| {
+            metadata
+                .dimensions
+                .iter()
+                .find(|dimension| dimension.name.eq_ignore_ascii_case(axis))
+                .is_some_and(|dimension| dimension.role == AxisRole::Depth)
+        })
+    {
+        depth_length = 1;
+    }
     state.view.time_length = state.view.timeline.len().max(1);
     state.view.depth_length = depth_length;
     state.view.depth_index = state.view.depth_index.min(depth_length.saturating_sub(1));
@@ -2317,6 +2367,43 @@ fn load_selected(
     state.view.level_label = source.vertical_label(&variable_name, state.view.depth_index);
     state.view.level_labels = source.vertical_labels(&variable_name);
     state.view.depth_cursor = state.view.depth_index;
+    let plane_axes = state
+        .view
+        .x_axis
+        .as_deref()
+        .zip(state.view.y_axis.as_deref());
+    let previous = state.view.fixed_dimensions.clone();
+    state.view.fixed_dimensions = variable
+        .dimensions
+        .iter()
+        .filter_map(|name| {
+            if plane_axes
+                .is_some_and(|(x, y)| name.eq_ignore_ascii_case(x) || name.eq_ignore_ascii_case(y))
+            {
+                return None;
+            }
+            let dimension = metadata
+                .dimensions
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(name))?;
+            if matches!(dimension.role, AxisRole::Time | AxisRole::Depth) || dimension.length == 0 {
+                return None;
+            }
+            let index = previous
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(name))
+                .map_or(0, |item| item.index.min(dimension.length - 1));
+            Some(FixedDimension {
+                name: name.clone(),
+                index,
+                length: dimension.length,
+            })
+        })
+        .collect();
+    state.view.focused_fixed_dimension = state
+        .view
+        .focused_fixed_dimension
+        .min(state.view.fixed_dimensions.len().saturating_sub(1));
     state.view.full_bounds = Some(full_bounds);
     let bounds = state.view.zoom_bounds.unwrap_or(full_bounds);
     let fixed_axes = fixed_axes_for_plane(
@@ -2326,6 +2413,7 @@ fn load_selected(
         state.view.y_axis.as_deref(),
         timeline_point.local_index,
         state.view.depth_index,
+        &state.view.fixed_dimensions,
     );
     let request = SliceRequest {
         variable: variable_name.clone(),
@@ -3330,6 +3418,7 @@ fn fixed_axes_for_plane(
     y_axis: Option<&str>,
     time_index: usize,
     depth_index: usize,
+    selected: &[FixedDimension],
 ) -> Vec<(String, usize)> {
     let Some((x_axis, y_axis)) = x_axis.zip(y_axis) else {
         return Vec::new();
@@ -3349,11 +3438,132 @@ fn fixed_axes_for_plane(
             let index = match dimension.map(|dimension| dimension.role) {
                 Some(AxisRole::Time) => time_index,
                 Some(AxisRole::Depth) => depth_index,
-                _ => 0,
+                _ => selected
+                    .iter()
+                    .find(|item| item.name.eq_ignore_ascii_case(name))
+                    .map_or(0, |item| item.index),
             };
             Some((name.clone(), index.min(length.saturating_sub(1))))
         })
         .collect()
+}
+
+fn default_display_axes(metadata: &DatasetMetadata, variable: &Variable) -> (String, String) {
+    let dimensions = &variable.dimensions;
+    let role_axis = |role| {
+        dimensions
+            .iter()
+            .find(|name| {
+                metadata
+                    .dimensions
+                    .iter()
+                    .find(|dimension| dimension.name.eq_ignore_ascii_case(name))
+                    .is_some_and(|dimension| dimension.role == role)
+            })
+            .cloned()
+    };
+    if let (Some(x), Some(y)) = (
+        role_axis(AxisRole::Longitude),
+        role_axis(AxisRole::Latitude),
+    ) {
+        return (x, y);
+    }
+    let find = |tokens: &[&str]| {
+        dimensions
+            .iter()
+            .find(|name| {
+                let lower = name.to_ascii_lowercase();
+                tokens.iter().any(|token| lower.contains(token))
+            })
+            .cloned()
+    };
+    let x = find(&["longitude", "lon", "width", "column", "cols"]);
+    let y = find(&["latitude", "lat", "height", "row", "rows"]);
+    if let (Some(x), Some(y)) = (x, y) {
+        return (x, y);
+    }
+    let eligible = dimensions
+        .iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            !["time", "date", "depth", "level"]
+                .iter()
+                .any(|token| lower.contains(token))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let x = eligible
+        .last()
+        .cloned()
+        .or_else(|| dimensions.last().cloned())
+        .unwrap_or_default();
+    let y = eligible
+        .iter()
+        .rev()
+        .nth(1)
+        .cloned()
+        .or_else(|| dimensions.iter().rev().nth(1).cloned())
+        .unwrap_or_default();
+    (x, y)
+}
+
+fn unavailable_plane_message(
+    variable: &Variable,
+    metadata: &DatasetMetadata,
+    axes: Option<(&str, &str)>,
+) -> String {
+    let shapes = variable
+        .dimensions
+        .iter()
+        .map(|name| {
+            let length =
+                dimension_length(metadata, name).map_or_else(|| "?".into(), |n| n.to_string());
+            format!("{name}={length}")
+        })
+        .collect::<Vec<_>>();
+    if let Some(empty) = variable
+        .dimensions
+        .iter()
+        .find(|name| dimension_length(metadata, name) == Some(0))
+    {
+        return format!(
+            "{}: dimension {empty}=0 is empty; cannot display a 2D plane",
+            variable.name
+        );
+    }
+    if variable.dimensions.len() < 2 {
+        let dimensions = if shapes.is_empty() {
+            "no dimensions".into()
+        } else {
+            shapes.join(", ")
+        };
+        return format!(
+            "{} ({dimensions}): needs at least two dimensions to display a 2D plane",
+            variable.name
+        );
+    }
+    if let Some((x, y)) = axes {
+        return format!(
+            "{} ({}): selected axes {y} × {x} do not form a valid plane; choose two distinct dimensions present in the variable",
+            variable.name,
+            shapes.join(", ")
+        );
+    }
+    format!(
+        "{} ({}): cannot form a valid 2D plane from these dimensions",
+        variable.name,
+        shapes.join(", ")
+    )
+}
+
+fn report_unavailable_plane(
+    view: &mut ncview_rs::app::ViewModel,
+    variable: &Variable,
+    metadata: &DatasetMetadata,
+    axes: Option<(&str, &str)>,
+) {
+    view.loading = ncview_rs::app::LoadingState::Error;
+    view.status = unavailable_plane_message(variable, metadata, axes);
 }
 
 #[cfg(test)]
@@ -3370,6 +3580,126 @@ mod timeline_order_tests {
             compare_time_labels("2026-09-10T12:00:00Z", "coordinate index"),
             std::cmp::Ordering::Less
         );
+    }
+}
+
+#[cfg(test)]
+mod unavailable_plane_message_tests {
+    use super::{default_display_axes, report_unavailable_plane, unavailable_plane_message};
+    use ncview_rs::app::{AppState, LoadingState};
+    use ncview_rs::data::{AxisRole, DatasetFormat, DatasetMetadata, Dimension, Variable};
+
+    fn variable(name: &str, dimensions: &[&str]) -> Variable {
+        Variable {
+            name: name.into(),
+            dimensions: dimensions
+                .iter()
+                .map(|dimension| (*dimension).into())
+                .collect(),
+            numeric: true,
+            units: None,
+            long_name: None,
+            standard_name: None,
+        }
+    }
+
+    fn metadata(dimensions: Vec<Dimension>) -> DatasetMetadata {
+        DatasetMetadata {
+            path: "test.nc4".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions,
+            variables: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explains_scalar_and_one_dimensional_variables_with_their_dimensions() {
+        let scalar = unavailable_plane_message(&variable("scalar", &[]), &metadata(vec![]), None);
+        assert!(scalar.contains("scalar"));
+        assert!(scalar.contains("no dimensions"));
+        let one_dimensional = unavailable_plane_message(
+            &variable("profile", &["pressure"]),
+            &metadata(vec![Dimension {
+                name: "pressure".into(),
+                length: 8,
+                role: AxisRole::Depth,
+            }]),
+            None,
+        );
+        assert!(one_dimensional.contains("profile"));
+        assert!(one_dimensional.contains("pressure=8"));
+        assert!(one_dimensional.contains("at least two"));
+    }
+
+    #[test]
+    fn explains_empty_dimensions_and_invalid_selected_axes() {
+        let variable = variable("field", &["Row", "Column"]);
+        let empty_metadata = metadata(vec![
+            Dimension {
+                name: "Row".into(),
+                length: 0,
+                role: AxisRole::Other,
+            },
+            Dimension {
+                name: "Column".into(),
+                length: 5,
+                role: AxisRole::Other,
+            },
+        ]);
+        assert!(unavailable_plane_message(&variable, &empty_metadata, None).contains("Row=0"));
+        let valid_metadata = metadata(vec![
+            Dimension {
+                name: "Row".into(),
+                length: 2,
+                role: AxisRole::Other,
+            },
+            Dimension {
+                name: "Column".into(),
+                length: 5,
+                role: AxisRole::Other,
+            },
+        ]);
+        assert!(
+            unavailable_plane_message(&variable, &valid_metadata, Some(("Missing", "Column")))
+                .contains("Missing")
+        );
+    }
+
+    #[test]
+    fn coordinate_roles_take_precedence_over_raw_axis_name_fallbacks() {
+        let dimensions = vec![
+            Dimension {
+                name: "y_index".into(),
+                length: 2,
+                role: AxisRole::Latitude,
+            },
+            Dimension {
+                name: "x_index".into(),
+                length: 3,
+                role: AxisRole::Longitude,
+            },
+            Dimension {
+                name: "sample".into(),
+                length: 4,
+                role: AxisRole::Other,
+            },
+        ];
+        let variable = variable("field", &["y_index", "x_index", "sample"]);
+        assert_eq!(
+            default_display_axes(&metadata(dimensions), &variable),
+            ("x_index".into(), "y_index".into())
+        );
+    }
+
+    #[test]
+    fn unavailable_plane_is_reported_as_finished_error_not_perpetual_loading() {
+        let mut state = AppState::default();
+        state.view.loading = LoadingState::Loading;
+        let variable = variable("scalar", &[]);
+        report_unavailable_plane(&mut state.view, &variable, &metadata(vec![]), None);
+        assert_eq!(state.view.loading, LoadingState::Error);
+        assert!(state.view.status.contains("scalar"));
+        assert!(state.view.status.contains("no dimensions"));
     }
 }
 
