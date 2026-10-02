@@ -1,6 +1,6 @@
 [package]
 name = "ncview-rs"
-version = "0.5.8"
+version = "0.5.13"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -34,7 +34,7 @@ grib = { version = "0.18.4", default-features = false, features = ["jpeg2000-unp
 image = { version = "0.25.10", default-features = false }
 kiddo = { version = "6.3", default-features = false }
 ndarray = "0.17.2"
-object_store = { version = "=0.14.1", default-features = false, features = ["aws-base", "azure-base", "gcp-base", "reqwest", "ring"] }
+object_store = { version = "=0.14.2", default-features = false, features = ["aws-base", "azure-base", "gcp-base", "reqwest", "ring"] }
 oxih5 = "0.1"
 oxinetcdf = "0.1"
 ab_glyph = "0.2"
@@ -47,7 +47,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-n
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = "1"
 thiserror = "2"
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
 url = { version = "=2.5.8", default-features = false, features = ["std"] }
 
