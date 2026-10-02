@@ -240,6 +240,7 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char('k') => Some(Command::SetPlotKind(crate::app::PlotKind::Cdf)),
         KeyCode::Char('u') => Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile)),
         KeyCode::Char('r') => Some(Command::ResetZoom),
+        KeyCode::Char('R') => Some(Command::ResetVariableView),
         KeyCode::Char('x') => Some(Command::OpenAxisOverlay),
         KeyCode::Enter => Some(Command::ActivatePoint),
         KeyCode::Char('g') => Some(Command::ToggleGridMode),
@@ -314,6 +315,14 @@ mod tests {
         assert_eq!(
             command_from_key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE)),
             Some(Command::NextFile)
+        );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(Command::ResetZoom)
+        );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some(Command::ResetVariableView)
         );
     }
 

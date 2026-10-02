@@ -74,6 +74,7 @@ pub enum Command {
     FocusAxisField(AxisField),
     Zoom(Bounds),
     ResetZoom,
+    ResetVariableView,
     Pan {
         rows: isize,
         cols: isize,
@@ -545,6 +546,7 @@ impl AppState {
             | Command::CycleImageFilter
             | Command::ExportCurrent
             | Command::AutomaticLimits
+            | Command::ResetVariableView
             | Command::ManualLimits { .. }
             | Command::OpenLimits
             | Command::OpenFilter
@@ -917,6 +919,54 @@ impl AppState {
                 if matches!(self.view.overlay, Some(Overlay::Filter)) {
                     self.view.overlay = None;
                 }
+                None
+            }
+            Command::ResetVariableView => {
+                self.view.time_index = 0;
+                self.view.depth_index = 0;
+                self.view.depth_cursor = 0;
+                self.view.playing = false;
+                self.view.playback_speed = 1.0;
+                self.view.palette = Palette::Viridis;
+                self.view.palette_query.clear();
+                self.view.palette_index = 0;
+                self.view.limits = None;
+                self.view.global_limits = None;
+                self.view.limits_manual = false;
+                self.view.filter_range = None;
+                self.view.limit_draft = None;
+                self.view.axis_draft = None;
+                self.view.scale_mode = ScaleMode::Linear;
+                self.view.color_scale_scope = ColorScaleScope::CurrentView;
+                self.view.zoom_bounds = None;
+                self.view.drag = None;
+                self.view.grid_mode = GridMode::Logical;
+                self.view.show_land_borders = false;
+                self.view.fixed_dimensions.iter_mut().for_each(|dimension| {
+                    dimension.index = 0;
+                });
+                self.view.focused_fixed_dimension = 0;
+                if self.view.axis_options.len() >= 2 {
+                    let (x, y) = default_axes(&self.view.axis_options);
+                    self.view.x_axis = Some(x);
+                    self.view.y_axis = Some(y);
+                } else {
+                    self.view.x_axis = None;
+                    self.view.y_axis = None;
+                }
+                self.view.selected_point = None;
+                self.view.selected_points.clear();
+                self.view.selected_coordinates = PointCoordinates::default();
+                self.view.hover_point = None;
+                self.view.cursor = None;
+                self.view.sidebar_focused = false;
+                self.view.time_series.clear();
+                self.view.time_series_labels.clear();
+                self.view.plot_series.clear();
+                self.view.plot_draft = PlotDraft::default();
+                self.view.palette_picker = None;
+                self.view.overlay = None;
+                self.view.help_visible = false;
                 None
             }
             Command::OpenCommandPalette => {
@@ -2043,6 +2093,55 @@ mod raw_dimension_navigation_tests {
         assert_eq!(state.view.fixed_dimensions[1].index, 2);
         state.reduce(Command::MoveFixedDimension(1));
         assert_eq!(state.view.fixed_dimensions[1].index, 2);
+    }
+
+    #[test]
+    fn reset_variable_view_restores_defaults_and_keeps_selected_variable() {
+        let mut state = AppState {
+            variables: vec![variable("temperature", &["latitude", "longitude", "time"])],
+            ..AppState::default()
+        };
+        state.reduce(Command::SelectVariableAt(0));
+        state.view.time_length = 4;
+        state.view.time_index = 3;
+        state.view.depth_length = 5;
+        state.view.depth_index = 2;
+        state.view.depth_cursor = 4;
+        state.view.palette = Palette::Magma.toggle_reversed();
+        state.view.scale_mode = ScaleMode::Log;
+        state.view.color_scale_scope = ColorScaleScope::GlobalView;
+        state.view.limits = Some((2.0, 20.0));
+        state.view.limits_manual = true;
+        state.view.filter_range = Some((4.0, 10.0));
+        state.view.zoom_bounds = Some(Bounds::new(1, 3, 2, 5).unwrap());
+        state.view.grid_mode = GridMode::Projected;
+        state.view.show_land_borders = true;
+        state.view.playing = true;
+        state.view.playback_speed = 4.0;
+        state.view.selected_point = Some((1, 2));
+        state.view.selected_points = vec![(1, 2)];
+
+        state.reduce(Command::ResetVariableView);
+
+        assert_eq!(state.view.selected_variable.as_deref(), Some("temperature"));
+        assert_eq!(state.view.time_index, 0);
+        assert_eq!(state.view.depth_index, 0);
+        assert_eq!(state.view.depth_cursor, 0);
+        assert_eq!(state.view.palette, Palette::Viridis);
+        assert_eq!(state.view.scale_mode, ScaleMode::Linear);
+        assert_eq!(state.view.color_scale_scope, ColorScaleScope::CurrentView);
+        assert_eq!(state.view.limits, None);
+        assert!(!state.view.limits_manual);
+        assert_eq!(state.view.filter_range, None);
+        assert_eq!(state.view.zoom_bounds, None);
+        assert_eq!(state.view.grid_mode, GridMode::Logical);
+        assert!(!state.view.show_land_borders);
+        assert!(!state.view.playing);
+        assert_eq!(state.view.playback_speed, 1.0);
+        assert_eq!(state.view.selected_point, None);
+        assert!(state.view.selected_points.is_empty());
+        assert_eq!(state.view.x_axis.as_deref(), Some("longitude"));
+        assert_eq!(state.view.y_axis.as_deref(), Some("latitude"));
     }
 
     #[test]
