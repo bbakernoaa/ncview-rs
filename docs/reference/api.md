@@ -19,12 +19,12 @@ the code's own rustdoc comments** and published with this site under the
 
 | Module | Responsibility |
 | --- | --- |
-| `data` | Read-only dataset and slice abstractions: NetCDF-4/HDF5, GRIB2 (local and remote), coordinates, diff, reference manifests, virtual datasets |
+| `data` | Read-only dataset and slice abstractions: NetCDF-4/HDF5, GRIB2 (local and remote), coordinates, diff, formula-derived variables (`data::formula::FormulaSource`), reference manifests, virtual datasets |
 | `storage` | Provider-neutral remote object access: locations (`s3://`, `gs://`, `az://`, `abfs[s]://`), range cache, typed operations, session state. All network work lives behind this module and its background runtime |
 | `render` | Color normalization and terminal raster rendering: palettes, land mask, map background, image-protocol selection, viewport-bounded rasterization |
 | `ui` | Ratatui view composition: dashboard, canvas, colorbar, sidebar, level bar, timeline, charts, help, popups, layout |
 | `events` | Terminal event and session handling: keyboard input, mouse, terminal enter/restore lifecycle |
-| `analysis` | Scientific analysis and coordinate-mapping primitives: mapping, projection, time series |
+| `analysis` | Scientific analysis and coordinate-mapping primitives: mapping, projection, time series, equation-editor formula parsing and evaluation (`analysis::formula`) |
 | `app` | Application state: view model, generation counters, variable/palette/limits state, decoded working-set bounds |
 | `export` | File exporters for the current scientific view (PNG, SVG, JSON sidecar) |
 | `error` | `NcvError` — actionable errors carrying file/variable/dimension/capability context |

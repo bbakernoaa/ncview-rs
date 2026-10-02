@@ -41,6 +41,7 @@ pub fn render(
         Overlay::TimeSeries => "Time series",
         Overlay::Plot => "Plot",
         Overlay::CommandPalette => "Command Palette",
+        Overlay::Formula => "Formula editor",
         Overlay::PalettePicker => "Colormap",
     };
     let message = match overlay {
@@ -50,20 +51,19 @@ pub fn render(
         Overlay::TimeSeries => "Values across the time dimension",
         Overlay::Plot => "Choose a plot and its axes",
         Overlay::CommandPalette => "Type to filter commands; Enter runs the selected action",
+        Overlay::Formula => "Combine variables with arithmetic and functions",
         Overlay::PalettePicker => "Choose a colormap; Enter applies it",
     };
-    let width = if matches!(
+    let large = matches!(
         overlay,
-        Overlay::CommandPalette | Overlay::Plot | Overlay::PalettePicker
-    ) {
+        Overlay::CommandPalette | Overlay::Plot | Overlay::Formula | Overlay::PalettePicker
+    );
+    let width = if large {
         area.width.saturating_mul(3) / 4
     } else {
         area.width.saturating_mul(3) / 5
     };
-    let height = if matches!(
-        overlay,
-        Overlay::CommandPalette | Overlay::Plot | Overlay::PalettePicker
-    ) {
+    let height = if large {
         area.height.saturating_mul(3) / 5
     } else {
         area.height.saturating_mul(2) / 5
@@ -170,6 +170,8 @@ pub fn render(
         );
     } else if matches!(overlay, Overlay::Plot) {
         render_plot(frame, popup, view, chart_graphics);
+    } else if matches!(overlay, Overlay::Formula) {
+        render_formula_editor(frame, popup, view, plottable);
     } else if matches!(overlay, Overlay::TimeSeries) {
         let series = plot_series_for_view(view);
         chart::render_plot(
@@ -448,6 +450,71 @@ Tab switches axes  •  ↑↓/←→ changes the selected axis  •  m adds/rem
         &series,
         &histogram_values,
         chart_graphics,
+    );
+}
+
+fn render_formula_editor(frame: &mut Frame, popup: Rect, view: &ViewModel, plottable: &[Variable]) {
+    let heading = |text: &'static str| Span::styled(text, theme::title_style(theme::TEAL));
+    let mut lines = vec![Line::from(heading("Datasets"))];
+    if view.formula_datasets.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  [1] current dataset",
+            theme::muted_style(),
+        )));
+    }
+    for (index, dataset) in view.formula_datasets.iter().enumerate() {
+        lines.push(Line::from(Span::styled(
+            format!("  [{}] {dataset}", index + 1),
+            theme::muted_style(),
+        )));
+    }
+    let names = plottable
+        .iter()
+        .map(|variable| variable.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    lines.push(Line::from(vec![
+        heading("Variables: "),
+        Span::styled(names, theme::muted_style()),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        heading("Formula: "),
+        Span::styled(
+            format!("> {}█", view.formula_draft),
+            theme::title_style(theme::TEXT),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(heading("Defined formulas")));
+    if view.formulas.is_empty() {
+        lines.push(Line::from(Span::styled("  none yet", theme::muted_style())));
+    }
+    for (index, formula) in view.formulas.iter().enumerate() {
+        let selected = view.formula_index == Some(index);
+        lines.push(Line::from(Span::styled(
+            format!("{} {formula}", if selected { "▶" } else { " " }),
+            if selected {
+                theme::title_style(theme::TEXT)
+            } else {
+                theme::muted_style()
+            },
+        )));
+    }
+    lines.push(Line::from(""));
+    for help in [
+        "Operators: + - * / ^ (or **)   Functions: sin cos tan log(ln) log10 exp sqrt abs",
+        "Per-cell over time: mean sum min max   over layers: layer_mean layer_sum layer_min layer_max",
+        "NAME[n] reads dataset n; prefix with name = to label the result",
+        "Enter plot   ↑↓ recall   Del remove recalled   Esc close",
+    ] {
+        lines.push(Line::from(Span::styled(help, theme::muted_style())));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(popup_panel("Formula editor", theme::TEAL)),
+        popup,
     );
 }
 

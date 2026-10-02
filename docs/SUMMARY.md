@@ -11,6 +11,7 @@
    - [Run over SSH](how-to/run-over-ssh.md)
    - [Generate a GRIB2 manifest](how-to/generate-grib2-manifest.md)
    - [Compare and export](how-to/compare-and-export.md)
+   - [Derive variables with formulas](how-to/derive-variables-with-formulas.md)
 4. [Reference](reference/index.md)
    - [Keyboard & mouse reference](reference/keyboard.md)
    - [Command-line reference](reference/cli.md)

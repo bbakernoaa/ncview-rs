@@ -3,6 +3,7 @@
 pub mod coordinates;
 pub mod diff;
 pub mod fixtures;
+pub mod formula;
 pub mod grib2;
 pub mod grib2_catalog;
 pub mod grib2_identity;

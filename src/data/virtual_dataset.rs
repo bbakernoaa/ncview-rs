@@ -448,6 +448,25 @@ fn coordinates_match(
 /// latitude/longitude roles identify the spatial plane, followed by explicit
 /// time/depth roles and finally the conventional first/second-axis fallback.
 pub fn leading_lengths(metadata: &DatasetMetadata, variable: &Variable) -> (usize, usize) {
+    let (time, depth) = leading_axes(metadata, variable);
+    let length = |axis: Option<usize>| {
+        axis.and_then(|axis| variable.dimensions.get(axis))
+            .and_then(|name| {
+                metadata
+                    .dimensions
+                    .iter()
+                    .find(|dimension| dimension.name == *name)
+            })
+            .map_or(1, |dimension| dimension.length)
+    };
+    (length(time), length(depth))
+}
+
+/// Positions of the logical time and depth axes within `variable.dimensions`.
+pub fn leading_axes(
+    metadata: &DatasetMetadata,
+    variable: &Variable,
+) -> (Option<usize>, Option<usize>) {
     let row_index = variable
         .dimensions
         .iter()
@@ -475,12 +494,7 @@ pub fn leading_lengths(metadata: &DatasetMetadata, variable: &Variable) -> (usiz
         .iter()
         .enumerate()
         .filter(|(axis, _)| *axis != row_index && *axis != col_index)
-        .fold((1, 1), |(time, depth), (axis, name)| {
-            let length = metadata
-                .dimensions
-                .iter()
-                .find(|dimension| dimension.name == *name)
-                .map_or(1, |dimension| dimension.length);
+        .fold((None, None), |(time, depth), (axis, name)| {
             let role = match metadata
                 .dimensions
                 .iter()
@@ -497,8 +511,8 @@ pub fn leading_lengths(metadata: &DatasetMetadata, variable: &Variable) -> (usiz
                 },
             };
             match role {
-                AxisRole::Time => (length, depth),
-                AxisRole::Depth => (time, length),
+                AxisRole::Time => (Some(axis), depth),
+                AxisRole::Depth => (time, Some(axis)),
                 _ => (time, depth),
             }
         })

@@ -21,3 +21,5 @@ Task-oriented recipes: each guide solves one concrete problem.
   VirtualiZarr reference JSON from a `.idx` sidecar
 - [Compare and export](compare-and-export.md) — difference mode, PNG/SVG/JSON
   exports for slides
+- [Derive variables with formulas](derive-variables-with-formulas.md) —
+  VERDI-style formula editor across multiple files, `--formula` and `--batch`
