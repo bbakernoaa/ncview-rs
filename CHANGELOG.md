@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.14](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.13...v0.5.14) - 2026-10-02
+
+### Fixed
+
+- optimizations and pop up hiding  ([#50](https://github.com/bbakernoaa/ncview-rs/pull/50))
+
 ## [0.5.13](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.12...v0.5.13) - 2026-10-01
 
 ### Other
