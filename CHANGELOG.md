@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.15](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.14...v0.5.15) - 2026-10-02
+
+### Added
+
+- add ResetVariableView command to restore default view settings ([#52](https://github.com/bbakernoaa/ncview-rs/pull/52))
+
 ## [0.5.14](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.13...v0.5.14) - 2026-10-02
 
 ### Fixed
