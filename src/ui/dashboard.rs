@@ -71,7 +71,7 @@ pub fn render_with_search_and_image(
     variable_query: &str,
     variable_search_active: bool,
     graphics: Option<&mut GraphicsRenderer>,
-    chart_graphics: Option<&mut GraphicsRenderer>,
+    mut chart_graphics: Option<&mut GraphicsRenderer>,
 ) {
     let graphics_label = graphics
         .as_ref()
@@ -275,6 +275,15 @@ pub fn render_with_search_and_image(
         status
     };
     status::render(frame, areas.status, &status);
+    if let Some(renderer) = chart_graphics.as_deref_mut()
+        && (view.variable_search_active
+            || !matches!(
+                view.overlay,
+                Some(crate::app::Overlay::Plot | crate::app::Overlay::TimeSeries)
+            ))
+    {
+        renderer.retire_overlay();
+    }
     popup::render(
         frame,
         area,
@@ -391,6 +400,12 @@ fn spatial_axes_selected(view: &ViewModel, metadata: &DatasetMetadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{format_point_value, point_axis_label};
+    use crate::{
+        app::AppState,
+        data::{DatasetFormat, DatasetMetadata},
+        render::protocol::GraphicsRenderer,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn point_values_switch_to_scientific_notation_when_needed() {
@@ -418,5 +433,40 @@ mod tests {
             point_axis_label("lat", Some("lat"), Some(12.5), 3),
             "lat 12.50000"
         );
+    }
+
+    #[test]
+    fn closing_chart_overlay_retires_pending_secondary_image() {
+        let mut state = AppState::default();
+        state.view.overlay = None;
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        let mut chart_graphics = GraphicsRenderer::probe();
+        chart_graphics.stage_test_overlay_state();
+        assert!(chart_graphics.has_pending_image());
+        assert!(chart_graphics.working_set_bytes() > 0);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_with_search_and_image(
+                    frame,
+                    frame.area(),
+                    &state.view,
+                    "fixture",
+                    &metadata,
+                    &[],
+                    "",
+                    false,
+                    None,
+                    Some(&mut chart_graphics),
+                );
+            })
+            .unwrap();
+        assert!(!chart_graphics.has_pending_image());
+        assert_eq!(chart_graphics.working_set_bytes(), 0);
     }
 }

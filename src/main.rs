@@ -16,7 +16,11 @@ use crossterm::{
     event, execute,
     terminal::{LeaveAlternateScreen, disable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{
+    Terminal,
+    backend::{Backend, CrosstermBackend},
+    layout::Rect,
+};
 
 use ncview_rs::{
     analysis::mapping::screen_to_source_with_row_flip,
@@ -798,7 +802,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 {
                     break;
                 }
-                if handle_command(
+                let overlay_before_command = state.view.overlay;
+                let should_continue = handle_command(
                     command,
                     &mut state,
                     &sources,
@@ -811,7 +816,13 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &plot_tx,
                     &mut plot_cancelled,
                     &mut graphics,
-                ) {
+                );
+                clear_terminal_after_overlay_close(
+                    &mut terminal,
+                    overlay_before_command,
+                    state.view.overlay,
+                )?;
+                if should_continue {
                     continue;
                 }
             }
@@ -833,6 +844,20 @@ fn is_mouse_motion(event: &crossterm::event::Event) -> bool {
         crossterm::event::Event::Mouse(mouse)
             if mouse.kind == crossterm::event::MouseEventKind::Moved
     )
+}
+
+/// Graphics protocols can leave popup text in terminal cells that are skipped
+/// while an image is placed there. Clear the physical screen when an overlay
+/// closes so the next full dashboard draw starts from a clean terminal frame.
+fn clear_terminal_after_overlay_close<B: Backend>(
+    terminal: &mut Terminal<B>,
+    previous: Option<Overlay>,
+    current: Option<Overlay>,
+) -> Result<(), B::Error> {
+    if previous.is_some() && current.is_none() {
+        terminal.clear()?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3580,6 +3605,61 @@ mod timeline_order_tests {
             compare_time_labels("2026-09-10T12:00:00Z", "coordinate index"),
             std::cmp::Ordering::Less
         );
+    }
+}
+
+#[cfg(test)]
+mod overlay_dismissal_tests {
+    use super::clear_terminal_after_overlay_close;
+    use ncview_rs::app::Overlay;
+    use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+
+    #[test]
+    fn closing_palette_picker_clears_stale_terminal_cells() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal builds");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("Choose a colormap"), frame.area());
+            })
+            .expect("popup frame renders");
+
+        clear_terminal_after_overlay_close(&mut terminal, Some(Overlay::PalettePicker), None)
+            .expect("terminal clears after the popup closes");
+
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| cell.symbol() == " ")
+        );
+    }
+
+    #[test]
+    fn keeping_an_overlay_open_does_not_clear_the_terminal() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal builds");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("Choose a colormap"), frame.area());
+            })
+            .expect("popup frame renders");
+
+        clear_terminal_after_overlay_close(
+            &mut terminal,
+            Some(Overlay::PalettePicker),
+            Some(Overlay::PalettePicker),
+        )
+        .expect("no clear is needed while the popup stays open");
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Choose a colormap"));
     }
 }
 
