@@ -140,6 +140,23 @@ fn cache_tracks_bytes_evicts_lru_and_invalidates_by_identity() {
         assert!(cache.get(&identity, second_range).is_none());
         assert!(cache.get(&identity, first_range).is_some());
         assert_eq!(cache.byte_usage(), 8);
+        cache
+            .insert(
+                CacheCategory::Metadata,
+                RangeBlock::new(&identity, first_range, Bytes::from_static(b"ABCD")).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            cache.byte_usage(),
+            8,
+            "replacement must not double count bytes"
+        );
+        assert_eq!(cache.category_usage(CacheCategory::Metadata), 4);
+        assert_eq!(cache.category_usage(CacheCategory::Range), 4);
+        assert_eq!(
+            &cache.get(&identity, first_range).unwrap().bytes()[..],
+            b"ABCD"
+        );
         cache.invalidate_identity(identity.cache_token());
         assert_eq!(cache.byte_usage(), 0);
         assert!(cache.get(&identity, first_range).is_none());

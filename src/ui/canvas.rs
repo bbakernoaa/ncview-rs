@@ -215,7 +215,7 @@ fn render_content(
     }
     let Some(slice) = slice else { return };
     let (rows, cols) = slice.values.dim();
-    let land_detail = landmask::detail_for_grid(slice.coordinates.as_ref());
+    let land_detail = landmask::detail_for_grid(slice.coordinates.as_deref());
     if inner.width == 0 || inner.height == 0 || rows == 0 || cols == 0 {
         return;
     }
@@ -251,14 +251,15 @@ fn render_content(
                 scale,
                 // Keep the transient hover cursor out of the protocol image.
                 // The status bar still reports the exact hovered
-                // coordinate/value, while the pinned point remains part of
-                // the image and only changes on click.
+                // coordinate/value. The pinned point is a terminal-cell
+                // overlay so selection changes do not rebuild the raster.
                 target_width,
                 target_height,
-                selected_point,
+                None,
             )
             .into()
         }) {
+            render_selected_marker(frame, image_area, slice, selected_point);
             render_drag_box(frame, image_area, drag, zoom_active);
             render_loading_badge(frame, inner, loading);
             return;
@@ -270,7 +271,7 @@ fn render_content(
         map_background::render_with_palette_cached(
             width,
             height,
-            slice.coordinates.as_ref(),
+            slice.coordinates.as_deref(),
             land_detail,
             &palette,
         )
@@ -381,7 +382,7 @@ fn map_render_key(
     filter: Option<(f64, f64)>,
     show_land_borders: bool,
     scale: ScaleMode,
-    selected_point: Option<(usize, usize)>,
+    _selected_point: Option<(usize, usize)>,
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     generation.hash(&mut hasher);
@@ -394,8 +395,57 @@ fn map_render_key(
     hash_limits(&mut hasher, filter);
     show_land_borders.hash(&mut hasher);
     scale.hash(&mut hasher);
-    selected_point.hash(&mut hasher);
     hasher.finish()
+}
+
+fn render_selected_marker(
+    frame: &mut Frame,
+    area: Rect,
+    slice: &Slice2D,
+    selected_point: Option<(usize, usize)>,
+) {
+    let Some((selected_row, selected_col)) = selected_point else {
+        return;
+    };
+    let Some(row) = selected_row.checked_sub(slice.source_bounds.row_start) else {
+        return;
+    };
+    let Some(col) = selected_col.checked_sub(slice.source_bounds.col_start) else {
+        return;
+    };
+    let (rows, cols) = slice.values.dim();
+    if row >= rows || col >= cols || rows == 0 || cols == 0 || area.is_empty() {
+        return;
+    }
+    let flip_rows = slice
+        .coordinates
+        .as_ref()
+        .is_some_and(|grid| grid.latitude_increases_with_source_row());
+    let display_row = slice.coordinates.as_ref().map_or_else(
+        || row.saturating_mul(usize::from(area.height)) / rows,
+        |grid| {
+            grid.display_row_for_source_row_with_flip(
+                row,
+                rows,
+                usize::from(area.height),
+                flip_rows,
+            )
+        },
+    );
+    let display_col = col.saturating_mul(usize::from(area.width)) / cols;
+    if display_row >= usize::from(area.height) || display_col >= usize::from(area.width) {
+        return;
+    }
+    let marker_area = Rect::new(
+        area.x.saturating_add(display_col as u16),
+        area.y.saturating_add(display_row as u16),
+        1,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new("◆").style(Style::default().fg(Color::Rgb(255, 230, 160))),
+        marker_area,
+    );
 }
 
 fn hash_limits(hasher: &mut impl Hasher, limits: Option<(f64, f64)>) {
@@ -451,4 +501,47 @@ fn render_drag_box(frame: &mut Frame, area: Rect, drag: Option<DragState>, zoom_
             .border_style(Style::default().fg(Color::Rgb(255, 230, 160))),
         rect,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_render_key, render_selected_marker};
+    use crate::data::fixtures::regular_values;
+    use crate::render::colors::{Palette, ScaleMode};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    #[test]
+    fn selected_point_does_not_invalidate_base_raster_key() {
+        let key = |selected_point| {
+            map_render_key(
+                7,
+                Rect::new(2, 3, 80, 40),
+                1024,
+                2048,
+                &Palette::Viridis,
+                None,
+                None,
+                false,
+                ScaleMode::Linear,
+                selected_point,
+            )
+        };
+
+        assert_eq!(key(None), key(Some((12, 34))));
+        assert_eq!(key(Some((12, 34))), key(Some((15, 34))));
+    }
+
+    #[test]
+    fn selected_point_overlay_maps_source_cell_to_graphics_cell() {
+        let slice = regular_values(8, 8).expect("test dimensions are valid");
+        let mut terminal = Terminal::new(TestBackend::new(10, 10)).expect("terminal builds");
+        terminal
+            .draw(|frame| {
+                render_selected_marker(frame, Rect::new(1, 1, 4, 4), &slice, Some((4, 6)));
+            })
+            .expect("marker renders");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(4, 3)].symbol(), "◆");
+    }
 }

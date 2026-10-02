@@ -118,9 +118,11 @@ fn variable_search_command(key: KeyEvent) -> Option<Command> {
 
 fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
     command_palette_shortcut(key).or(match key.code {
+        KeyCode::Esc if overlay == Overlay::PalettePicker => Some(Command::CancelPalettePicker),
         KeyCode::Esc => Some(Command::Quit),
         KeyCode::Enter => Some(match overlay {
             Overlay::CommandPalette => Command::ExecuteCommandPalette,
+            Overlay::PalettePicker => Command::CommitPalettePicker,
             Overlay::Limits | Overlay::Filter => Command::ApplyLimitDraft,
             Overlay::Formula => Command::SubmitFormula,
             _ => Command::ActivatePoint,
@@ -132,6 +134,9 @@ fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
         }),
         KeyCode::Up => Some(text_overlay_direction(overlay, -1)),
         KeyCode::Down => Some(text_overlay_direction(overlay, 1)),
+        KeyCode::Char('v') if overlay == Overlay::PalettePicker => {
+            Some(Command::TogglePalettePickerReverse)
+        }
         KeyCode::Char(character) => Some(Command::InputChar(character)),
         _ => None,
     })
@@ -140,6 +145,7 @@ fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
 fn text_overlay_direction(overlay: Overlay, direction: isize) -> Command {
     match overlay {
         Overlay::CommandPalette => Command::PaletteMove(direction),
+        Overlay::PalettePicker => Command::MovePalettePicker(direction),
         Overlay::Axis => Command::CycleAxis(direction),
         Overlay::Formula => Command::FormulaMove(direction),
         _ => Command::NextLimitField,
@@ -174,6 +180,10 @@ fn help_command(key: KeyEvent) -> Option<Command> {
 fn sidebar_command(key: KeyEvent) -> Option<Command> {
     match key.code {
         KeyCode::Tab | KeyCode::Esc => Some(Command::ToggleSidebarFocus),
+        KeyCode::Char(',') => Some(Command::CycleFixedDimension(-1)),
+        KeyCode::Char('.') => Some(Command::CycleFixedDimension(1)),
+        KeyCode::Char(';') => Some(Command::MoveFixedDimension(-1)),
+        KeyCode::Char('\'') => Some(Command::MoveFixedDimension(1)),
         KeyCode::Enter => Some(Command::ApplyDepthCursor),
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('[') => Some(Command::MoveDepthCursor(-1)),
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char(']') => {
@@ -215,7 +225,11 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char('+') => Some(Command::IncreasePlaybackSpeed),
         KeyCode::Char('[') => Some(Command::MoveDepth(-1)),
         KeyCode::Char(']') => Some(Command::MoveDepth(1)),
-        KeyCode::Char('c') => Some(Command::CyclePalette),
+        KeyCode::Char(',') => Some(Command::CycleFixedDimension(-1)),
+        KeyCode::Char('.') => Some(Command::CycleFixedDimension(1)),
+        KeyCode::Char(';') => Some(Command::MoveFixedDimension(-1)),
+        KeyCode::Char('\'') => Some(Command::MoveFixedDimension(1)),
+        KeyCode::Char('c') => Some(Command::OpenPalettePicker),
         KeyCode::Char('v') => Some(Command::TogglePaletteReverse),
         KeyCode::Char('i') => Some(Command::CycleImageFilter),
         KeyCode::Char('e') => Some(Command::ExportCurrent),
@@ -337,6 +351,30 @@ mod tests {
     }
 
     #[test]
+    fn palette_picker_keys_open_navigate_apply_cancel_and_reverse_draft() {
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Some(Command::OpenPalettePicker)
+        );
+        let mode = InputMode::TextOverlay(Overlay::PalettePicker);
+        let map = |code| command_from_key_with_mode(KeyEvent::new(code, KeyModifiers::NONE), mode);
+        assert_eq!(map(KeyCode::Up), Some(Command::MovePalettePicker(-1)));
+        assert_eq!(map(KeyCode::Down), Some(Command::MovePalettePicker(1)));
+        assert_eq!(map(KeyCode::Enter), Some(Command::CommitPalettePicker));
+        assert_eq!(map(KeyCode::Esc), Some(Command::CancelPalettePicker));
+        assert_eq!(
+            map(KeyCode::Char('v')),
+            Some(Command::TogglePalettePickerReverse)
+        );
+        assert_eq!(map(KeyCode::Char('p')), Some(Command::InputChar('p')));
+        assert_eq!(map(KeyCode::Backspace), Some(Command::DeleteInput));
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
+            Some(Command::TogglePaletteReverse)
+        );
+    }
+
+    #[test]
     fn tab_toggles_sidebar_focus_in_normal_mode() {
         assert_eq!(
             command_from_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
@@ -360,6 +398,22 @@ mod tests {
         assert_eq!(map(KeyCode::Enter), Some(Command::ApplyDepthCursor));
         assert_eq!(map(KeyCode::Tab), Some(Command::ToggleSidebarFocus));
         assert_eq!(map(KeyCode::Esc), Some(Command::ToggleSidebarFocus));
+        assert_eq!(
+            map(KeyCode::Char(',')),
+            Some(Command::CycleFixedDimension(-1))
+        );
+        assert_eq!(
+            map(KeyCode::Char('.')),
+            Some(Command::CycleFixedDimension(1))
+        );
+        assert_eq!(
+            map(KeyCode::Char(';')),
+            Some(Command::MoveFixedDimension(-1))
+        );
+        assert_eq!(
+            map(KeyCode::Char('\'')),
+            Some(Command::MoveFixedDimension(1))
+        );
     }
 
     #[test]

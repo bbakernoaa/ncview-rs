@@ -278,6 +278,30 @@ impl GraphicsRenderer {
         self.pending.is_some()
     }
 
+    /// Forget an overlay image when its popup closes. The next popup draw is
+    /// encoded afresh, and Kitty virtual placements are removed as Ratatui
+    /// replaces their placeholder cells with the map frame.
+    pub fn retire_overlay(&mut self) {
+        self.image = None;
+        self.image_key = None;
+        self.raster = None;
+        self.pending = None;
+        self.image_bytes = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stage_test_overlay_state(&mut self) {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        self.image_bytes = 12;
+        self.raster = Some((1, DynamicImage::new_rgb8(2, 2)));
+        self.pending = Some(PendingImage {
+            key: 2,
+            bytes: 8,
+            receiver,
+        });
+    }
+
     /// Bytes retained by the current encoded image and the replacement being
     /// prepared. The input raster is viewport-bounded, so this is the useful
     /// accounting boundary for rendered transport buffers.

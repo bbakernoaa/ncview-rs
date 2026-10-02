@@ -38,6 +38,13 @@ cargo install --path . --locked
 ncv path/to/data.nc
 ```
 
+Building the GRIB projection support uses PROJ. The build detects a system
+PROJ 9.6.2 or newer through `pkg-config`; when it cannot find one, it builds
+the bundled PROJ source instead. That fallback requires CMake, a C/C++ compiler,
+and SQLite3 development headers and libraries. On module-based systems, load
+the PROJ module or add the directory containing `proj.pc` to `PKG_CONFIG_PATH`
+to use the system installation.
+
 The release workflow publishes Linux x86_64, a glibc-independent static Linux x86_64 (musl),
 macOS arm64, and Windows x86_64 archives for tags named `v*`. Each release includes a
 `SHA256SUMS` file. On older HPC distributions, use `ncv-linux-x86_64-musl.tar.gz`.

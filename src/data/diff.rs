@@ -167,7 +167,7 @@ impl DataSource for DiffSource {
         diff_slice.is_diff = true;
         let coords = slice1.coordinates.or(slice2.coordinates);
         Ok(if let Some(c) = coords {
-            diff_slice.with_coordinates(c)
+            diff_slice.with_shared_coordinates(c)
         } else {
             diff_slice
         })

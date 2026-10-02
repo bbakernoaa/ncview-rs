@@ -30,6 +30,8 @@ pub enum Command {
     ToggleSidebarFocus,
     MoveDepthCursor(isize),
     ApplyDepthCursor,
+    CycleFixedDimension(isize),
+    MoveFixedDimension(isize),
     PointerScroll {
         x: u16,
         y: u16,
@@ -44,6 +46,11 @@ pub enum Command {
     },
     CyclePalette,
     TogglePaletteReverse,
+    OpenPalettePicker,
+    MovePalettePicker(isize),
+    TogglePalettePickerReverse,
+    CommitPalettePicker,
+    CancelPalettePicker,
     CycleImageFilter,
     ExportCurrent,
     AutomaticLimits,
@@ -173,6 +180,7 @@ pub struct ViewModel {
     pub help_visible: bool,
     pub palette: Palette,
     pub palette_catalog: Vec<Palette>,
+    pub palette_picker: Option<PalettePickerState>,
     pub limits: Option<(f64, f64)>,
     pub global_limits: Option<(f64, f64)>,
     pub limits_manual: bool,
@@ -199,6 +207,8 @@ pub struct ViewModel {
     pub x_axis: Option<String>,
     pub y_axis: Option<String>,
     pub axis_options: Vec<String>,
+    pub fixed_dimensions: Vec<FixedDimension>,
+    pub focused_fixed_dimension: usize,
     pub grid_mode: GridMode,
     pub show_land_borders: bool,
     pub scale_mode: ScaleMode,
@@ -214,6 +224,19 @@ pub struct ViewModel {
     /// Variable to select once the formula sources are rebuilt.
     pub formula_request: Option<String>,
     pub formulas_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedDimension {
+    pub name: String,
+    pub index: usize,
+    pub length: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PalettePickerState {
+    pub focused_palette: Palette,
+    pub query: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +266,7 @@ pub enum Overlay {
     Plot,
     CommandPalette,
     Formula,
+    PalettePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +289,8 @@ impl ViewModel {
                 | Overlay::Filter
                 | Overlay::Axis
                 | Overlay::CommandPalette
-                | Overlay::Formula => InputMode::TextOverlay(overlay),
+                | Overlay::Formula
+                | Overlay::PalettePicker => InputMode::TextOverlay(overlay),
                 Overlay::Plot | Overlay::TimeSeries => InputMode::PlotOverlay,
             }
         } else if self.help_visible {
@@ -414,6 +439,7 @@ impl Default for ViewModel {
             help_visible: false,
             palette: Palette::Viridis,
             palette_catalog: discover_colormaps(),
+            palette_picker: None,
             limits: None,
             global_limits: None,
             limits_manual: false,
@@ -440,6 +466,8 @@ impl Default for ViewModel {
             x_axis: None,
             y_axis: None,
             axis_options: Vec::new(),
+            fixed_dimensions: Vec::new(),
+            focused_fixed_dimension: 0,
             grid_mode: GridMode::Logical,
             // Coastline polygons are an opt-in presentation overlay. Avoid
             // decoding/indexing them during the initial map render; press b
@@ -529,6 +557,8 @@ impl AppState {
             | Command::ToggleSidebarFocus
             | Command::MoveDepthCursor(_)
             | Command::ApplyDepthCursor
+            | Command::CycleFixedDimension(_)
+            | Command::MoveFixedDimension(_)
             | Command::PointerScroll { .. }
             | Command::ToggleHelp
             | Command::UpdateVariableQuery(_)) => self.reduce_navigation(command),
@@ -541,7 +571,12 @@ impl AppState {
             | Command::OpenLimits
             | Command::OpenFilter
             | Command::ClearFilter
-            | Command::OpenCommandPalette) => self.reduce_display(command),
+            | Command::OpenCommandPalette
+            | Command::OpenPalettePicker
+            | Command::MovePalettePicker(_)
+            | Command::TogglePalettePickerReverse
+            | Command::CommitPalettePicker
+            | Command::CancelPalettePicker) => self.reduce_display(command),
             command @ (Command::OpenPlot
             | Command::SetPlotKind(_)
             | Command::CyclePlotAxis(_)
@@ -657,6 +692,9 @@ impl AppState {
                     self.view.variable_search_active = false;
                     self.variable_query.clear();
                     self.view.variable_browser_index = 0;
+                } else if matches!(self.view.overlay, Some(Overlay::PalettePicker)) {
+                    self.view.overlay = None;
+                    self.view.palette_picker = None;
                 } else if self.view.overlay.is_some() {
                     self.view.overlay = None;
                     self.view.limit_draft = None;
@@ -772,6 +810,24 @@ impl AppState {
                 let cursor = self.view.depth_cursor;
                 self.reduce(Command::SetDepth(cursor))
             }
+            Command::CycleFixedDimension(delta) => {
+                self.view.focused_fixed_dimension = bounded_index(
+                    self.view.focused_fixed_dimension,
+                    delta,
+                    self.view.fixed_dimensions.len(),
+                );
+                None
+            }
+            Command::MoveFixedDimension(delta) => {
+                if let Some(dimension) = self
+                    .view
+                    .fixed_dimensions
+                    .get_mut(self.view.focused_fixed_dimension)
+                {
+                    dimension.index = bounded_index(dimension.index, delta, dimension.length);
+                }
+                None
+            }
             Command::ToggleSidebarFocus => {
                 self.view.sidebar_focused = !self.view.sidebar_focused;
                 if self.view.sidebar_focused {
@@ -817,6 +873,66 @@ impl AppState {
                     } else {
                         self.view.palette_catalog[next].clone()
                     };
+                }
+                None
+            }
+            Command::OpenPalettePicker => {
+                self.view.help_visible = false;
+                self.view.palette_picker = Some(PalettePickerState {
+                    focused_palette: self.view.palette.clone(),
+                    query: String::new(),
+                });
+                self.view.overlay = Some(Overlay::PalettePicker);
+                None
+            }
+            Command::MovePalettePicker(delta) => {
+                let picker = self.view.palette_picker.as_mut()?;
+                if self.view.palette_catalog.is_empty() {
+                    picker.focused_palette = picker.focused_palette.clone().next();
+                    return None;
+                }
+                let matches = palette_catalog_matches(&self.view.palette_catalog, &picker.query);
+                if matches.is_empty() {
+                    return None;
+                }
+                let reversed = picker.focused_palette.is_reversed();
+                let lookup_palette = if reversed {
+                    picker.focused_palette.clone().toggle_reversed()
+                } else {
+                    picker.focused_palette.clone()
+                };
+                let current = matches
+                    .iter()
+                    .position(|&index| self.view.palette_catalog[index] == lookup_palette)
+                    .unwrap_or(0);
+                let next = bounded_index(current, delta, matches.len());
+                let next_palette = &self.view.palette_catalog[matches[next]];
+                picker.focused_palette = if reversed {
+                    next_palette.clone().toggle_reversed()
+                } else {
+                    next_palette.clone()
+                };
+                None
+            }
+            Command::CommitPalettePicker => {
+                if let Some(picker) = self.view.palette_picker.take() {
+                    self.view.palette = picker.focused_palette;
+                }
+                if matches!(self.view.overlay, Some(Overlay::PalettePicker)) {
+                    self.view.overlay = None;
+                }
+                None
+            }
+            Command::TogglePalettePickerReverse => {
+                if let Some(picker) = self.view.palette_picker.as_mut() {
+                    picker.focused_palette = picker.focused_palette.clone().toggle_reversed();
+                }
+                None
+            }
+            Command::CancelPalettePicker => {
+                self.view.palette_picker = None;
+                if matches!(self.view.overlay, Some(Overlay::PalettePicker)) {
+                    self.view.overlay = None;
                 }
                 None
             }
@@ -1074,6 +1190,22 @@ impl AppState {
                         self.view.formula_draft.push(character);
                         self.view.formula_index = None;
                     }
+                } else if matches!(self.view.overlay, Some(Overlay::PalettePicker))
+                    && (character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ' '))
+                    && let Some(picker) = self.view.palette_picker.as_mut()
+                    && picker.query.len() < 64
+                {
+                    picker.query.push(character);
+                    if let Some(index) =
+                        palette_catalog_matches(&self.view.palette_catalog, &picker.query).first()
+                    {
+                        let reversed = picker.focused_palette.is_reversed();
+                        picker.focused_palette = if reversed {
+                            self.view.palette_catalog[*index].clone().toggle_reversed()
+                        } else {
+                            self.view.palette_catalog[*index].clone()
+                        };
+                    }
                 } else if self.view.variable_search_active
                     && (character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
                 {
@@ -1122,6 +1254,20 @@ impl AppState {
                 } else if matches!(self.view.overlay, Some(Overlay::Formula)) {
                     self.view.formula_draft.pop();
                     self.view.formula_index = None;
+                } else if matches!(self.view.overlay, Some(Overlay::PalettePicker))
+                    && let Some(picker) = self.view.palette_picker.as_mut()
+                {
+                    picker.query.pop();
+                    if let Some(index) =
+                        palette_catalog_matches(&self.view.palette_catalog, &picker.query).first()
+                    {
+                        let reversed = picker.focused_palette.is_reversed();
+                        picker.focused_palette = if reversed {
+                            self.view.palette_catalog[*index].clone().toggle_reversed()
+                        } else {
+                            self.view.palette_catalog[*index].clone()
+                        };
+                    }
                 } else if self.view.variable_search_active {
                     self.variable_query.pop();
                     self.view.variable_browser_index = 0;
@@ -1570,6 +1716,15 @@ impl AppState {
         }
         self.view.x_axis = None;
         self.view.y_axis = None;
+        self.view.fixed_dimensions.clear();
+        self.view.focused_fixed_dimension = 0;
+        if self.view.axis_options.len() >= 2 {
+            let (x, y) = default_axes(&self.view.axis_options);
+            if !x.is_empty() && !y.is_empty() {
+                self.view.x_axis = Some(x);
+                self.view.y_axis = Some(y);
+            }
+        }
         self.view.selected_point = None;
         self.view.selected_points.clear();
         self.view.selected_coordinates = PointCoordinates::default();
@@ -1664,21 +1819,39 @@ fn is_vertical_dimension(name: &str) -> bool {
 }
 
 fn default_axes(options: &[String]) -> (String, String) {
-    let x = options
+    let named = |tokens: &[&str]| {
+        options
+            .iter()
+            .find(|name| {
+                let lower = name.to_ascii_lowercase();
+                tokens.iter().any(|token| lower.contains(token))
+            })
+            .cloned()
+    };
+    let x = named(&["longitude", "lon", "width", "column", "cols"]);
+    let y = named(&["latitude", "lat", "height", "row", "rows"]);
+    if let (Some(x), Some(y)) = (x, y) {
+        return (x, y);
+    }
+    let eligible = options
         .iter()
-        .find(|name| {
+        .filter(|name| {
             let lower = name.to_ascii_lowercase();
-            lower.contains("lon") || lower == "x"
+            !["time", "date", "depth", "level"]
+                .iter()
+                .any(|token| lower.contains(token))
         })
+        .cloned()
+        .collect::<Vec<_>>();
+    let x = eligible
+        .last()
         .cloned()
         .or_else(|| options.last().cloned())
         .unwrap_or_else(|| "lon".into());
-    let y = options
+    let y = eligible
         .iter()
-        .find(|name| {
-            let lower = name.to_ascii_lowercase();
-            (lower.contains("lat") || lower == "y") && !name.eq_ignore_ascii_case(&x)
-        })
+        .rev()
+        .nth(1)
         .cloned()
         .or_else(|| {
             options
@@ -1741,7 +1914,7 @@ pub const COMMAND_PALETTE: &[PaletteEntry] = &[
         shortcut: "?",
     },
     PaletteEntry {
-        label: "Cycle colormap",
+        label: "Choose colormap",
         shortcut: "c",
     },
     PaletteEntry {
@@ -1860,6 +2033,16 @@ pub fn palette_matches(query: &str) -> Vec<usize> {
         .collect()
 }
 
+pub fn palette_catalog_matches(catalog: &[Palette], query: &str) -> Vec<usize> {
+    let query = query.to_ascii_lowercase();
+    catalog
+        .iter()
+        .enumerate()
+        .filter(|(_, palette)| fuzzy_match(palette.name(), &query))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 fn fuzzy_match(value: &str, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -1874,7 +2057,7 @@ fn fuzzy_match(value: &str, query: &str) -> bool {
 fn palette_command(index: usize) -> Command {
     match index {
         0 => Command::ToggleHelp,
-        1 => Command::CyclePalette,
+        1 => Command::OpenPalettePicker,
         2 => Command::TogglePaletteReverse,
         3 => Command::CycleImageFilter,
         4 => Command::ExportCurrent,
@@ -1902,5 +2085,235 @@ fn palette_command(index: usize) -> Command {
         26 => Command::NextFile,
         27 => Command::OpenFormulaEditor,
         _ => Command::ToggleHelp,
+    }
+}
+
+#[cfg(test)]
+mod raw_dimension_navigation_tests {
+    use super::*;
+
+    fn variable(name: &str, dimensions: &[&str]) -> Variable {
+        Variable {
+            name: name.into(),
+            dimensions: dimensions.iter().map(|value| (*value).into()).collect(),
+            numeric: true,
+            units: None,
+            long_name: None,
+            standard_name: None,
+        }
+    }
+
+    #[test]
+    fn raw_tile_variable_defaults_to_width_by_height_and_switch_resets_indices() {
+        let mut state = AppState {
+            variables: vec![
+                variable("brdf", &["SAT_Tile_Height", "SAT_Tile_Width", "Kernel_Num"]),
+                variable("other", &["Row", "Column"]),
+            ],
+            ..AppState::default()
+        };
+        state.reduce(Command::SelectVariableAt(0));
+        assert_eq!(state.view.x_axis.as_deref(), Some("SAT_Tile_Width"));
+        assert_eq!(state.view.y_axis.as_deref(), Some("SAT_Tile_Height"));
+        state.view.fixed_dimensions = vec![FixedDimension {
+            name: "Kernel_Num".into(),
+            index: 2,
+            length: 3,
+        }];
+        state.reduce(Command::SelectVariableAt(1));
+        assert!(state.view.fixed_dimensions.is_empty());
+        assert_eq!(state.view.x_axis.as_deref(), Some("Column"));
+        assert_eq!(state.view.y_axis.as_deref(), Some("Row"));
+    }
+
+    #[test]
+    fn fixed_dimension_navigation_is_bounded_and_each_dimension_is_independent() {
+        let mut state = AppState::default();
+        state.view.fixed_dimensions = vec![
+            FixedDimension {
+                name: "Retrieval".into(),
+                index: 0,
+                length: 2,
+            },
+            FixedDimension {
+                name: "Kernel_Num".into(),
+                index: 0,
+                length: 3,
+            },
+        ];
+        state.reduce(Command::MoveFixedDimension(-1));
+        assert_eq!(state.view.fixed_dimensions[0].index, 0);
+        state.reduce(Command::MoveFixedDimension(1));
+        state.reduce(Command::CycleFixedDimension(1));
+        state.reduce(Command::MoveFixedDimension(2));
+        assert_eq!(state.view.fixed_dimensions[0].index, 1);
+        assert_eq!(state.view.fixed_dimensions[1].index, 2);
+        state.reduce(Command::MoveFixedDimension(1));
+        assert_eq!(state.view.fixed_dimensions[1].index, 2);
+    }
+
+    #[test]
+    fn selecting_non_plottable_variable_does_not_assign_ghost_axes() {
+        let mut state = AppState {
+            variables: vec![variable("profile", &["pressure"])],
+            ..AppState::default()
+        };
+        state.reduce(Command::SelectVariableAt(0));
+        assert_eq!(state.view.selected_variable.as_deref(), Some("profile"));
+        assert!(state.view.x_axis.is_none());
+        assert!(state.view.y_axis.is_none());
+    }
+
+    #[test]
+    fn selecting_unsupported_variable_keeps_the_last_valid_slice_visible() {
+        let mut state = AppState {
+            variables: vec![variable("scalar", &[])],
+            ..AppState::default()
+        };
+        let previous = crate::data::slice::Slice2D {
+            values: ndarray::Array2::from_elem((1, 1), 42.0),
+            validity: ndarray::Array2::from_elem((1, 1), crate::data::slice::Validity::Finite),
+            source_bounds: Bounds::new(0, 1, 0, 1).unwrap(),
+            statistics: None,
+            coordinates: None,
+            is_diff: false,
+        };
+        state.set_slice(previous);
+        state.reduce(Command::SelectVariableAt(0));
+        assert_eq!(state.view.slice.as_ref().unwrap().values[(0, 0)], 42.0);
+    }
+}
+
+#[cfg(test)]
+mod palette_picker_state_tests {
+    use super::*;
+
+    fn picker_state() -> AppState {
+        let mut state = AppState::default();
+        state.view.palette = Palette::Plasma.toggle_reversed();
+        state.view.palette_catalog = vec![Palette::Viridis, Palette::Plasma, Palette::Magma];
+        state
+    }
+
+    #[test]
+    fn picker_draft_is_separate_from_applied_palette_and_command_search_state() {
+        let mut state = AppState::default();
+        state.view.palette = Palette::Plasma.toggle_reversed();
+        state.view.palette_query = "temperature".into();
+        state.view.palette_index = 4;
+        let applied = state.view.palette.clone();
+
+        assert!(state.view.palette_picker.is_none());
+        state.view.palette_picker = Some(PalettePickerState {
+            focused_palette: applied.clone(),
+            query: String::new(),
+        });
+
+        assert_eq!(state.view.palette, applied);
+        assert_eq!(
+            state
+                .view
+                .palette_picker
+                .as_ref()
+                .map(|picker| &picker.focused_palette),
+            Some(&applied)
+        );
+        assert!(state.view.palette.is_reversed());
+        assert_eq!(state.view.palette_query, "temperature");
+        assert_eq!(state.view.palette_index, 4);
+    }
+
+    #[test]
+    fn opening_picker_copies_applied_palette_and_focus_does_not_apply_it() {
+        let mut state = picker_state();
+        let applied = state.view.palette.clone();
+
+        state.reduce(Command::OpenPalettePicker);
+        assert_eq!(state.view.overlay, Some(Overlay::PalettePicker));
+        assert_eq!(
+            state.view.palette_picker.as_ref().unwrap().focused_palette,
+            applied
+        );
+
+        state.reduce(Command::MovePalettePicker(1));
+        assert_eq!(state.view.palette, applied);
+        assert_eq!(
+            state.view.palette_picker.as_ref().unwrap().focused_palette,
+            Palette::Magma.toggle_reversed()
+        );
+    }
+
+    #[test]
+    fn palette_picker_query_filters_case_insensitively_and_clamps_focus() {
+        let mut state = picker_state();
+        state.view.palette = Palette::Viridis;
+        state.reduce(Command::OpenPalettePicker);
+        state.reduce(Command::InputChar('p'));
+        state.reduce(Command::InputChar('L'));
+
+        let picker = state.view.palette_picker.as_ref().unwrap();
+        assert_eq!(picker.query, "pL");
+        assert_eq!(picker.focused_palette, Palette::Plasma);
+        state.reduce(Command::MovePalettePicker(1));
+        assert_eq!(
+            state.view.palette_picker.as_ref().unwrap().focused_palette,
+            Palette::Plasma
+        );
+        state.reduce(Command::DeleteInput);
+        assert_eq!(state.view.palette_picker.as_ref().unwrap().query, "p");
+        state.reduce(Command::CancelPalettePicker);
+        assert_eq!(state.view.palette, Palette::Viridis);
+    }
+
+    #[test]
+    fn committing_picker_applies_focused_orientation_and_closes_picker() {
+        let mut state = picker_state();
+        state.reduce(Command::OpenPalettePicker);
+        state.reduce(Command::MovePalettePicker(1));
+        state.reduce(Command::CommitPalettePicker);
+
+        assert_eq!(state.view.palette, Palette::Magma.toggle_reversed());
+        assert_eq!(state.view.overlay, None);
+        assert!(state.view.palette_picker.is_none());
+    }
+
+    #[test]
+    fn picker_focus_is_bounded_and_survives_resize_with_applied_choice_retained() {
+        let mut state = AppState::default();
+        state.view.palette_catalog = vec![
+            Palette::Viridis,
+            Palette::Plasma,
+            Palette::Turbo,
+            Palette::Inferno,
+            Palette::Magma,
+            Palette::Cividis,
+            Palette::Cool,
+            Palette::Warm,
+            Palette::CoolWarm,
+            Palette::Cubehelix,
+            Palette::Spectral,
+        ];
+        state.view.palette = Palette::Viridis;
+        state.reduce(Command::OpenPalettePicker);
+        state.reduce(Command::MovePalettePicker(8));
+        let focused = Palette::CoolWarm;
+        assert_eq!(
+            state.view.palette_picker.as_ref().unwrap().focused_palette,
+            focused
+        );
+        state.reduce(Command::MovePalettePicker(99));
+        assert_eq!(
+            state.view.palette_picker.as_ref().unwrap().focused_palette,
+            Palette::Spectral
+        );
+        state.reduce(Command::Resize {
+            width: 24,
+            height: 8,
+        });
+        assert_eq!(state.view.palette, Palette::Viridis);
+        assert_eq!(
+            state.view.palette_picker.as_ref().unwrap().focused_palette,
+            Palette::Spectral
+        );
     }
 }

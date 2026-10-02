@@ -6,6 +6,7 @@
 //! (1-based); an unqualified `NAME` refers to the dataset being viewed.
 
 use ndarray::{Array2, Zip};
+use std::sync::Arc;
 
 use crate::data::slice::{Bounds, CoordinateGrid, Slice2D, Validity};
 use crate::error::{NcvError, Result};
@@ -508,7 +509,7 @@ struct Grid {
     values: Array2<f64>,
     missing: Array2<bool>,
     bounds: Bounds,
-    coordinates: Option<Box<CoordinateGrid>>,
+    coordinates: Option<Arc<CoordinateGrid>>,
 }
 
 enum Value {
@@ -580,7 +581,7 @@ fn eval(expr: &Expr, inputs: &dyn FormulaInputs, time: usize, depth: usize) -> R
                 values: slice.values,
                 missing,
                 bounds: slice.source_bounds,
-                coordinates: slice.coordinates.map(Box::new),
+                coordinates: slice.coordinates.clone(),
             })
         }
         Expr::Negate(inner) => map(eval(inner, inputs, time, depth)?, |value| -value),
@@ -783,7 +784,7 @@ fn into_slice(grid: Grid) -> Result<Slice2D> {
         });
     let slice = Slice2D::new(values, validity, grid.bounds)?;
     Ok(match grid.coordinates {
-        Some(coordinates) => slice.with_coordinates(*coordinates),
+        Some(coordinates) => slice.with_shared_coordinates(coordinates),
         None => slice,
     })
 }

@@ -5,6 +5,43 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.14](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.13...v0.5.14) - 2026-10-02
+
+### Fixed
+
+- optimizations and pop up hiding  ([#50](https://github.com/bbakernoaa/ncview-rs/pull/50))
+
+## [0.5.13](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.12...v0.5.13) - 2026-10-01
+
+### Other
+
+- Refactor sidebar rendering and enhance fixed dimension handling ([#48](https://github.com/bbakernoaa/ncview-rs/pull/48))
+
+## [0.5.12](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.11...v0.5.12) - 2026-10-01
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.5.11](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.10...v0.5.11) - 2026-10-01
+
+### Other
+
+- *(deps)* bump actions/cache from 5 to 6 in /.github/workflows ([#36](https://github.com/bbakernoaa/ncview-rs/pull/36))
+- *(deps)* bump actions/setup-python from 6 to 7 in /.github/workflows ([#38](https://github.com/bbakernoaa/ncview-rs/pull/38))
+
+## [0.5.10](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.9...v0.5.10) - 2026-10-01
+
+### Other
+
+- *(deps)* bump tiny-skia from 0.11.4 to 0.12.0 ([#40](https://github.com/bbakernoaa/ncview-rs/pull/40))
+
+## [0.5.9](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.8...v0.5.9) - 2026-10-01
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.5.8](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.7...v0.5.8) - 2026-09-30
 
 ### Added

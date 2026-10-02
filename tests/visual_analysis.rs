@@ -93,6 +93,58 @@ fn data_filter_masks_values_outside_the_requested_range() {
 }
 
 #[test]
+fn cancelling_palette_preview_preserves_applied_palette_and_complete_view_state() {
+    let mut state = AppState::default();
+    state.view.palette = Palette::Plasma.toggle_reversed();
+    state.view.limits = Some((-3.0, 17.0));
+    state.view.scale_mode = ScaleMode::Log;
+    state.view.filter_range = Some((1.0, 9.0));
+    state.view.x_axis = Some("column".into());
+    state.view.y_axis = Some("row".into());
+    state.view.time_index = 4;
+    state.view.depth_index = 2;
+    state.view.zoom_bounds = Some(Bounds::new(1, 3, 2, 5).unwrap());
+    let values = Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    let validity = Array2::from_shape_vec(
+        (2, 3),
+        vec![
+            Validity::Finite,
+            Validity::Fill,
+            Validity::Missing,
+            Validity::InvalidRange,
+            Validity::NaN,
+            Validity::Finite,
+        ],
+    )
+    .unwrap();
+    let slice = Slice2D::new(values, validity, Bounds::new(0, 2, 0, 3).unwrap()).unwrap();
+    state.view.slice = Some(slice.clone());
+
+    state.reduce(Command::OpenPalettePicker);
+    state.reduce(Command::MovePalettePicker(2));
+    state.reduce(Command::TogglePalettePickerReverse);
+    state.reduce(Command::CancelPalettePicker);
+
+    assert_eq!(state.view.palette, Palette::Plasma.toggle_reversed());
+    assert_eq!(state.view.limits, Some((-3.0, 17.0)));
+    assert_eq!(state.view.scale_mode, ScaleMode::Log);
+    assert_eq!(state.view.filter_range, Some((1.0, 9.0)));
+    assert_eq!(state.view.x_axis.as_deref(), Some("column"));
+    assert_eq!(state.view.y_axis.as_deref(), Some("row"));
+    assert_eq!(state.view.time_index, 4);
+    assert_eq!(state.view.depth_index, 2);
+    assert_eq!(
+        state.view.zoom_bounds,
+        Some(Bounds::new(1, 3, 2, 5).unwrap())
+    );
+    let retained = state.view.slice.as_ref().unwrap();
+    assert_eq!(retained.values, slice.values);
+    assert_eq!(retained.validity, slice.validity);
+    assert_eq!(state.view.overlay, None);
+    assert!(state.view.palette_picker.is_none());
+}
+
+#[test]
 fn logarithmic_scale_changes_color_normalization_and_rejects_nonpositive_values() {
     let values = Array2::from_shape_vec((1, 2), vec![10.0, -1.0]).unwrap();
     let mask = Array2::from_elem((1, 2), Validity::Finite);

@@ -22,7 +22,7 @@ fn benchmark_cache(c: &mut Criterion) {
         store
             .put(
                 &ObjectPath::from("data.bin"),
-                PutPayload::from(vec![7_u8; 1024 * 1024]),
+                PutPayload::from(vec![7_u8; 16 * 1024 * 1024]),
             )
             .await
             .expect("fixture");
@@ -40,6 +40,40 @@ fn benchmark_cache(c: &mut Criterion) {
             )
             .expect("cache insert");
         b.iter(|| black_box(cache.get(&identity, range).map(|block| block.bytes().len())));
+    });
+
+    c.bench_function("remote_range_cache_lookup_4096_mixed", |b| {
+        let mut cache = RangeCache::new(16 * 1024 * 1024);
+        let mut target = None;
+        let categories = [
+            CacheCategory::Metadata,
+            CacheCategory::Index,
+            CacheCategory::Range,
+            CacheCategory::Decoded,
+            CacheCategory::Rendered,
+        ];
+        for index in 0..4096_u64 {
+            let start = index * 4096;
+            let range = ByteRange::new(start, start + 4096, identity.size()).expect("range");
+            cache
+                .insert(
+                    categories[index as usize % categories.len()],
+                    RangeBlock::new(&identity, range, Bytes::from(vec![index as u8; 4096]))
+                        .expect("block"),
+                )
+                .expect("cache insert");
+            if index == 3072 {
+                target = Some(range);
+            }
+        }
+        let target = target.expect("target range");
+        b.iter(|| {
+            black_box(
+                cache
+                    .get(&identity, target)
+                    .map(|block| block.bytes().len()),
+            )
+        });
     });
 
     c.bench_function("remote_range_fetch", |b| {
