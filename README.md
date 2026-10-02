@@ -41,9 +41,21 @@ ncv path/to/data.nc
 Building the GRIB projection support uses PROJ. The build detects a system
 PROJ 9.6.2 or newer through `pkg-config`; when it cannot find one, it builds
 the bundled PROJ source instead. That fallback requires CMake, a C/C++ compiler,
-and SQLite3 development headers and libraries. On module-based systems, load
-the PROJ module or add the directory containing `proj.pc` to `PKG_CONFIG_PATH`
-to use the system installation.
+the `sqlite3` command-line tool, and SQLite3 development headers and libraries.
+A `pkg-config` message saying that `proj.pc` is missing is followed by this
+fallback; it is not itself fatal. The fallback fails if CMake, the SQLite
+executable, or the SQLite development files are unavailable.
+
+On module-based HPC systems, check for CMake with `module avail cmake`, load an
+available module with `module load cmake`, and confirm `cmake --version` works
+before building. Also load a SQLite module that provides both the `sqlite3`
+executable and development files; check with `command -v sqlite3` and
+`pkg-config --modversion sqlite3`. If CMake still cannot find SQLite, ensure
+the module's install prefix is in `CMAKE_PREFIX_PATH`. After changing compiler
+or dependency modules, run `cargo clean -p proj-sys` to remove the cached CMake
+configuration, then retry the install. If the site provides PROJ 9.6.2 or
+newer, load that module and make its `proj.pc` discoverable through
+`PKG_CONFIG_PATH` to use the system installation instead of compiling PROJ.
 
 The release workflow publishes Linux x86_64, a glibc-independent static Linux x86_64 (musl),
 macOS arm64, and Windows x86_64 archives for tags named `v*`. Each release includes a
