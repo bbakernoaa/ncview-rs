@@ -926,6 +926,7 @@ fn handle_command(
     let dataset = &datasets[*active_file];
     let activate_point = matches!(command, Command::ActivatePoint);
     let cycle_image_filter = matches!(command, Command::CycleImageFilter);
+    let reset_variable_view = matches!(command, Command::ResetVariableView);
     let export_current = matches!(command, Command::ExportCurrent);
     let refresh_time_series = activate_point
         || matches!(command, Command::OpenPlot)
@@ -959,6 +960,7 @@ fn handle_command(
             | Command::TickPlayback
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
+            | Command::ResetVariableView
             | Command::Zoom(_)
             | Command::ResetZoom
             | Command::Pan { .. }
@@ -976,6 +978,7 @@ fn handle_command(
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
             | Command::SetAxes { .. }
+            | Command::ResetVariableView
     ) || axis_submit;
     let point_target = match &command {
         Command::HoverPoint { row, col, .. } | Command::SelectPoint { row, col } => {
@@ -1011,6 +1014,9 @@ fn handle_command(
                 "scientific rendering locked; set NCVIEW_SCIENTIFIC_RENDERING=0 to enable interpolation"
                     .into();
         }
+    }
+    if reset_variable_view {
+        graphics.reset_filter();
     }
     if export_current {
         match export_current_slice(state, dataset, source.metadata()) {

@@ -738,7 +738,9 @@ fn render_dimensions_box(
             truncate_text(
                 &format!(
                     "{marker} {} [{}/{}]",
-                    dimension.name, dimension.index, dimension.length
+                    dimension.name,
+                    dimension.index.saturating_add(1),
+                    dimension.length
                 ),
                 content_width,
             ),
@@ -989,8 +991,8 @@ mod tests {
             },
         ];
         let rendered = render_sidebar_with_dimensions(None, &metadata, None, &fixed, 0);
-        assert!(rendered.contains("> Kernel_Num [2/3]"), "{rendered}");
-        assert!(rendered.contains("Singleton [0/1]"), "{rendered}");
+        assert!(rendered.contains("> Kernel_Num [3/3]"), "{rendered}");
+        assert!(rendered.contains("Singleton [1/1]"), "{rendered}");
     }
 
     #[test]

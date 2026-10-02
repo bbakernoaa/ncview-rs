@@ -32,7 +32,8 @@ pub fn help_text() -> String {
   f             mask data outside a range\n\
   s             toggle linear/log color scale\n\
   z             toggle current/global color scale\n\
-  r             reset zoom\n\
+  r             reset zoom to the full view\n\
+  R             reset variable settings and view\n\
   drag map      zoom to a rectangle; drag zoomed map to pan\n\
   Shift+drag    zoom again while already zoomed\n\
   g             logical/projected grid\n\
