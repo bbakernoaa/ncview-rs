@@ -222,6 +222,7 @@ pub struct FixedDimension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PalettePickerState {
     pub focused_palette: Palette,
+    pub query: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -788,6 +789,7 @@ impl AppState {
                 self.view.help_visible = false;
                 self.view.palette_picker = Some(PalettePickerState {
                     focused_palette: self.view.palette.clone(),
+                    query: String::new(),
                 });
                 self.view.overlay = Some(Overlay::PalettePicker);
                 None
@@ -798,23 +800,26 @@ impl AppState {
                     picker.focused_palette = picker.focused_palette.clone().next();
                     return None;
                 }
+                let matches = palette_catalog_matches(&self.view.palette_catalog, &picker.query);
+                if matches.is_empty() {
+                    return None;
+                }
                 let reversed = picker.focused_palette.is_reversed();
                 let lookup_palette = if reversed {
                     picker.focused_palette.clone().toggle_reversed()
                 } else {
                     picker.focused_palette.clone()
                 };
-                let current = self
-                    .view
-                    .palette_catalog
+                let current = matches
                     .iter()
-                    .position(|palette| palette == &lookup_palette)
+                    .position(|&index| self.view.palette_catalog[index] == lookup_palette)
                     .unwrap_or(0);
-                let next = bounded_index(current, delta, self.view.palette_catalog.len());
+                let next = bounded_index(current, delta, matches.len());
+                let next_palette = &self.view.palette_catalog[matches[next]];
                 picker.focused_palette = if reversed {
-                    self.view.palette_catalog[next].clone().toggle_reversed()
+                    next_palette.clone().toggle_reversed()
                 } else {
-                    self.view.palette_catalog[next].clone()
+                    next_palette.clone()
                 };
                 None
             }
@@ -1089,6 +1094,22 @@ impl AppState {
                         self.view.palette_query.push(character);
                         self.view.palette_index = 0;
                     }
+                } else if matches!(self.view.overlay, Some(Overlay::PalettePicker))
+                    && (character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ' '))
+                    && let Some(picker) = self.view.palette_picker.as_mut()
+                    && picker.query.len() < 64
+                {
+                    picker.query.push(character);
+                    if let Some(index) =
+                        palette_catalog_matches(&self.view.palette_catalog, &picker.query).first()
+                    {
+                        let reversed = picker.focused_palette.is_reversed();
+                        picker.focused_palette = if reversed {
+                            self.view.palette_catalog[*index].clone().toggle_reversed()
+                        } else {
+                            self.view.palette_catalog[*index].clone()
+                        };
+                    }
                 } else if self.view.variable_search_active
                     && (character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
                 {
@@ -1134,6 +1155,20 @@ impl AppState {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     self.view.palette_query.pop();
                     self.view.palette_index = 0;
+                } else if matches!(self.view.overlay, Some(Overlay::PalettePicker))
+                    && let Some(picker) = self.view.palette_picker.as_mut()
+                {
+                    picker.query.pop();
+                    if let Some(index) =
+                        palette_catalog_matches(&self.view.palette_catalog, &picker.query).first()
+                    {
+                        let reversed = picker.focused_palette.is_reversed();
+                        picker.focused_palette = if reversed {
+                            self.view.palette_catalog[*index].clone().toggle_reversed()
+                        } else {
+                            self.view.palette_catalog[*index].clone()
+                        };
+                    }
                 } else if self.view.variable_search_active {
                     self.variable_query.pop();
                     self.view.variable_browser_index = 0;
@@ -1892,6 +1927,16 @@ pub fn palette_matches(query: &str) -> Vec<usize> {
         .collect()
 }
 
+pub fn palette_catalog_matches(catalog: &[Palette], query: &str) -> Vec<usize> {
+    let query = query.to_ascii_lowercase();
+    catalog
+        .iter()
+        .enumerate()
+        .filter(|(_, palette)| fuzzy_match(palette.name(), &query))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 fn fuzzy_match(value: &str, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -2054,6 +2099,7 @@ mod palette_picker_state_tests {
         assert!(state.view.palette_picker.is_none());
         state.view.palette_picker = Some(PalettePickerState {
             focused_palette: applied.clone(),
+            query: String::new(),
         });
 
         assert_eq!(state.view.palette, applied);
@@ -2088,6 +2134,28 @@ mod palette_picker_state_tests {
             state.view.palette_picker.as_ref().unwrap().focused_palette,
             Palette::Magma.toggle_reversed()
         );
+    }
+
+    #[test]
+    fn palette_picker_query_filters_case_insensitively_and_clamps_focus() {
+        let mut state = picker_state();
+        state.view.palette = Palette::Viridis;
+        state.reduce(Command::OpenPalettePicker);
+        state.reduce(Command::InputChar('p'));
+        state.reduce(Command::InputChar('L'));
+
+        let picker = state.view.palette_picker.as_ref().unwrap();
+        assert_eq!(picker.query, "pL");
+        assert_eq!(picker.focused_palette, Palette::Plasma);
+        state.reduce(Command::MovePalettePicker(1));
+        assert_eq!(
+            state.view.palette_picker.as_ref().unwrap().focused_palette,
+            Palette::Plasma
+        );
+        state.reduce(Command::DeleteInput);
+        assert_eq!(state.view.palette_picker.as_ref().unwrap().query, "p");
+        state.reduce(Command::CancelPalettePicker);
+        assert_eq!(state.view.palette, Palette::Viridis);
     }
 
     #[test]

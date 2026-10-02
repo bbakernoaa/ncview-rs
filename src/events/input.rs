@@ -346,6 +346,8 @@ mod tests {
             map(KeyCode::Char('v')),
             Some(Command::TogglePalettePickerReverse)
         );
+        assert_eq!(map(KeyCode::Char('p')), Some(Command::InputChar('p')));
+        assert_eq!(map(KeyCode::Backspace), Some(Command::DeleteInput));
         assert_eq!(
             command_from_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
             Some(Command::TogglePaletteReverse)

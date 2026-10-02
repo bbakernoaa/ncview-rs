@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use std::sync::{Mutex, OnceLock};
 
 use crate::data::slice::Slice2D;
 use crate::data::{DatasetMetadata, Variable};
@@ -60,32 +61,78 @@ fn truncate_path(value: &str, max_chars: usize) -> String {
 }
 
 pub fn filter_variables<'a>(variables: &'a [Variable], query: &str) -> Vec<&'a Variable> {
+    static SEARCH_INDEX: OnceLock<Mutex<Option<VariableSearchIndex>>> = OnceLock::new();
     let query = query.to_ascii_lowercase();
-    let mut matched: Vec<&'a Variable> = if query.is_empty() {
-        variables.iter().collect()
-    } else {
-        variables
+    let mut cached = SEARCH_INDEX.get_or_init(|| Mutex::new(None)).lock().ok();
+    if let Some(cache) = cached.as_mut() {
+        let is_current = cache.as_ref().is_some_and(|index| {
+            index.names.len() == variables.len()
+                && index
+                    .names
+                    .iter()
+                    .zip(variables)
+                    .all(|(name, variable)| name == &variable.name)
+        });
+        if !is_current {
+            **cache = Some(VariableSearchIndex::new(variables));
+        }
+        if let Some(index) = cache.as_ref() {
+            return index
+                .matching_indices(&query)
+                .into_iter()
+                .filter_map(|position| variables.get(position))
+                .collect();
+        }
+    }
+    VariableSearchIndex::new(variables)
+        .matching_indices(&query)
+        .into_iter()
+        .filter_map(|position| variables.get(position))
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct VariableSearchIndex {
+    names: Vec<String>,
+    normalized: Vec<String>,
+    ordered_indices: Vec<usize>,
+}
+
+impl VariableSearchIndex {
+    fn new(variables: &[Variable]) -> Self {
+        let names = variables
             .iter()
-            .filter(|variable| {
-                let name = variable.name.to_ascii_lowercase();
-                let mut chars = name.chars();
+            .map(|variable| variable.name.clone())
+            .collect::<Vec<_>>();
+        let normalized = variables
+            .iter()
+            .map(|variable| variable.name.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let mut ordered_indices = (0..variables.len()).collect::<Vec<_>>();
+        ordered_indices.sort_by(|left, right| {
+            normalized[*left]
+                .cmp(&normalized[*right])
+                .then_with(|| names[*left].cmp(&names[*right]))
+        });
+        Self {
+            names,
+            normalized,
+            ordered_indices,
+        }
+    }
+
+    fn matching_indices(&self, query: &str) -> Vec<usize> {
+        self.ordered_indices
+            .iter()
+            .copied()
+            .filter(|&index| {
+                let mut chars = self.normalized[index].chars();
                 query
                     .chars()
                     .all(|needle| chars.by_ref().any(|candidate| candidate == needle))
             })
             .collect()
-    };
-    // Present variables in a stable alphabetical order rather than the
-    // dataset's stored order, so the sidebar, browse popup, and the click
-    // hit-test (which indexes into this same list) all agree. The comparison
-    // is case-insensitive with a name tiebreak to stay deterministic.
-    matched.sort_by(|left, right| {
-        left.name
-            .to_ascii_lowercase()
-            .cmp(&right.name.to_ascii_lowercase())
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    matched
+    }
 }
 
 /// The bordered boxes the sidebar draws, in vertical order. Each `Rect` is a
@@ -1038,5 +1085,23 @@ mod tests {
             .map(|variable| variable.name.as_str())
             .collect();
         assert_eq!(filtered, vec!["beta", "Pressure", "total_ozone"]);
+    }
+
+    #[test]
+    fn variable_search_handles_no_matches_and_preserves_stable_focus_order() {
+        let variables = [
+            variable("temperature"),
+            variable("precipitation"),
+            variable("Pressure"),
+        ];
+        let filtered = filter_variables(&variables, "zz");
+        assert!(filtered.is_empty());
+        let focused_row = 1;
+        let click_row = focused_row;
+        let ordered = filter_variables(&variables, "p");
+        assert_eq!(
+            ordered[focused_row].name, ordered[click_row].name,
+            "keyboard focus and click index use the same sorted sequence"
+        );
     }
 }

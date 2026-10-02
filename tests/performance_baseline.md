@@ -126,3 +126,84 @@ Command:
 cargo bench --bench interactive_paths -- palette_picker_64_open_focus_preview \
   --noplot --warm-up-time 0.1 --measurement-time 0.5 --sample-size 100
 ```
+
+## Interaction speed and UX pre-change smoke baseline (2026-10-02)
+
+Host: macOS 25.3.0, arm64 Apple T8132, Darwin kernel `xnu-12377.91.3~2`; Rust/Cargo 1.98.1;
+10 logical CPUs. The reusable deterministic fixture builders are in `benches/support/fixtures.rs`
+(SHA-256 `f291f3aeecd552396ce66190d4b54f2f1d0a9b03466afb6e06e4dfd1afcfd459`). These short
+10-sample runs were collected before implementation with a 0.1-second warmup and requested
+0.2-second measurement. p50/p95 below are linearly interpolated from Criterion's raw per-iteration
+sample values. They are local development baselines, not stable release measurements.
+
+| Existing component benchmark | p50 | p95 |
+|---|---:|---:|
+| Large viewport rasterization | 78.9 µs | 84.3 µs |
+| Palette picker (64 choices) | 45.0 µs | 45.9 µs |
+| Remote range cache lookup | 76.6 ns | 77.9 ns |
+| Remote range fetch (in-memory provider) | 427 ns | 435 ns |
+| Adjacent range coalescing | 41.6 ns | 43.3 ns |
+
+Commands:
+
+```bash
+cargo bench --locked --bench interactive_paths -- --noplot --warm-up-time 0.1 --measurement-time 0.2 --sample-size 10
+cargo bench --locked --bench remote_streaming -- --noplot --warm-up-time 0.1 --measurement-time 0.2 --sample-size 10
+```
+
+Peak RSS could not be measured in this run. The 2048×1024 interaction-specific selection,
+10,000-variable search, 256-palette search, cache-size/category mix, and repeated-coordinate
+benchmarks are reported in the post-change results below. The Linux x86_64 reference host remains
+unavailable in this environment.
+
+## Interaction speed and UX post-change smoke results (2026-10-02)
+
+Same local host, fixture generators, and Criterion arguments as the pre-change run. The short
+10-sample result is a development comparison, with p50/p95 linearly interpolated from Criterion's
+raw per-iteration samples. Comparisons against component references are directional and do not
+replace the approved Linux release baseline.
+
+| Workload | Pre-change p50 | Candidate p50 | Candidate p95 | Change / gate |
+|---|---:|---:|---:|---|
+| Selection-only on 2048×1024 field | 491.4 µs (full raster rebuild) | 20.5 µs (cell marker overlay) | 21.3 µs | 95.8% lower; below 100 ms |
+| Range lookup, 4,096 mixed-category blocks | 1.271 µs | 80 ns | 82 ns | 93.7% lower |
+| Repeated curvilinear slice read | 3.203 µs | 3.147 µs | 3.272 µs | no significant latency change; repeated slices now share the same `Arc<CoordinateGrid>` |
+| Variable search, 10,000 entries | uncached reference: 366.7 µs | indexed: 160.6 µs | 163.0 µs | 56.2% lower; below 100 ms |
+| Palette search, 256 entries | not captured before implementation | 8.47 µs | 8.83 µs | below 100 ms |
+
+The variable-search comparison runs the former lowercase-and-sort algorithm alongside the indexed
+candidate on the same fixture and host. Coordinate memory/RSS was unavailable; pointer-identity
+coverage verifies repeated regular-axis and curvilinear slice reads share their coordinate-grid
+storage. The renderer's retained-byte counters cover encoded image buffers but do not provide
+process peak RSS. Kitty/Sixel/iTerm2 manual overlay checks and Linux reference-host measurements
+remain outstanding.
+
+The 320×160 RGB payload base64 component measured p50 13.8 µs and p95 14.2 µs on the short run.
+It measures payload serialization, not complete terminal-protocol image encoding.
+
+The full quickstart Criterion suites also completed with their default 100-sample settings. Their
+candidate p95 values were 29.6 µs for selection-only, 232.4 µs for 10,000-variable search,
+18.2 µs for 256-palette search, and 4.14 µs for repeated curvilinear reads. The final indexed
+4,096-entry cache lookup was rerun after the full suite with the short paired settings above;
+repeated hits measured 79.8 ns p50 / 81.8 ns p95. Some unrelated component benches reported
+regressions against Criterion's retained local prior samples; because those prior samples represent
+different builds and long-run CPU conditions, only same-command paired feature workloads are used
+for this feature's comparison. The formal no-more-than-10% release comparison still requires the
+approved reference host.
+
+## Feature quickstart checks (2026-10-02)
+
+| Quickstart command | Result |
+|---|---|
+| `cargo test --locked --all-targets` | pass, all unit/integration suites and Criterion smoke targets |
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | pass |
+| `cargo bench --locked --bench interactive_paths -- --noplot` | pass, default 100-sample suite |
+| `cargo bench --locked --bench remote_streaming -- --noplot` | pass, default 100-sample suite |
+| `git diff --check` | pass |
+
+The available terminal environment reports `TERM=xterm-256color`; Kitty, Sixel, and iTerm2 are not
+installed, so protocol-hosted image dismissal could not be manually inspected. TestBackend covers
+cell-buffer dismissal for 100 open/close cycles per popup and constrained popup rendering. Only
+`aarch64-apple-darwin` is installed in rustup, so the Linux x86_64, Linux musl, and Windows CI
+targets were not built locally. Peak process RSS was unavailable.

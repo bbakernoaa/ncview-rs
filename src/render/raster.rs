@@ -150,7 +150,7 @@ fn rasterize(
         .coordinates
         .as_ref()
         .is_some_and(|grid| grid.latitude_increases_with_source_row());
-    let land_detail = landmask::detail_for_grid(slice.coordinates.as_ref());
+    let land_detail = landmask::detail_for_grid(slice.coordinates.as_deref());
     let output_rows = output_rows.max(1).min(rows.max(1));
     let output_cols = output_cols.max(1).min(cols.max(1));
     let statistics = slice.statistics.unwrap_or(crate::data::slice::Statistics {
@@ -166,7 +166,7 @@ fn rasterize(
         map_background::render_with_palette_cached(
             output_cols,
             output_rows,
-            slice.coordinates.as_ref(),
+            slice.coordinates.as_deref(),
             land_detail,
             &palette,
         )

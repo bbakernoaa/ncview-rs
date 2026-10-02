@@ -17,6 +17,8 @@ use crate::error::{NcvError, Result};
 
 const HDF5_SIGNATURE: &[u8; 8] = b"\x89HDF\r\n\x1a\n";
 const MAX_BYTES: usize = 768 * 1024 * 1024;
+type CoordinateGridCacheKey = (String, usize, usize, usize, usize);
+type CoordinateGridCache = Mutex<Option<(CoordinateGridCacheKey, Arc<CoordinateGrid>)>>;
 
 pub struct NetCdf4Source {
     path: PathBuf,
@@ -24,7 +26,8 @@ pub struct NetCdf4Source {
     root: NcGroup,
     metadata: DatasetMetadata,
     dimension_names_by_id: std::collections::HashMap<i64, String>,
-    coord_cache: Mutex<std::collections::HashMap<String, Vec<f64>>>,
+    coord_cache: Mutex<std::collections::HashMap<String, Arc<Vec<f64>>>>,
+    coordinate_grid_cache: CoordinateGridCache,
 }
 
 impl NetCdf4Source {
@@ -195,6 +198,7 @@ impl NetCdf4Source {
             },
             dimension_names_by_id,
             coord_cache: Mutex::new(std::collections::HashMap::new()),
+            coordinate_grid_cache: Mutex::new(None),
         })
     }
 }
@@ -403,14 +407,14 @@ impl DataSource for NetCdf4Source {
             // the root CF lookup table. The data slice remains fully usable;
             // source indices are retained until group-local coordinate support
             // is available.
-            CoordinateGrid {
+            Arc::new(CoordinateGrid {
                 latitude: None,
                 longitude: None,
                 latitude_axis: None,
                 longitude_axis: None,
-            }
+            })
         };
-        Ok(slice.with_coordinates(coordinates))
+        Ok(slice.with_shared_coordinates(coordinates))
     }
 
     fn time_label(&self, index: usize) -> Option<String> {
@@ -431,11 +435,14 @@ impl DataSource for NetCdf4Source {
 }
 
 impl NetCdf4Source {
-    fn read_coordinate_values_cached(&self, variable: &oxinetcdf::NcVariable) -> Result<Vec<f64>> {
+    fn read_coordinate_values_cached(
+        &self,
+        variable: &oxinetcdf::NcVariable,
+    ) -> Result<Arc<Vec<f64>>> {
         if let Ok(cache) = self.coord_cache.lock()
             && let Some(cached) = cache.get(&variable.h5_path)
         {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
 
         let element_count = variable
@@ -466,16 +473,47 @@ impl NetCdf4Source {
                 reason: error.to_string(),
             })?;
 
-        let values = decode_coordinate_values(&raw, variable)?;
+        let values = Arc::new(decode_coordinate_values(&raw, variable)?);
         if values.len() == element_count
             && let Ok(mut cache) = self.coord_cache.lock()
         {
-            cache.insert(variable.h5_path.clone(), values.clone());
+            cache.insert(variable.h5_path.clone(), Arc::clone(&values));
         }
         Ok(values)
     }
 
     fn read_coordinate_grid(
+        &self,
+        variable: &oxinetcdf::NcVariable,
+        data_names: &[&str],
+        data_shape: &[usize],
+        row_axis: usize,
+        col_axis: usize,
+        bounds: super::slice::Bounds,
+    ) -> Arc<CoordinateGrid> {
+        let key = (
+            variable.h5_path.clone(),
+            bounds.row_start,
+            bounds.row_end,
+            bounds.col_start,
+            bounds.col_end,
+        );
+        if let Ok(cache) = self.coordinate_grid_cache.lock()
+            && let Some((cached_key, cached)) = cache.as_ref()
+            && cached_key == &key
+        {
+            return Arc::clone(cached);
+        }
+        let coordinates = Arc::new(self.read_coordinate_grid_uncached(
+            variable, data_names, data_shape, row_axis, col_axis, bounds,
+        ));
+        if let Ok(mut cache) = self.coordinate_grid_cache.lock() {
+            *cache = Some((key, Arc::clone(&coordinates)));
+        }
+        coordinates
+    }
+
+    fn read_coordinate_grid_uncached(
         &self,
         variable: &oxinetcdf::NcVariable,
         data_names: &[&str],
@@ -841,7 +879,9 @@ impl NetCdf4Source {
                     })
                 })
             })?;
-        self.read_coordinate_values_cached(coordinate).ok()
+        self.read_coordinate_values_cached(coordinate)
+            .ok()
+            .map(|values| values.as_ref().clone())
     }
 
     fn point_coordinates(&self, variable_name: &str, row: usize, col: usize) -> PointCoordinates {
@@ -1650,5 +1690,69 @@ mod raw_dimension_axis_tests {
             resolve_plane_axes(&["a", "b"], &[2, 3], Some((1, 1))),
             Some((0, 1))
         );
+    }
+}
+
+#[cfg(test)]
+mod coordinate_cache_tests {
+    use super::NetCdf4Source;
+    use crate::data::{
+        DataSource,
+        slice::{Bounds, SliceRequest},
+    };
+    use std::{path::Path, sync::Arc};
+
+    #[test]
+    fn warm_axis_and_curvilinear_coordinate_reads_share_storage() {
+        for fixture in ["regular.nc4", "curvilinear.nc4"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture);
+            let source = NetCdf4Source::open(&path).expect("coordinate fixture opens");
+            let variable = source
+                .metadata
+                .variables
+                .iter()
+                .find(|variable| variable.numeric && variable.dimensions.len() >= 2)
+                .expect("fixture has a data variable");
+            let shape = variable
+                .dimensions
+                .iter()
+                .filter_map(|name| {
+                    source
+                        .metadata
+                        .dimensions
+                        .iter()
+                        .find(|dimension| dimension.name == *name)
+                })
+                .map(|dimension| dimension.length)
+                .collect::<Vec<_>>();
+            let request = SliceRequest {
+                variable: variable.name.clone(),
+                time: 0,
+                depth: 0,
+                bounds: Bounds::new(0, shape[shape.len() - 2], 0, shape[shape.len() - 1])
+                    .expect("fixture bounds"),
+            };
+            let first = source.read_slice(&request).expect("first slice read");
+            let second = source.read_slice(&request).expect("warm slice read");
+            let first_coordinates = first.coordinates.as_ref().expect("first coordinates");
+            let second_coordinates = second.coordinates.as_ref().expect("second coordinates");
+
+            assert!(Arc::ptr_eq(
+                first.coordinates.as_ref().unwrap(),
+                second.coordinates.as_ref().unwrap()
+            ));
+            assert_eq!(first_coordinates.latitude, second_coordinates.latitude);
+            assert_eq!(first_coordinates.longitude, second_coordinates.longitude);
+            assert_eq!(
+                first_coordinates.latitude_axis,
+                second_coordinates.latitude_axis
+            );
+            assert_eq!(
+                first_coordinates.longitude_axis,
+                second_coordinates.longitude_axis
+            );
+        }
     }
 }

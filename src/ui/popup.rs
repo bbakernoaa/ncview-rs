@@ -1,7 +1,7 @@
 use super::chart;
 use crate::app::{
     AxisField, COMMAND_PALETTE, LimitField, Overlay, PlotAxisField, PlotKind, PlotXAxis, PlotYAxis,
-    ViewModel, palette_matches,
+    ViewModel, palette_catalog_matches, palette_matches,
 };
 use crate::data::{DatasetMetadata, Variable};
 use crate::render::colors::Palette;
@@ -69,12 +69,7 @@ pub fn render(
         area.height.saturating_mul(2) / 5
     };
     let popup = overlay_popup_rect(area, overlay, width, height);
-    let shadow = Rect {
-        x: popup.x.saturating_add(1),
-        y: popup.y.saturating_add(1),
-        width: popup.width,
-        height: popup.height,
-    };
+    let shadow = popup_shadow_rect(area, popup);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         ratatui::widgets::Block::default().style(Style::default().bg(theme::SHADOW)),
@@ -208,6 +203,21 @@ fn overlay_popup_rect(area: Rect, overlay: Overlay, width: u16, height: u16) -> 
     }
 }
 
+fn popup_shadow_rect(area: Rect, popup: Rect) -> Rect {
+    let x = popup.x.saturating_add(1).max(area.x);
+    let y = popup.y.saturating_add(1).max(area.y);
+    Rect::new(
+        x,
+        y,
+        popup
+            .width
+            .min(area.x.saturating_add(area.width).saturating_sub(x)),
+        popup
+            .height
+            .min(area.y.saturating_add(area.height).saturating_sub(y)),
+    )
+}
+
 pub fn picker_popup_rect(area: Rect) -> Rect {
     let width = area.width.saturating_mul(3) / 4;
     let height = area.height.saturating_mul(3) / 5;
@@ -222,46 +232,51 @@ fn render_palette_picker(frame: &mut Frame, popup: Rect, title: &str, view: &Vie
         .palette_picker
         .as_ref()
         .map(|picker| &picker.focused_palette);
+    let query = view
+        .palette_picker
+        .as_ref()
+        .map_or("", |picker| picker.query.as_str());
+    let matches = palette_catalog_matches(&view.palette_catalog, query);
     let focus_index = focused
         .and_then(|palette| {
-            view.palette_catalog
+            matches
                 .iter()
-                .position(|item| palette_identity_eq(item, palette))
+                .position(|&index| palette_identity_eq(&view.palette_catalog[index], palette))
         })
         .unwrap_or(0);
     let compact = inner.width < 54 || inner.height < 7;
-    let (list_area, preview_area, instruction_area) = if compact {
+    let (list_area, preview_area, instruction_area, search_area) = if compact {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(2)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ])
             .split(inner);
-        (sections[0], None, sections[1])
+        (sections[1], None, sections[2], sections[0])
     } else {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),
                 Constraint::Min(1),
                 Constraint::Length(2),
                 Constraint::Length(1),
             ])
             .split(inner);
-        (sections[0], Some(sections[1]), sections[2])
+        (sections[1], Some(sections[2]), sections[3], sections[0])
     };
-    let first = visible_palette_start(
-        view.palette_catalog.len(),
-        focus_index,
-        usize::from(list_area.height),
-    );
+    let first = visible_palette_start(matches.len(), focus_index, usize::from(list_area.height));
     let end = first
         .saturating_add(usize::from(list_area.height))
-        .min(view.palette_catalog.len());
-    let list = view
-        .palette_catalog
+        .min(matches.len());
+    let list = matches
         .iter()
-        .enumerate()
         .skip(first)
         .take(end.saturating_sub(first))
-        .map(|(_, palette)| {
+        .map(|&index| {
+            let palette = &view.palette_catalog[index];
             let is_focused = focused.is_some_and(|focused| palette_identity_eq(palette, focused));
             let is_applied = palette_identity_eq(palette, &view.palette);
             let marker = if is_focused { ">" } else { " " };
@@ -280,10 +295,22 @@ fn render_palette_picker(frame: &mut Frame, popup: Rect, title: &str, view: &Vie
         })
         .collect::<Vec<_>>();
     let list = if list.is_empty() {
-        vec!["No colormaps available".into()]
+        vec![if query.is_empty() {
+            "No colormaps available".into()
+        } else {
+            "No colormaps match this search".into()
+        }]
     } else {
         list
     };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Search: {query}  {} / {} palettes",
+            matches.len(),
+            view.palette_catalog.len()
+        )),
+        search_area,
+    );
     frame.render_widget(
         Paragraph::new(list.join("\n")).wrap(Wrap { trim: true }),
         list_area,
@@ -587,6 +614,7 @@ mod palette_picker_tests {
         state.view.palette_catalog = vec![Palette::Viridis, Palette::Plasma];
         state.view.palette_picker = Some(PalettePickerState {
             focused_palette: Palette::Plasma,
+            query: String::new(),
         });
         state.view.overlay = Some(Overlay::PalettePicker);
         state.view.limits = Some((0.0, 10.0));
@@ -647,6 +675,7 @@ mod palette_picker_tests {
         state.view.palette_catalog = choices.clone();
         state.view.palette_picker = Some(PalettePickerState {
             focused_palette: choices[20].clone(),
+            query: String::new(),
         });
         state.view.overlay = Some(Overlay::PalettePicker);
         let metadata = DatasetMetadata {
@@ -692,5 +721,124 @@ mod palette_picker_tests {
         assert!(constrained.contains("Esc"));
         assert!(constrained.contains("v reverse"));
         assert!(!constrained_preview);
+    }
+
+    #[test]
+    fn picker_search_shows_filtered_count_and_no_match_feedback() {
+        let mut state = AppState::default();
+        state.view.palette_catalog = vec![Palette::Viridis, Palette::Plasma, Palette::Magma];
+        state.view.palette = Palette::Viridis;
+        state.reduce(crate::app::Command::OpenPalettePicker);
+        state.reduce(crate::app::Command::InputChar('p'));
+        state.reduce(crate::app::Command::InputChar('l'));
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("1 / 3 palettes"));
+        assert!(text.contains("Plasma"));
+        assert!(!text.contains("Magma"));
+
+        state.reduce(crate::app::Command::InputChar('z'));
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("No colormaps match this search"));
+    }
+}
+
+#[cfg(test)]
+mod dismissal_tests {
+    use super::{popup_shadow_rect, render};
+    use crate::{
+        app::{AppState, Overlay},
+        data::{DatasetFormat, DatasetMetadata},
+    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::Paragraph};
+
+    #[test]
+    fn dismissing_each_popup_restores_the_underlying_frame() {
+        let overlays = [
+            Overlay::Limits,
+            Overlay::Filter,
+            Overlay::Axis,
+            Overlay::TimeSeries,
+            Overlay::Plot,
+            Overlay::CommandPalette,
+            Overlay::PalettePicker,
+        ];
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        for overlay in overlays {
+            let mut state = AppState::default();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal builds");
+            for _ in 0..100 {
+                state.view.overlay = Some(overlay);
+                terminal
+                    .draw(|frame| {
+                        frame.render_widget(Paragraph::new("MAP BACKDROP"), frame.area());
+                        render(frame, frame.area(), &state.view, &metadata, &[], "", None);
+                    })
+                    .expect("popup frame renders");
+
+                state.view.overlay = None;
+                terminal
+                    .draw(|frame| {
+                        frame.render_widget(Paragraph::new("MAP BACKDROP"), frame.area());
+                        render(frame, frame.area(), &state.view, &metadata, &[], "", None);
+                    })
+                    .expect("dismissed frame renders");
+                let buffer = terminal.backend().buffer();
+                let text = (0..buffer.area.height)
+                    .map(|y| {
+                        (0..buffer.area.width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<String>();
+                assert!(text.contains("MAP BACKDROP"));
+                assert!(!text.contains("Choose a colormap"));
+                assert!(!text.contains("Limits"));
+                assert!(
+                    buffer
+                        .content()
+                        .iter()
+                        .all(|cell| { cell.style().bg != Some(crate::ui::theme::SHADOW) })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn popup_shadow_is_clipped_to_terminal_area() {
+        let area = Rect::new(4, 3, 12, 7);
+        let shadow = popup_shadow_rect(area, area);
+        assert!(shadow.x >= area.x && shadow.y >= area.y);
+        assert!(shadow.right() <= area.right());
+        assert!(shadow.bottom() <= area.bottom());
     }
 }

@@ -15,6 +15,9 @@ use ratatui::{Terminal, backend::TestBackend};
 use std::path::Path;
 use std::{hint::black_box, sync::Arc};
 
+#[path = "support/fixtures.rs"]
+mod fixtures;
+
 fn startup_scaffold(criterion: &mut Criterion) {
     criterion.bench_function("startup_scaffold", |bencher| {
         bencher.iter(|| black_box(ncview_rs::app::AppState::default()))
@@ -170,10 +173,155 @@ fn palette_picker_interaction(criterion: &mut Criterion) {
     });
 }
 
+fn large_map_selection(criterion: &mut Criterion) {
+    let slice = fixtures::large_regular_slice();
+    let raster = rgb_raster_with_options_for_view(
+        &slice,
+        Palette::Viridis,
+        None,
+        None,
+        false,
+        ScaleMode::Linear,
+        320,
+        160,
+        None,
+    );
+    criterion.bench_function("large_map_stable_base_raster_2048x1024", |bencher| {
+        bencher.iter(|| {
+            black_box(rgb_raster_with_options_for_view(
+                &slice,
+                Palette::Viridis,
+                None,
+                None,
+                false,
+                ScaleMode::Linear,
+                320,
+                160,
+                None,
+            ))
+        })
+    });
+    criterion.bench_function("large_map_selection_only_raster_2048x1024", |bencher| {
+        let mut selection = 0_usize;
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).expect("test terminal builds");
+        bencher.iter(|| {
+            selection = selection.wrapping_add(1);
+            let point = black_box(selection % 2);
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        ratatui::widgets::Paragraph::new(if point == 0 { "◆" } else { " " }),
+                        Rect::new(40, 20, 1, 1),
+                    );
+                })
+                .expect("selection overlay renders");
+        })
+    });
+    criterion.bench_function("large_map_rgb_payload_base64_320x160", |bencher| {
+        bencher.iter(|| black_box(base64_simd::STANDARD.encode_to_string(raster.as_raw())))
+    });
+}
+
+fn repeated_coordinate_read(criterion: &mut Criterion) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/curvilinear.nc4");
+    let Ok(source) = ncview_rs::data::open(&path) else {
+        eprintln!(
+            "Skipping coordinate-cache benchmark: cannot open {}",
+            path.display()
+        );
+        return;
+    };
+    let Some(variable) = source
+        .metadata()
+        .variables
+        .iter()
+        .find(|variable| variable.numeric && variable.dimensions.len() >= 2)
+        .map(|variable| variable.name.clone())
+    else {
+        return;
+    };
+    let dimensions = &source.metadata().dimensions;
+    let shape = source
+        .metadata()
+        .variables
+        .iter()
+        .find(|candidate| candidate.name == variable)
+        .map(|candidate| {
+            candidate
+                .dimensions
+                .iter()
+                .filter_map(|name| dimensions.iter().find(|dimension| dimension.name == *name))
+                .map(|dimension| dimension.length)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if shape.len() < 2 {
+        return;
+    }
+    let rows = shape[shape.len() - 2];
+    let cols = shape[shape.len() - 1];
+    let request = ncview_rs::data::slice::SliceRequest {
+        variable,
+        time: 0,
+        depth: 0,
+        bounds: Bounds::new(0, rows, 0, cols).expect("fixture bounds"),
+    };
+    criterion.bench_function("curvilinear_coordinates_repeated_read", |bencher| {
+        bencher.iter(|| black_box(source.read_slice(&request).expect("slice read")))
+    });
+}
+
+fn catalog_search(criterion: &mut Criterion) {
+    let variables = fixtures::variable_catalog(10_000);
+    criterion.bench_function(
+        "variable_catalog_search_10000_uncached_reference",
+        |bencher| {
+            bencher.iter(|| {
+                let query = "variable_099".to_ascii_lowercase();
+                let mut matched = variables
+                    .iter()
+                    .filter(|variable| {
+                        let normalized = variable.name.to_ascii_lowercase();
+                        let mut chars = normalized.chars();
+                        query
+                            .chars()
+                            .all(|needle| chars.by_ref().any(|candidate| candidate == needle))
+                    })
+                    .collect::<Vec<_>>();
+                matched.sort_by(|left, right| {
+                    left.name
+                        .to_ascii_lowercase()
+                        .cmp(&right.name.to_ascii_lowercase())
+                        .then_with(|| left.name.cmp(&right.name))
+                });
+                black_box(matched)
+            })
+        },
+    );
+    criterion.bench_function("variable_catalog_search_10000", |bencher| {
+        bencher.iter(|| {
+            black_box(ncview_rs::ui::sidebar::filter_variables(
+                &variables,
+                "variable_099",
+            ))
+        })
+    });
+    let palettes = fixtures::palette_catalog(256);
+    criterion.bench_function("palette_catalog_search_256", |bencher| {
+        bencher.iter(|| {
+            black_box(ncview_rs::app::palette_catalog_matches(
+                &palettes,
+                "benchmark25",
+            ))
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().without_plots();
     targets = startup_scaffold, slice_and_raster, interactive_paths, raw_dimension_slice,
-        palette_picker_interaction
+        palette_picker_interaction, large_map_selection, repeated_coordinate_read,
+        catalog_search
 }
 criterion_main!(benches);
