@@ -30,6 +30,27 @@ impl ScaleMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PaletteCategory {
+    Sequential,
+    Diverging,
+    MultiSequential,
+    Cyclic,
+    Custom,
+}
+
+impl PaletteCategory {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sequential => "Sequential",
+            Self::Diverging => "Diverging",
+            Self::MultiSequential => "Multi-sequential",
+            Self::Cyclic => "Cyclic",
+            Self::Custom => "Custom",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Palette {
     Viridis,
@@ -212,6 +233,32 @@ impl Palette {
             Self::Spectral => "Spectral",
             Self::Custom(map) => &map.name,
             Self::Reversed(palette) => palette.name(),
+        }
+    }
+
+    pub fn category(&self) -> PaletteCategory {
+        match self {
+            Self::Viridis
+            | Self::Plasma
+            | Self::Turbo
+            | Self::Inferno
+            | Self::Magma
+            | Self::Cividis
+            | Self::Cubehelix => PaletteCategory::Sequential,
+            Self::Cool | Self::Warm | Self::CoolWarm | Self::Spectral => PaletteCategory::Diverging,
+            Self::Reversed(palette) => palette.category(),
+            Self::Custom(map) => match map.name.to_ascii_lowercase().as_str() {
+                "acton" | "bamako" | "batlow" | "batlowk" | "batloww" | "bilbao" | "buda"
+                | "davos" | "devon" | "glasgow" | "grayc" | "hawaii" | "imola" | "lajolla"
+                | "lapaz" | "lipari" | "navia" | "naviaw" | "nuuk" | "oslo" | "tokyo" | "turku" => {
+                    PaletteCategory::Sequential
+                }
+                "bam" | "berlin" | "broc" | "cork" | "lisbon" | "managua" | "roma" | "tofino"
+                | "vanimo" | "vik" => PaletteCategory::Diverging,
+                "bukavu" | "fes" | "oleron" => PaletteCategory::MultiSequential,
+                "bamo" | "broco" | "corko" | "romao" | "viko" => PaletteCategory::Cyclic,
+                _ => PaletteCategory::Custom,
+            },
         }
     }
 
@@ -443,7 +490,32 @@ pub fn discover_colormaps() -> Vec<Palette> {
             palettes.push(palette);
         }
     }
+    palettes.sort_by_key(|palette| {
+        (
+            palette.category(),
+            builtin_order(palette),
+            palette.name().to_ascii_lowercase(),
+        )
+    });
     palettes
+}
+
+fn builtin_order(palette: &Palette) -> usize {
+    match palette {
+        Palette::Viridis => 0,
+        Palette::Plasma => 1,
+        Palette::Turbo => 2,
+        Palette::Inferno => 3,
+        Palette::Magma => 4,
+        Palette::Cividis => 5,
+        Palette::Cubehelix => 6,
+        Palette::Cool => 0,
+        Palette::Warm => 1,
+        Palette::CoolWarm => 2,
+        Palette::Spectral => 3,
+        Palette::Reversed(p) => builtin_order(p),
+        Palette::Custom(_) => usize::MAX,
+    }
 }
 
 /// Parse an Ncview `.ncmap` file: one RGB triplet (0..255) per line.
