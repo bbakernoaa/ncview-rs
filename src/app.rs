@@ -1982,7 +1982,9 @@ pub fn palette_catalog_matches(catalog: &[Palette], query: &str) -> Vec<usize> {
     catalog
         .iter()
         .enumerate()
-        .filter(|(_, palette)| fuzzy_match(palette.name(), &query))
+        .filter(|(_, palette)| {
+            fuzzy_match(palette.name(), &query) || fuzzy_match(palette.category().name(), &query)
+        })
         .map(|(index, _)| index)
         .collect()
 }

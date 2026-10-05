@@ -267,16 +267,33 @@ fn render_palette_picker(frame: &mut Frame, popup: Rect, title: &str, view: &Vie
             .split(inner);
         (sections[1], Some(sections[2]), sections[3], sections[0])
     };
-    let first = visible_palette_start(matches.len(), focus_index, usize::from(list_area.height));
-    let end = first
-        .saturating_add(usize::from(list_area.height))
-        .min(matches.len());
-    let list = matches
-        .iter()
-        .skip(first)
-        .take(end.saturating_sub(first))
-        .map(|&index| {
-            let palette = &view.palette_catalog[index];
+    let mut rendered_lines: Vec<Line<'static>> = Vec::new();
+    let mut focused_line_index = 0;
+    let mut current_category = None;
+
+    if matches.is_empty() {
+        rendered_lines.push(Line::from(if query.is_empty() {
+            "No colormaps available"
+        } else {
+            "No colormaps match this search"
+        }));
+    } else {
+        for (pos, &catalog_idx) in matches.iter().enumerate() {
+            let palette = &view.palette_catalog[catalog_idx];
+            let cat = palette.category();
+            if current_category != Some(cat) {
+                current_category = Some(cat);
+                let header_text = format!("── {} ──", cat.name());
+                rendered_lines.push(Line::from(Span::styled(
+                    header_text,
+                    theme::title_style(theme::TEAL),
+                )));
+            }
+
+            if pos == focus_index {
+                focused_line_index = rendered_lines.len();
+            }
+
             let is_focused = focused.is_some_and(|focused| palette_identity_eq(palette, focused));
             let is_applied = palette_identity_eq(palette, &view.palette);
             let marker = if is_focused { ">" } else { " " };
@@ -287,22 +304,32 @@ fn render_palette_picker(frame: &mut Frame, popup: Rect, title: &str, view: &Vie
                 (false, false) => "",
             };
             let reversed = is_focused && focused.is_some_and(|focused| focused.is_reversed());
-            format!(
+            let line_str = format!(
                 "{marker} {:<24} {state}{}",
                 palette.name(),
                 if reversed { ", reversed" } else { "" }
-            )
-        })
-        .collect::<Vec<_>>();
-    let list = if list.is_empty() {
-        vec![if query.is_empty() {
-            "No colormaps available".into()
-        } else {
-            "No colormaps match this search".into()
-        }]
+            );
+
+            let style = if is_focused {
+                theme::title_style(theme::TEXT)
+            } else {
+                theme::muted_style()
+            };
+            rendered_lines.push(Line::from(Span::styled(line_str, style)));
+        }
+    }
+
+    let total_lines = rendered_lines.len();
+    let visible_height = usize::from(list_area.height);
+    let start_line = visible_palette_start(total_lines, focused_line_index, visible_height);
+    let end_line = (start_line + visible_height).min(total_lines);
+
+    let visible_lines = if start_line < end_line {
+        rendered_lines[start_line..end_line].to_vec()
     } else {
-        list
+        Vec::new()
     };
+
     frame.render_widget(
         Paragraph::new(format!(
             "Search: {query}  {} / {} palettes",
@@ -312,7 +339,7 @@ fn render_palette_picker(frame: &mut Frame, popup: Rect, title: &str, view: &Vie
         search_area,
     );
     frame.render_widget(
-        Paragraph::new(list.join("\n")).wrap(Wrap { trim: true }),
+        Paragraph::new(visible_lines).wrap(Wrap { trim: true }),
         list_area,
     );
     if let (Some(focused), Some(preview_area)) = (focused, preview_area) {
@@ -637,6 +664,7 @@ mod palette_picker_tests {
                     .collect::<String>()
             })
             .collect::<String>();
+        assert!(text.contains("Sequential"));
         assert!(text.contains("Viridis"));
         assert!(text.contains("Plasma"));
         assert!(text.contains("applied"));
@@ -764,6 +792,59 @@ mod palette_picker_tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("No colormaps match this search"));
+    }
+
+    #[test]
+    fn picker_renders_category_headers_and_filters_by_category_name() {
+        let mut state = AppState::default();
+        state.view.palette_catalog = vec![Palette::Viridis, Palette::CoolWarm];
+        state.view.palette = Palette::Viridis;
+        state.reduce(crate::app::Command::OpenPalettePicker);
+
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("Sequential"));
+        assert!(text.contains("Diverging"));
+        assert!(text.contains("Viridis"));
+        assert!(text.contains("CoolWarm"));
+
+        // Filter by category name 'diverging'
+        state.reduce(crate::app::Command::InputChar('d'));
+        state.reduce(crate::app::Command::InputChar('i'));
+        state.reduce(crate::app::Command::InputChar('v'));
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+
+        let text_filtered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text_filtered.contains("CoolWarm"));
+        assert!(!text_filtered.contains("Viridis"));
     }
 }
 
