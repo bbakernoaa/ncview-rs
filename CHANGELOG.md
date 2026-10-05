@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.18](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.17...v0.5.18) - 2026-10-05
+
+### Added
+
+- Adding formula editor support. ([#43](https://github.com/bbakernoaa/ncview-rs/pull/43))
+
 ## [0.5.17](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.16...v0.5.17) - 2026-10-05
 
 ### Other
