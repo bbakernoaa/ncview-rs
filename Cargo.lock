@@ -1828,6 +1828,7 @@ dependencies = [
  "colorous",
  "criterion",
  "crossterm",
+ "flate2",
  "grib",
  "human-panic",
  "image",
