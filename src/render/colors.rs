@@ -490,11 +490,13 @@ pub fn discover_colormaps() -> Vec<Palette> {
             palettes.push(palette);
         }
     }
-    palettes.sort_by_key(|palette| (
-        palette.category(),
-        builtin_order(palette),
-        palette.name().to_ascii_lowercase(),
-    ));
+    palettes.sort_by_key(|palette| {
+        (
+            palette.category(),
+            builtin_order(palette),
+            palette.name().to_ascii_lowercase(),
+        )
+    });
     palettes
 }
 
