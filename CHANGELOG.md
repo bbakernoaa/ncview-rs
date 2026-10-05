@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.17](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.16...v0.5.17) - 2026-10-05
+
+### Other
+
+- Add Crameri Scientific Colour Maps v8.0 and colormap categories ([#58](https://github.com/bbakernoaa/ncview-rs/pull/58))
+
 ## [0.5.16](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.15...v0.5.16) - 2026-10-05
 
 ### Added
