@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.16](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.15...v0.5.16) - 2026-10-05
+
+### Added
+
+- enhance Zarr and Icechunk manifest support ([#54](https://github.com/bbakernoaa/ncview-rs/pull/54))
+
 ## [0.5.15](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.14...v0.5.15) - 2026-10-02
 
 ### Added
