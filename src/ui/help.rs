@@ -27,6 +27,7 @@ pub fn help_text() -> String {
   v             reverse colormap\n\
   i             cycle interpolation (set NCVIEW_SCIENTIFIC_RENDERING=0 to unlock)\n\
   e             export current slice (PNG + SVG + JSON)\n\
+  =             formula editor: derive variables, e.g. O3[1]-O3[2], mean(T)\n\
   a             automatic limits\n\
   l             edit min/max limits\n\
   f             mask data outside a range\n\

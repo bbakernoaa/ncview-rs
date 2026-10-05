@@ -15,6 +15,11 @@ tags: [cli, commands, flags, subcommands, cheatsheet]
 | `--diff` | — | Enable difference mode between two files or two sets of files |
 | `--first <PATTERN>` | path/glob | First file or glob pattern for diff mode |
 | `--second <PATTERN>` | path/glob | Second file or glob pattern for diff mode |
+| `--formula <EXPR>` | expression | Add a derived variable (repeatable); `NAME[n]` reads dataset `n`. `-formula` is accepted as a VERDI-style alias |
+| `--batch` | — | Evaluate every `--formula` and export PNG/SVG/JSON without opening the terminal UI |
+| `--export-dir <DIR>` | path | Output directory for `--batch` (default `NCVIEW_EXPORT_DIR` or `.`) |
+| `--time <INDEX>` | integer | Zero-based time step exported by `--batch` (default 0) |
+| `--level <INDEX>` | integer | Zero-based vertical level exported by `--batch` (default 0) |
 | `--no-restore` | — | Do not restore previous session state for the dataset(s) |
 | `-h`, `--help` | — | Print help |
 | `-V`, `--version` | — | Print version |
@@ -54,7 +59,12 @@ ncv --diff control.nc experiment.nc          # two-file difference mode
 ncv --diff first="a*.nc" second="b*.nc"      # set-vs-set difference mode
 ncv --no-restore data.nc                     # ignore saved session state
 ncv s3://noaa-gefs-pds/...f000.grib2         # remote public bucket
+ncv --formula "d = O3[1]-O3[2]" a.nc b.nc    # cross-file formula in the UI
+ncv --batch --export-dir out -formula "mean(O3)" a.nc  # headless export
 ```
+
+See [Derive variables with formulas](../how-to/derive-variables-with-formulas.md)
+for the formula language.
 
 ## Related
 

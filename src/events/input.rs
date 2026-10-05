@@ -124,8 +124,10 @@ fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
             Overlay::CommandPalette => Command::ExecuteCommandPalette,
             Overlay::PalettePicker => Command::CommitPalettePicker,
             Overlay::Limits | Overlay::Filter => Command::ApplyLimitDraft,
+            Overlay::Formula => Command::SubmitFormula,
             _ => Command::ActivatePoint,
         }),
+        KeyCode::Delete if overlay == Overlay::Formula => Some(Command::RemoveFormula),
         KeyCode::Tab | KeyCode::Backspace => Some(match key.code {
             KeyCode::Tab => Command::NextLimitField,
             _ => Command::DeleteInput,
@@ -145,6 +147,7 @@ fn text_overlay_direction(overlay: Overlay, direction: isize) -> Command {
         Overlay::CommandPalette => Command::PaletteMove(direction),
         Overlay::PalettePicker => Command::MovePalettePicker(direction),
         Overlay::Axis => Command::CycleAxis(direction),
+        Overlay::Formula => Command::FormulaMove(direction),
         _ => Command::NextLimitField,
     }
 }
@@ -251,6 +254,7 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char(' ') => Some(Command::TogglePlayback),
         KeyCode::Char('{') => Some(Command::PreviousFile),
         KeyCode::Char('}') => Some(Command::NextFile),
+        KeyCode::Char('=') => Some(Command::OpenFormulaEditor),
         KeyCode::Tab => Some(Command::ToggleSidebarFocus),
         KeyCode::Backspace => Some(Command::DeleteInput),
         KeyCode::Char(character) => Some(Command::InputChar(character)),
@@ -337,6 +341,22 @@ mod tests {
             command_from_key_with_mode(enter, InputMode::TextOverlay(Overlay::Filter)),
             Some(Command::ApplyLimitDraft)
         );
+    }
+
+    #[test]
+    fn formula_editor_keys_edit_and_submit() {
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE)),
+            Some(Command::OpenFormulaEditor)
+        );
+        let mode = InputMode::TextOverlay(Overlay::Formula);
+        let map = |code| command_from_key_with_mode(KeyEvent::new(code, KeyModifiers::NONE), mode);
+        assert_eq!(map(KeyCode::Enter), Some(Command::SubmitFormula));
+        assert_eq!(map(KeyCode::Up), Some(Command::FormulaMove(-1)));
+        assert_eq!(map(KeyCode::Down), Some(Command::FormulaMove(1)));
+        assert_eq!(map(KeyCode::Delete), Some(Command::RemoveFormula));
+        assert_eq!(map(KeyCode::Char('q')), Some(Command::InputChar('q')));
+        assert_eq!(map(KeyCode::Esc), Some(Command::Quit));
     }
 
     #[test]
