@@ -16,6 +16,10 @@ tags: [cli, commands, flags, subcommands, cheatsheet]
 | `--first <PATTERN>` | path/glob | First file or glob pattern for diff mode |
 | `--second <PATTERN>` | path/glob | Second file or glob pattern for diff mode |
 | `--no-restore` | — | Do not restore previous session state for the dataset(s) |
+| `--min-x <X>` | number | Minimum x coordinate or zero-based x index for the initial view |
+| `--max-x <X>` | number | Maximum x coordinate or zero-based x index for the initial view |
+| `--min-y <Y>` | number | Minimum y coordinate or zero-based y index for the initial view |
+| `--max-y <Y>` | number | Maximum y coordinate or zero-based y index for the initial view |
 | `-h`, `--help` | — | Print help |
 | `-V`, `--version` | — | Print version |
 
@@ -54,7 +58,23 @@ ncv --diff control.nc experiment.nc          # two-file difference mode
 ncv --diff first="a*.nc" second="b*.nc"      # set-vs-set difference mode
 ncv --no-restore data.nc                     # ignore saved session state
 ncv s3://noaa-gefs-pds/...f000.grib2         # remote public bucket
+ncv --min-x -130 --max-x -60 --min-y 20 --max-y 55 data.nc
+ncv --min-x 0 --max-x 100 --min-y 20 --max-y 80 image-only.nc
 ```
+
+Supply all four bounds together. Geographic axes use coordinate values; longitude
+input accepts either signed degrees (`-180..180`) or `0..360`, and latitude
+must be between `-90` and `90`. The viewer maps the inclusive endpoints to the
+smallest source-index rectangle containing those coordinate samples. Other axes
+use their one-dimensional coordinate values when available, and inclusive,
+zero-based cell indices when no coordinate values are available. Reversed,
+non-finite, out-of-domain, or non-overlapping bounds produce an error.
+
+Explicit CLI bounds take precedence over a zoom restored from the saved session.
+Without CLI bounds, the usual restored view is preserved. Use `r` or the
+command palette's **Reset zoom** action to return to the selected variable's
+global view. For curvilinear grids the requested geographic rectangle is
+approximated by its smallest row/column envelope; the status line reports this.
 
 ## Related
 

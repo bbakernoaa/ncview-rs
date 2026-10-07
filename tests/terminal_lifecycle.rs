@@ -45,3 +45,29 @@ fn terminal_restore_while_palette_picker_is_active_preserves_overlay_state() {
     state.reduce(Command::CancelPalettePicker);
     assert!(state.view.overlay.is_none());
 }
+
+#[test]
+fn terminal_restore_while_entering_numeric_bounds_preserves_the_zoom_draft() {
+    use ncview_rs::{
+        app::{AppState, Command, Overlay},
+        data::slice::Bounds,
+    };
+
+    let mut state = AppState::default();
+    let zoom = Bounds::new(1, 4, 2, 6).unwrap();
+    state.view.zoom_bounds = Some(zoom);
+    state.reduce(Command::OpenViewBounds);
+    state.reduce(Command::InputChar('1'));
+
+    if let Ok(mut session) = TerminalSession::enter() {
+        session.restore().unwrap();
+    }
+
+    assert_eq!(state.view.overlay, Some(Overlay::ViewBounds));
+    assert_eq!(state.view.zoom_bounds, Some(zoom));
+    assert_eq!(
+        state.view.view_bounds_draft.as_ref().unwrap().fields[0],
+        "1"
+    );
+    state.reduce(Command::CancelViewBounds);
+}

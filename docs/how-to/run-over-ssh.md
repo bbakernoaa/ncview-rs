@@ -46,6 +46,22 @@ A conservative SSH launch that always renders:
 NCVIEW_IMAGE_PROTOCOL=cells ncv data.nc
 ```
 
+## Open directly to a bounded region
+
+You can set the initial extent in an SSH command without interacting with the
+terminal first. Pass all four bounds together; geographic datasets accept
+signed longitude or `0..360` longitude and latitude from `-90..90`:
+
+```bash
+ncv --min-x 0 --max-x 60 --min-y 20 --max-y 65 forecast.nc
+```
+
+The command also works for dimension-only data, where bounds are inclusive,
+zero-based x/y cell indices. In the interactive viewer, **Set view bounds** in
+the command palette provides the same entry fields alongside the existing box
+zoom. Invalid or non-overlapping bounds keep the current view intact. See the
+[CLI reference](../reference/cli.md) for coordinate and error behavior.
+
 ## WezTerm note
 
 WezTerm does **not** implement the Kitty graphics protocol. A Kitty request

@@ -72,6 +72,37 @@ fn interactive_paths(criterion: &mut Criterion) {
     });
 }
 
+fn menu_bound_resolution(criterion: &mut Criterion) {
+    let longitude = (0..1440)
+        .map(|index| index as f64 * 0.25)
+        .collect::<Vec<_>>();
+    let latitude = (0..721)
+        .map(|index| -90.0 + index as f64 * 0.25)
+        .collect::<Vec<_>>();
+    criterion.bench_function(
+        "menu_numeric_bounds_1440x721_regular_geographic",
+        |bencher| {
+            bencher.iter(|| {
+                let x = ncview_rs::data::bounds::axis_index_range(
+                    210.0,
+                    260.0,
+                    black_box(&longitude),
+                    ncview_rs::data::bounds::AxisKind::Longitude,
+                )
+                .expect("benchmark longitude bounds overlap the fixture");
+                let y = ncview_rs::data::bounds::axis_index_range(
+                    20.0,
+                    60.0,
+                    black_box(&latitude),
+                    ncview_rs::data::bounds::AxisKind::Latitude,
+                )
+                .expect("benchmark latitude bounds overlap the fixture");
+                black_box((x, y))
+            })
+        },
+    );
+}
+
 fn raw_dimension_slice(criterion: &mut Criterion) {
     let Ok(path) = std::env::var("NCVIEW_RAW_DIMENSION_BENCH_FILE") else {
         return;
@@ -322,6 +353,6 @@ criterion_group! {
     config = Criterion::default().without_plots();
     targets = startup_scaffold, slice_and_raster, interactive_paths, raw_dimension_slice,
         palette_picker_interaction, large_map_selection, repeated_coordinate_read,
-        catalog_search
+        catalog_search, menu_bound_resolution
 }
 criterion_main!(benches);

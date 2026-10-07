@@ -33,6 +33,7 @@ pub fn help_text() -> String {
   s             toggle linear/log color scale\n\
   z             toggle current/global color scale\n\
   r             reset zoom\n\
+  Ctrl-P / :    command palette → Set view bounds\n\
   drag map      zoom to a rectangle; drag zoomed map to pan\n\
   Shift+drag    zoom again while already zoomed\n\
   g             logical/projected grid\n\
@@ -52,7 +53,7 @@ Mouse\n\
   wheel over the sidebar  scroll the level or variable list\n\
   right-click or ? closes this help\n\
 Command palette\n\
-  Ctrl-P or :   search actions, then Enter to run\n\
+  Ctrl-P / :    search actions, then Enter to run\n\
   /             browse and search all plottable variables\n\
 Colormap chooser\n\
   ↑ / ↓         browse colormaps; preview follows focus\n\

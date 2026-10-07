@@ -123,6 +123,177 @@ fn coards_fixture() -> tempfile::TempDir {
     directory
 }
 
+fn zero_to_360_fixture() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zero-to-360.nc4");
+    let mut writer = NcFileWriter::new();
+    // Keep dimension scales distinct from coordinate variable names, matching
+    // the constraint documented for the COARDS fixture above.
+    let y = writer.def_dim("latitude_dim", 4).unwrap();
+    let x = writer.def_dim("longitude_dim", 5).unwrap();
+    let longitude = writer.def_var("longitude", &[x], NcType::Float64).unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(longitude), "standard_name", "longitude")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(longitude), "units", "degrees_east")
+        .unwrap();
+    writer
+        .put_var_f64(longitude, &[0.0, 90.0, 180.0, 270.0, 360.0])
+        .unwrap();
+    let latitude = writer.def_var("latitude", &[y], NcType::Float64).unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(latitude), "standard_name", "latitude")
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(latitude), "units", "degrees_north")
+        .unwrap();
+    writer
+        .put_var_f64(latitude, &[-90.0, -30.0, 30.0, 90.0])
+        .unwrap();
+    let field = writer
+        .def_var("temperature", &[y, x], NcType::Float64)
+        .unwrap();
+    writer
+        .put_att_str(VarOrGroup::Var(field), "coordinates", "latitude longitude")
+        .unwrap();
+    writer
+        .put_var_f64(field, &(0..20).map(f64::from).collect::<Vec<_>>())
+        .unwrap();
+    writer.close(path).unwrap();
+    directory
+}
+
+fn curvilinear_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/curvilinear.nc4")
+}
+
+#[test]
+fn bounded_zoom_fixtures_expose_geographic_and_dimension_axes() {
+    let signed = coards_fixture();
+    let signed_source = ncview_rs::data::open(signed.path().join("coards-float32.nc4")).unwrap();
+    assert_eq!(
+        signed_source
+            .dimension_values("MACCity", "lon_dim")
+            .unwrap(),
+        [-180.0, -90.0, 0.0, 90.0, 180.0]
+    );
+
+    let circular = zero_to_360_fixture();
+    let circular_source = ncview_rs::data::open(circular.path().join("zero-to-360.nc4")).unwrap();
+    assert_eq!(
+        circular_source
+            .dimension_values("temperature", "longitude_dim")
+            .unwrap(),
+        [0.0, 90.0, 180.0, 270.0, 360.0]
+    );
+
+    let dimensions = regular_fixture();
+    let dimension_source = ncview_rs::data::open(dimensions.path().join("regular.nc4")).unwrap();
+    assert_eq!(
+        dimension_source
+            .dimension_values("temperature", "lat")
+            .unwrap(),
+        [0.0, 1.0, 2.0, 3.0]
+    );
+    assert!(curvilinear_fixture_path().is_file());
+}
+
+#[test]
+fn bounded_zoom_source_axes_resolve_to_expected_half_open_indices() {
+    use ncview_rs::data::bounds::{AxisKind, axis_index_range};
+
+    let signed = coards_fixture();
+    let signed_source = ncview_rs::data::open(signed.path().join("coards-float32.nc4")).unwrap();
+    let longitude = signed_source
+        .dimension_values("MACCity", "lon_dim")
+        .unwrap();
+    let latitude = signed_source
+        .dimension_values("MACCity", "lat_dim")
+        .unwrap();
+    let cols = axis_index_range(-90.0, 90.0, &longitude, AxisKind::Longitude).unwrap();
+    let rows = axis_index_range(-30.0, 30.0, &latitude, AxisKind::Latitude).unwrap();
+    assert_eq!((rows.start, rows.end, cols.start, cols.end), (1, 3, 1, 4));
+
+    let circular = zero_to_360_fixture();
+    let circular_source = ncview_rs::data::open(circular.path().join("zero-to-360.nc4")).unwrap();
+    let longitude = circular_source
+        .dimension_values("temperature", "longitude_dim")
+        .unwrap();
+    let latitude = circular_source
+        .dimension_values("temperature", "latitude_dim")
+        .unwrap();
+    let cols = axis_index_range(-90.0, 0.0, &longitude, AxisKind::Longitude).unwrap();
+    let rows = axis_index_range(-30.0, 30.0, &latitude, AxisKind::Latitude).unwrap();
+    assert_eq!((rows.start, rows.end, cols.start, cols.end), (1, 3, 3, 5));
+}
+
+#[test]
+fn committed_curvilinear_fixture_produces_a_coordinate_envelope() {
+    let source = ncview_rs::data::open(curvilinear_fixture_path()).unwrap();
+    let variable = source
+        .metadata()
+        .variables
+        .iter()
+        .find(|variable| variable.name == "temperature")
+        .unwrap();
+    let row_name = variable.dimensions[variable.dimensions.len() - 2].as_str();
+    let col_name = variable.dimensions[variable.dimensions.len() - 1].as_str();
+    let rows = source
+        .metadata()
+        .dimensions
+        .iter()
+        .find(|dimension| dimension.name == row_name)
+        .unwrap()
+        .length;
+    let cols = source
+        .metadata()
+        .dimensions
+        .iter()
+        .find(|dimension| dimension.name == col_name)
+        .unwrap()
+        .length;
+    let slice = source
+        .read_slice(&ncview_rs::data::slice::SliceRequest {
+            variable: "temperature".into(),
+            time: 0,
+            depth: 0,
+            bounds: Bounds::new(0, rows, 0, cols).unwrap(),
+        })
+        .unwrap();
+    let coordinates = slice.coordinates.unwrap();
+    let longitude = coordinates.longitude.as_ref().unwrap();
+    let latitude = coordinates.latitude.as_ref().unwrap();
+    let center = (rows / 2, cols / 2);
+    let lon = longitude[center];
+    let lat = latitude[center];
+    assert!(lon.is_finite() && lat.is_finite());
+
+    let (source_bounds, approximated) =
+        ncview_rs::data::bounds::resolve_source_bounds_with_feedback(
+            source.as_ref(),
+            "temperature",
+            col_name,
+            row_name,
+            ncview_rs::data::bounds::NumericBounds {
+                min_x: lon - 0.5,
+                max_x: lon + 0.5,
+                min_y: lat - 0.5,
+                max_y: lat + 0.5,
+            },
+        )
+        .unwrap();
+    assert!(approximated);
+    assert!(source_bounds.row_start <= center.0 && center.0 < source_bounds.row_end);
+    assert!(source_bounds.col_start <= center.1 && center.1 < source_bounds.col_end);
+
+    let envelope =
+        ncview_rs::data::bounds::curvilinear_index_bounds(lon, lon, lat, lat, longitude, latitude)
+            .unwrap();
+    assert!(envelope.row_start <= center.0 && center.0 < envelope.row_end);
+    assert!(envelope.col_start <= center.1 && center.1 < envelope.col_end);
+}
+
 #[test]
 fn bounds_reject_empty_and_overflow() {
     assert!(Bounds::new(0, 0, 0, 1).is_err());

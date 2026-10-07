@@ -1,5 +1,6 @@
 //! Read-only dataset and slice abstractions.
 
+pub mod bounds;
 pub mod coordinates;
 pub mod diff;
 pub mod fixtures;

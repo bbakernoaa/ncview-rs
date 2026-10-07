@@ -41,7 +41,7 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 | `t` / `d` / `h` | plot chooser: time series / scatter / histogram |
 | `k` / `u` | plot chooser: CDF / vertical profile |
 | `m` | add/remove the hovered point from the plot selection |
-| `Ctrl-P` or `:` | command palette — search actions, `Enter` to run |
+| `Ctrl-P / :` | command palette — search actions, `Enter` to run |
 | `/` | browse and search all plottable variables |
 | `?` | open/close this help |
 

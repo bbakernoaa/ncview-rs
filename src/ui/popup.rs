@@ -42,6 +42,7 @@ pub fn render(
         Overlay::Plot => "Plot",
         Overlay::CommandPalette => "Command Palette",
         Overlay::PalettePicker => "Colormap",
+        Overlay::ViewBounds => "Set view bounds",
     };
     let message = match overlay {
         Overlay::Limits => "Type to replace the selected value; Tab switches fields",
@@ -51,6 +52,7 @@ pub fn render(
         Overlay::Plot => "Choose a plot and its axes",
         Overlay::CommandPalette => "Type to filter commands; Enter runs the selected action",
         Overlay::PalettePicker => "Choose a colormap; Enter applies it",
+        Overlay::ViewBounds => "Enter x/y coordinate bounds for the displayed region",
     };
     let width = if matches!(
         overlay,
@@ -134,6 +136,29 @@ pub fn render(
             Paragraph::new(text).block(popup_panel(title, theme::PEACH)),
             popup,
         );
+    } else if overlay == Overlay::ViewBounds {
+        let draft = view.view_bounds_draft.as_ref();
+        let labels = ["Min X", "Max X", "Min Y", "Max Y"];
+        let mut lines = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let active = draft.is_some_and(|draft| draft.active == index);
+                let value = draft.map_or("", |draft| draft.fields[index].as_str());
+                format!("{label}: [{}{}]", if active { "> " } else { "  " }, value)
+            })
+            .collect::<Vec<_>>();
+        lines.push("Type replaces   Backspace edits".into());
+        lines.push("Tab next field   Enter apply   Esc cancel".into());
+        if let Some(error) = draft.and_then(|draft| draft.error.as_deref()) {
+            lines.push(error.to_string());
+        }
+        frame.render_widget(
+            Paragraph::new(lines.join("\n"))
+                .wrap(Wrap { trim: false })
+                .block(popup_panel(title, theme::MAUVE)),
+            popup,
+        );
     } else if matches!(overlay, Overlay::Axis) {
         let draft = view.axis_draft.as_ref();
         let x = draft.map_or("".to_string(), |draft| draft.x.clone());
@@ -193,6 +218,9 @@ pub fn render(
 
 fn overlay_popup_rect(area: Rect, overlay: Overlay, width: u16, height: u16) -> Rect {
     if overlay == Overlay::PalettePicker && (area.width < 54 || area.height < 12) {
+        return area;
+    }
+    if overlay == Overlay::ViewBounds && (area.width < 52 || area.height < 14) {
         return area;
     }
     Rect {
@@ -768,6 +796,75 @@ mod palette_picker_tests {
 }
 
 #[cfg(test)]
+mod view_bounds_popup_tests {
+    use super::render;
+    use crate::{
+        app::{AppState, Overlay, ViewBoundsDraft},
+        data::{DatasetFormat, DatasetMetadata},
+    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    fn metadata() -> DatasetMetadata {
+        DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        }
+    }
+
+    fn rendered_text(width: u16, height: u16, error: Option<&str>) -> String {
+        let mut state = AppState::default();
+        state.view.overlay = Some(Overlay::ViewBounds);
+        state.view.view_bounds_draft = Some(ViewBoundsDraft {
+            fields: ["-90".into(), "90".into(), "-30".into(), "30".into()],
+            active: 2,
+            replace_active: true,
+            error: error.map(str::to_string),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata(), &[], "", None))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn view_bounds_popup_shows_four_fields_and_actionable_errors() {
+        let text = rendered_text(
+            80,
+            24,
+            Some("latitude bounds must be between -90 and 90 degrees"),
+        );
+        for field in ["Min X", "Max X", "Min Y", "Max Y"] {
+            assert!(text.contains(field), "missing {field}: {text}");
+        }
+        assert!(text.contains("-90"));
+        assert!(text.contains("90"));
+        assert!(text.contains("latitude bounds"));
+        assert!(text.contains("Tab"));
+        assert!(text.contains("Enter"));
+        assert!(text.contains("Esc"));
+    }
+
+    #[test]
+    fn view_bounds_popup_uses_available_area_on_small_terminals() {
+        let area = Rect::new(0, 0, 40, 10);
+        let popup = super::overlay_popup_rect(area, Overlay::ViewBounds, 24, 4);
+        assert_eq!(popup, area);
+        let text = rendered_text(40, 10, None);
+        assert!(text.contains("Min X"));
+        assert!(text.contains("Max Y"));
+    }
+}
+
+#[cfg(test)]
 mod dismissal_tests {
     use super::{popup_shadow_rect, render};
     use crate::{
@@ -786,6 +883,7 @@ mod dismissal_tests {
             Overlay::Plot,
             Overlay::CommandPalette,
             Overlay::PalettePicker,
+            Overlay::ViewBounds,
         ];
         let metadata = DatasetMetadata {
             path: "test.nc".into(),
