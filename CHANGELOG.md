@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.19](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.18...v0.5.19) - 2026-10-07
+
+### Added
+
+- maintain view and new bounds menu ([#61](https://github.com/bbakernoaa/ncview-rs/pull/61))
+
 ## [0.5.18](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.17...v0.5.18) - 2026-10-05
 
 ### Added
