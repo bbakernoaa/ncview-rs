@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::data::bounds::NumericBounds;
 use crate::data::slice::{Bounds, Slice2D};
 use crate::data::{PointCoordinates, Variable};
 pub use crate::render::colors::ScaleMode;
@@ -70,6 +71,9 @@ pub enum Command {
     DeleteInput,
     ApplyLimitDraft,
     NextLimitField,
+    OpenViewBounds,
+    ApplyViewBounds,
+    CancelViewBounds,
     FocusLimitField(LimitField),
     FocusAxisField(AxisField),
     Zoom(Bounds),
@@ -149,6 +153,13 @@ pub enum Effect {
         generation: Generation,
         variable: String,
     },
+    ResolveViewBounds {
+        generation: Generation,
+        variable: String,
+        x_axis: String,
+        y_axis: String,
+        bounds: NumericBounds,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +169,7 @@ pub struct ViewModel {
     /// concurrently with map-slice reads and must not invalidate a slice that
     /// is still being loaded.
     pub plot_generation: Generation,
+    pub bounds_generation: Generation,
     pub loading: LoadingState,
     pub slice: Option<Slice2D>,
     pub decoded_bytes: usize,
@@ -188,9 +200,11 @@ pub struct ViewModel {
     pub filter_range: Option<(f64, f64)>,
     pub limit_draft: Option<LimitDraft>,
     pub axis_draft: Option<AxisDraft>,
+    pub view_bounds_draft: Option<ViewBoundsDraft>,
     pub palette_query: String,
     pub palette_index: usize,
     pub zoom_bounds: Option<Bounds>,
+    pub zoom_approximation: Option<String>,
     pub full_bounds: Option<Bounds>,
     pub drag: Option<crate::events::mouse::DragState>,
     pub overlay: Option<Overlay>,
@@ -268,6 +282,7 @@ pub enum Overlay {
     CommandPalette,
     Formula,
     PalettePicker,
+    ViewBounds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +307,7 @@ impl ViewModel {
                 | Overlay::CommandPalette
                 | Overlay::Formula
                 | Overlay::PalettePicker => InputMode::TextOverlay(overlay),
+                Overlay::ViewBounds => InputMode::TextOverlay(overlay),
                 Overlay::Plot | Overlay::TimeSeries => InputMode::PlotOverlay,
             }
         } else if self.help_visible {
@@ -391,6 +407,14 @@ pub struct LimitDraft {
     pub replace_active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewBoundsDraft {
+    pub fields: [String; 4],
+    pub active: usize,
+    pub replace_active: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridMode {
     Logical,
@@ -417,6 +441,7 @@ impl Default for ViewModel {
         Self {
             generation: Generation(0),
             plot_generation: Generation(0),
+            bounds_generation: Generation(0),
             loading: LoadingState::Idle,
             slice: None,
             decoded_bytes: 0,
@@ -447,9 +472,11 @@ impl Default for ViewModel {
             filter_range: None,
             limit_draft: None,
             axis_draft: None,
+            view_bounds_draft: None,
             palette_query: String::new(),
             palette_index: 0,
             zoom_bounds: None,
+            zoom_approximation: None,
             full_bounds: None,
             drag: None,
             overlay: None,
@@ -533,6 +560,35 @@ impl AppState {
         true
     }
 
+    pub fn accept_view_bounds(
+        &mut self,
+        generation: Generation,
+        result: std::result::Result<Bounds, String>,
+    ) -> bool {
+        if generation != self.view.bounds_generation {
+            return false;
+        }
+        match result {
+            Ok(bounds) => {
+                self.view.zoom_bounds = Some(bounds);
+                self.view.zoom_approximation = None;
+                self.view.drag = None;
+                self.view.view_bounds_draft = None;
+                if matches!(self.view.overlay, Some(Overlay::ViewBounds)) {
+                    self.view.overlay = None;
+                }
+                self.view.status = "view bounds applied".into();
+            }
+            Err(error) => {
+                if let Some(draft) = self.view.view_bounds_draft.as_mut() {
+                    draft.error = Some(error.clone());
+                }
+                self.view.status = error;
+            }
+        }
+        true
+    }
+
     pub fn set_slice(&mut self, slice: Slice2D) {
         self.view.decoded_bytes = slice.memory_bytes();
         self.view.slice = Some(slice);
@@ -571,6 +627,7 @@ impl AppState {
             | Command::ResetVariableView
             | Command::ManualLimits { .. }
             | Command::OpenLimits
+            | Command::OpenViewBounds
             | Command::OpenFilter
             | Command::ClearFilter
             | Command::OpenCommandPalette
@@ -590,6 +647,8 @@ impl AppState {
             | Command::InputChar(_)
             | Command::DeleteInput
             | Command::NextLimitField
+            | Command::ApplyViewBounds
+            | Command::CancelViewBounds
             | Command::FocusLimitField(_)
             | Command::FocusAxisField(_)) => self.reduce_text_input(command),
             command @ (Command::Zoom(_)
@@ -701,6 +760,7 @@ impl AppState {
                     self.view.overlay = None;
                     self.view.limit_draft = None;
                     self.view.axis_draft = None;
+                    self.view.view_bounds_draft = None;
                 } else if self.view.help_visible {
                     self.view.help_visible = false;
                 }
@@ -1030,6 +1090,7 @@ impl AppState {
                 self.view.scale_mode = ScaleMode::Linear;
                 self.view.color_scale_scope = ColorScaleScope::CurrentView;
                 self.view.zoom_bounds = None;
+                self.view.zoom_approximation = None;
                 self.view.drag = None;
                 self.view.grid_mode = GridMode::Logical;
                 self.view.show_land_borders = false;
@@ -1065,6 +1126,17 @@ impl AppState {
                 self.view.palette_query.clear();
                 self.view.palette_index = 0;
                 self.view.overlay = Some(Overlay::CommandPalette);
+                None
+            }
+            Command::OpenViewBounds => {
+                self.view.help_visible = false;
+                self.view.view_bounds_draft = Some(ViewBoundsDraft {
+                    fields: std::array::from_fn(|_| String::new()),
+                    active: 0,
+                    replace_active: true,
+                    error: None,
+                });
+                self.view.overlay = Some(Overlay::ViewBounds);
                 None
             }
             _ => unreachable!("display reducer received unrelated command"),
@@ -1294,6 +1366,21 @@ impl AppState {
                     if target.len() < 32 {
                         target.push(character);
                     }
+                } else if matches!(self.view.overlay, Some(Overlay::ViewBounds))
+                    && let Some(draft) = self.view.view_bounds_draft.as_mut()
+                    && (character.is_ascii_digit()
+                        || character.is_whitespace()
+                        || matches!(character, '-' | '+' | '.' | 'e' | 'E'))
+                {
+                    let target = &mut draft.fields[draft.active];
+                    if draft.replace_active {
+                        target.clear();
+                        draft.replace_active = false;
+                    }
+                    if target.len() < 32 {
+                        target.push(character);
+                    }
+                    draft.error = None;
                 }
                 None
             }
@@ -1347,6 +1434,17 @@ impl AppState {
                     } else {
                         target.pop();
                     }
+                } else if matches!(self.view.overlay, Some(Overlay::ViewBounds))
+                    && let Some(draft) = self.view.view_bounds_draft.as_mut()
+                {
+                    let target = &mut draft.fields[draft.active];
+                    if draft.replace_active {
+                        target.clear();
+                        draft.replace_active = false;
+                    } else {
+                        target.pop();
+                    }
+                    draft.error = None;
                 }
                 None
             }
@@ -1361,6 +1459,13 @@ impl AppState {
                         AxisField::X => AxisField::Y,
                         AxisField::Y => AxisField::X,
                     };
+                    draft.replace_active = true;
+                    return None;
+                }
+                if matches!(self.view.overlay, Some(Overlay::ViewBounds))
+                    && let Some(draft) = self.view.view_bounds_draft.as_mut()
+                {
+                    draft.active = (draft.active + 1) % 4;
                     draft.replace_active = true;
                     return None;
                 }
@@ -1400,6 +1505,66 @@ impl AppState {
                 }
                 None
             }
+            Command::ApplyViewBounds => {
+                if !matches!(self.view.overlay, Some(Overlay::ViewBounds)) {
+                    return None;
+                }
+                let draft = self.view.view_bounds_draft.as_ref()?;
+                let parsed = draft
+                    .fields
+                    .iter()
+                    .map(|value| value.trim().parse::<f64>())
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|_| "all four bounds must be valid finite numbers".to_string());
+                let bounds = parsed.and_then(|values| {
+                    let bounds = NumericBounds {
+                        min_x: values[0],
+                        max_x: values[1],
+                        min_y: values[2],
+                        max_y: values[3],
+                    };
+                    bounds.validate().map_err(|error| error.to_string())
+                });
+                let bounds = match bounds {
+                    Ok(bounds) => bounds,
+                    Err(error) => {
+                        if let Some(draft) = self.view.view_bounds_draft.as_mut() {
+                            draft.error = Some(error.clone());
+                        }
+                        self.view.status = error;
+                        return None;
+                    }
+                };
+                let (Some(variable), Some(x_axis), Some(y_axis)) = (
+                    self.view.selected_variable.clone(),
+                    self.view.x_axis.clone(),
+                    self.view.y_axis.clone(),
+                ) else {
+                    if let Some(draft) = self.view.view_bounds_draft.as_mut() {
+                        draft.error = Some("the selected variable has no x/y axes".into());
+                    }
+                    return None;
+                };
+                self.view.bounds_generation =
+                    Generation(self.view.bounds_generation.0.saturating_add(1));
+                self.view.status = "resolving view bounds…".into();
+                Some(Effect::ResolveViewBounds {
+                    generation: self.view.bounds_generation,
+                    variable,
+                    x_axis,
+                    y_axis,
+                    bounds,
+                })
+            }
+            Command::CancelViewBounds => {
+                self.view.bounds_generation =
+                    Generation(self.view.bounds_generation.0.saturating_add(1));
+                self.view.view_bounds_draft = None;
+                if matches!(self.view.overlay, Some(Overlay::ViewBounds)) {
+                    self.view.overlay = None;
+                }
+                None
+            }
             _ => unreachable!("text-input reducer received unrelated command"),
         }
     }
@@ -1408,11 +1573,13 @@ impl AppState {
         match command {
             Command::Zoom(bounds) => {
                 self.view.zoom_bounds = Some(bounds);
+                self.view.zoom_approximation = None;
                 self.view.drag = None;
                 None
             }
             Command::ResetZoom => {
                 self.view.zoom_bounds = None;
+                self.view.zoom_approximation = None;
                 self.view.drag = None;
                 None
             }
@@ -1757,6 +1924,7 @@ impl AppState {
     }
 
     pub fn select_variable(&mut self, variable: String) -> Option<Effect> {
+        self.view.bounds_generation = Generation(self.view.bounds_generation.0.saturating_add(1));
         self.view.variable_search_active = false;
         self.variable_query.clear();
         self.view.variable_browser_index = 0;
@@ -1780,6 +1948,7 @@ impl AppState {
         self.view.selected_coordinates = PointCoordinates::default();
         self.view.hover_point = None;
         self.view.zoom_bounds = None;
+        self.view.zoom_approximation = None;
         self.view.full_bounds = None;
         self.view.limits = None;
         self.view.global_limits = None;
@@ -2004,6 +2173,10 @@ pub const COMMAND_PALETTE: &[PaletteEntry] = &[
         shortcut: "r",
     },
     PaletteEntry {
+        label: "Set view bounds",
+        shortcut: "",
+    },
+    PaletteEntry {
         label: "Toggle logical/projected grid",
         shortcut: "g",
     },
@@ -2119,23 +2292,24 @@ fn palette_command(index: usize) -> Command {
         8 => Command::OpenFilter,
         9 => Command::ClearFilter,
         10 => Command::ResetZoom,
-        11 => Command::ToggleGridMode,
-        12 => Command::ToggleLandBorders,
-        13 => Command::ToggleScale,
-        14 => Command::IncreasePlaybackSpeed,
-        15 => Command::DecreasePlaybackSpeed,
-        16 => Command::OpenAxisOverlay,
-        17 => Command::SelectVariable(0),
-        18 => Command::SelectVariable(1),
-        19 => Command::MoveTime(-1),
-        20 => Command::MoveTime(1),
-        21 => Command::MoveDepth(-1),
-        22 => Command::MoveDepth(1),
-        23 => Command::ToggleSidebarFocus,
-        24 => Command::OpenVariableSearch,
-        25 => Command::PreviousFile,
-        26 => Command::NextFile,
-        27 => Command::OpenFormulaEditor,
+        11 => Command::OpenViewBounds,
+        12 => Command::ToggleGridMode,
+        13 => Command::ToggleLandBorders,
+        14 => Command::ToggleScale,
+        15 => Command::IncreasePlaybackSpeed,
+        16 => Command::DecreasePlaybackSpeed,
+        17 => Command::OpenAxisOverlay,
+        18 => Command::SelectVariable(0),
+        19 => Command::SelectVariable(1),
+        20 => Command::MoveTime(-1),
+        21 => Command::MoveTime(1),
+        22 => Command::MoveDepth(-1),
+        23 => Command::MoveDepth(1),
+        24 => Command::ToggleSidebarFocus,
+        25 => Command::OpenVariableSearch,
+        26 => Command::PreviousFile,
+        27 => Command::NextFile,
+        28 => Command::OpenFormulaEditor,
         _ => Command::ToggleHelp,
     }
 }
@@ -2282,6 +2456,158 @@ mod raw_dimension_navigation_tests {
         state.set_slice(previous);
         state.reduce(Command::SelectVariableAt(0));
         assert_eq!(state.view.slice.as_ref().unwrap().values[(0, 0)], 42.0);
+    }
+}
+
+#[cfg(test)]
+mod view_bounds_draft_tests {
+    use super::*;
+    use crate::data::{bounds::NumericBounds, slice::Bounds};
+
+    #[test]
+    fn opening_bounds_draft_and_tab_focus_keeps_current_zoom() {
+        let mut state = AppState::default();
+        let current = Bounds::new(1, 4, 2, 7).unwrap();
+        state.view.zoom_bounds = Some(current);
+
+        state.reduce(Command::OpenViewBounds);
+        assert_eq!(state.view.overlay, Some(Overlay::ViewBounds));
+        let draft = state.view.view_bounds_draft.as_ref().unwrap();
+        assert_eq!(
+            draft.fields,
+            [String::new(), String::new(), String::new(), String::new()]
+        );
+        assert_eq!(draft.active, 0);
+
+        state.reduce(Command::InputChar('2'));
+        state.reduce(Command::NextLimitField);
+        assert_eq!(state.view.view_bounds_draft.as_ref().unwrap().active, 1);
+        assert_eq!(
+            state.view.view_bounds_draft.as_ref().unwrap().fields[0],
+            "2"
+        );
+        assert_eq!(state.view.zoom_bounds, Some(current));
+    }
+
+    #[test]
+    fn invalid_bounds_draft_preserves_the_current_zoom_and_reports_error() {
+        let mut state = AppState::default();
+        let current = Bounds::new(1, 4, 2, 7).unwrap();
+        state.view.zoom_bounds = Some(current);
+        state.reduce(Command::OpenViewBounds);
+        state.view.view_bounds_draft.as_mut().unwrap().fields =
+            ["20".into(), "10".into(), "0".into(), "1".into()];
+
+        let effect = state.reduce(Command::ApplyViewBounds);
+        assert!(effect.is_none());
+        assert_eq!(state.view.zoom_bounds, Some(current));
+        assert_eq!(state.view.overlay, Some(Overlay::ViewBounds));
+        assert!(
+            state
+                .view
+                .view_bounds_draft
+                .as_ref()
+                .unwrap()
+                .error
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn valid_bounds_draft_emits_resolution_and_commits_only_on_acceptance() {
+        let mut state = AppState {
+            variables: vec![Variable {
+                name: "temp".into(),
+                dimensions: vec!["lat".into(), "lon".into()],
+                numeric: true,
+                units: None,
+                long_name: None,
+                standard_name: None,
+            }],
+            ..AppState::default()
+        };
+        state.view.selected_variable = Some("temp".into());
+        state.view.x_axis = Some("lon".into());
+        state.view.y_axis = Some("lat".into());
+        let current = Bounds::new(1, 4, 2, 7).unwrap();
+        state.view.zoom_bounds = Some(current);
+        state.reduce(Command::OpenViewBounds);
+        state.view.view_bounds_draft.as_mut().unwrap().fields =
+            ["-90".into(), "+90".into(), "-30".into(), "30".into()];
+
+        let effect = state.reduce(Command::ApplyViewBounds).unwrap();
+        assert!(matches!(
+            effect,
+            Effect::ResolveViewBounds {
+                bounds: NumericBounds {
+                    min_x: -90.0,
+                    max_x: 90.0,
+                    min_y: -30.0,
+                    max_y: 30.0,
+                },
+                ..
+            }
+        ));
+        assert_eq!(state.view.zoom_bounds, Some(current));
+    }
+
+    #[test]
+    fn cancel_bounds_draft_closes_it_without_changing_zoom() {
+        let mut state = AppState {
+            variables: vec![Variable {
+                name: "field".into(),
+                dimensions: vec!["y".into(), "x".into()],
+                numeric: true,
+                units: None,
+                long_name: None,
+                standard_name: None,
+            }],
+            ..AppState::default()
+        };
+        state.view.selected_variable = Some("field".into());
+        state.view.x_axis = Some("x".into());
+        state.view.y_axis = Some("y".into());
+        let current = Bounds::new(1, 4, 2, 7).unwrap();
+        state.view.zoom_bounds = Some(current);
+        state.reduce(Command::OpenViewBounds);
+        state.view.view_bounds_draft.as_mut().unwrap().fields =
+            ["1".into(), "2".into(), "3".into(), "4".into()];
+        let Some(Effect::ResolveViewBounds { generation, .. }) =
+            state.reduce(Command::ApplyViewBounds)
+        else {
+            panic!("valid bounds draft should start resolution");
+        };
+        state.reduce(Command::CancelViewBounds);
+        assert!(state.view.overlay.is_none());
+        assert!(state.view.view_bounds_draft.is_none());
+        assert_eq!(state.view.zoom_bounds, Some(current));
+        assert!(!state.accept_view_bounds(generation, Ok(Bounds::new(0, 1, 0, 1).unwrap())));
+        assert_eq!(state.view.zoom_bounds, Some(current));
+    }
+
+    #[test]
+    fn resolution_error_preserves_zoom_and_success_commits_resolved_indices() {
+        let mut state = AppState::default();
+        let current = Bounds::new(1, 4, 2, 7).unwrap();
+        let resolved = Bounds::new(3, 8, 5, 9).unwrap();
+        state.view.zoom_bounds = Some(current);
+        state.reduce(Command::OpenViewBounds);
+        let generation = state.view.bounds_generation;
+
+        assert!(state.accept_view_bounds(generation, Err("no coordinate samples overlap".into())));
+        assert_eq!(state.view.zoom_bounds, Some(current));
+        assert!(
+            state
+                .view
+                .view_bounds_draft
+                .as_ref()
+                .unwrap()
+                .error
+                .is_some()
+        );
+        assert!(state.accept_view_bounds(generation, Ok(resolved)));
+        assert_eq!(state.view.zoom_bounds, Some(resolved));
+        assert!(state.view.overlay.is_none());
     }
 }
 

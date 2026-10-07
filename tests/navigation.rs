@@ -72,6 +72,32 @@ fn variable_selection_advances_generation_and_emits_read_effect() {
 }
 
 #[test]
+fn switching_variables_discards_a_zoom_and_supersedes_pending_bounds() {
+    let mut state = AppState {
+        variables: vec![Variable {
+            name: "next_field".into(),
+            dimensions: vec!["row".into(), "column".into()],
+            numeric: true,
+            units: None,
+            long_name: None,
+            standard_name: None,
+        }],
+        ..AppState::default()
+    };
+    state.view.zoom_bounds = Some(Bounds::new(2, 4, 3, 6).unwrap());
+    let old_bounds_generation = state.view.bounds_generation;
+
+    state.reduce(Command::SelectVariableAt(0));
+
+    assert!(state.view.zoom_bounds.is_none());
+    assert_eq!(state.view.bounds_generation.0, old_bounds_generation.0 + 1);
+    assert!(matches!(
+        state.pending.back(),
+        Some(Effect::ReadSlice { variable, .. }) if variable == "next_field"
+    ));
+}
+
+#[test]
 fn variable_selection_moves_between_plottable_fields() {
     let mut state = AppState {
         variables: vec![

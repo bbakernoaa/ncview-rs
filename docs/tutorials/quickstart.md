@@ -69,6 +69,19 @@ finite count — your first fidelity check that real source values are in play.
    opens a searchable command palette. Press `q` to quit — the terminal is
    always restored exactly as it was.
 
+To start with a numeric region, give all four x/y bounds on the command line:
+
+```bash
+ncv --min-x -130 --max-x -60 --min-y 20 --max-y 55 path/to/data.nc
+```
+
+Inside the viewer, use `Ctrl-P` and choose **Set view bounds** to enter the
+same four values. Both paths work with geographic coordinates and with
+zero-based x/y indices when the dataset has no coordinate values. Box zoom
+continues to work, and changing variables returns to that variable's global
+view. See the [CLI reference](../reference/cli.md) for longitude conventions
+and validation details.
+
 ## 4. Try a remote public bucket (optional)
 
 `ncv` reads explicit object locations directly, with credential-free access

@@ -34,7 +34,8 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 | `f` | mask data outside a range |
 | `s` | toggle linear/log color scale |
 | `z` | toggle current/global color scale |
-| `r` | reset zoom |
+| `r` | reset zoom to the full view |
+| `R` | reset variable settings and view |
 | `g` | logical / projected grid |
 | `b` | toggle filled land/ocean map backdrop |
 | `Enter` | open pinned-point plot menu |
@@ -42,7 +43,7 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 | `t` / `d` / `h` | plot chooser: time series / scatter / histogram |
 | `k` / `u` | plot chooser: CDF / vertical profile |
 | `m` | add/remove the hovered point from the plot selection |
-| `Ctrl-P` or `:` | command palette — search actions, `Enter` to run |
+| `Ctrl-P / :` | command palette — search actions, `Enter` to run |
 | `/` | browse and search all plottable variables |
 | `?` | open/close this help |
 
@@ -50,6 +51,18 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 
 Type numbers directly, `Tab` switches between min and max fields, `Enter`
 applies, `Esc` cancels.
+
+### Set view bounds dialog
+
+Open the command palette with `Ctrl-P / :`, search for **Set view bounds**,
+then enter minimum and maximum x and y values. `Tab` moves between the four
+fields, `Enter` applies the bounds, and `Esc` cancels. Geographic axes accept
+signed longitude or `0..360` longitude and latitude from `-90..90`. Other axes
+use their coordinate values when available, or inclusive zero-based indices.
+Unphysical or non-overlapping bounds are reported without replacing the
+current view. For curvilinear grids, the status line notes that the region is
+represented by a row/column envelope. Map dragging continues to provide box
+zoom.
 
 ## Mouse
 

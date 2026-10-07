@@ -191,6 +191,23 @@ different builds and long-run CPU conditions, only same-command paired feature w
 for this feature's comparison. The formal no-more-than-10% release comparison still requires the
 approved reference host.
 
+## Bounded zoom resolution smoke result (2026-10-06)
+
+The menu-bound mapping component was measured on macOS arm64 using deterministic regular geographic
+axes with 1,440 longitude samples and 721 latitude samples at 0.25-degree spacing. The benchmark
+maps an inclusive 50-degree x extent and 40-degree y extent to source index ranges. Rust/Cargo
+1.98.1; Criterion used 100 samples, a 0.1-second warmup, and a 0.5-second requested measurement.
+Raw sample averages yield p50 4.446 µs and p95 4.901 µs (linear interpolation over the sorted
+sample values); Criterion's slope estimate was [4.498 µs, 4.535 µs, 4.574 µs]. This isolates
+coordinate-to-index mapping and excludes source I/O, worker scheduling, and terminal rendering.
+
+Command:
+
+```bash
+cargo bench --bench interactive_paths -- menu_numeric_bounds_1440x721_regular_geographic \
+  --noplot --warm-up-time 0.1 --measurement-time 0.5 --sample-size 100
+```
+
 ## Feature quickstart checks (2026-10-02)
 
 | Quickstart command | Result |

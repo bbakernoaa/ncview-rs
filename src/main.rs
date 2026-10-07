@@ -25,11 +25,12 @@ use ratatui::{
 use ncview_rs::{
     analysis::mapping::screen_to_source_with_row_flip,
     app::{
-        AppState, AxisField, ColorScaleScope, Command, FixedDimension, Generation, LimitField,
-        Overlay, PlotSeries, TimelinePoint,
+        AppState, AxisField, ColorScaleScope, Command, Effect, FixedDimension, Generation,
+        LimitField, Overlay, PlotSeries, TimelinePoint,
     },
     data::{
         self, AxisRole, DatasetFormat, DatasetMetadata, Variable,
+        bounds::{NumericBounds, resolve_source_bounds_with_feedback},
         formula::FormulaDefinition,
         grib2_manifest::{self, ManifestFormat},
         slice::{Bounds, Slice2D, SliceRequest},
@@ -53,6 +54,18 @@ struct Cli {
     /// Do not restore previous session state for the dataset(s).
     #[arg(long)]
     no_restore: bool,
+    /// Minimum x coordinate or zero-based x index for the initial view.
+    #[arg(long, value_name = "X")]
+    min_x: Option<f64>,
+    /// Maximum x coordinate or zero-based x index for the initial view.
+    #[arg(long, value_name = "X")]
+    max_x: Option<f64>,
+    /// Minimum y coordinate or zero-based y index for the initial view.
+    #[arg(long, value_name = "Y")]
+    min_y: Option<f64>,
+    /// Maximum y coordinate or zero-based y index for the initial view.
+    #[arg(long, value_name = "Y")]
+    max_y: Option<f64>,
     /// Enable difference mode between two files or two sets of files.
     #[arg(long)]
     diff: bool,
@@ -81,6 +94,52 @@ struct Cli {
     /// One or more NetCDF-4 or GRIB2 datasets to inspect. Shell globs are supported.
     #[arg(value_name = "DATASET", num_args = 0..)]
     dataset: Vec<String>,
+}
+
+fn requested_cli_bounds(cli: &Cli) -> Result<Option<NumericBounds>, String> {
+    let provided = [cli.min_x, cli.max_x, cli.min_y, cli.max_y];
+    let count = provided.iter().filter(|value| value.is_some()).count();
+    if count == 0 {
+        return Ok(None);
+    }
+    if count != provided.len() {
+        return Err("--min-x, --max-x, --min-y, and --max-y must be supplied together".into());
+    }
+    let bounds = NumericBounds {
+        min_x: cli.min_x.ok_or("missing --min-x")?,
+        max_x: cli.max_x.ok_or("missing --max-x")?,
+        min_y: cli.min_y.ok_or("missing --min-y")?,
+        max_y: cli.max_y.ok_or("missing --max-y")?,
+    };
+    bounds
+        .validate()
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn apply_requested_view_bounds(
+    state: &mut AppState,
+    source: &dyn data::DataSource,
+    requested: NumericBounds,
+) -> Result<(), String> {
+    let variable = state
+        .view
+        .selected_variable
+        .as_deref()
+        .ok_or("cannot apply CLI bounds: no variable is selected")?;
+    let (x_axis, y_axis) = state
+        .view
+        .x_axis
+        .as_deref()
+        .zip(state.view.y_axis.as_deref())
+        .ok_or("cannot apply CLI bounds: selected variable has no x/y axes")?;
+    let (bounds, approximate) =
+        resolve_source_bounds_with_feedback(source, variable, x_axis, y_axis, requested)
+            .map_err(|error| error.to_string())?;
+    state.view.zoom_bounds = Some(bounds);
+    state.view.zoom_approximation =
+        approximate.then(|| "curvilinear grid uses a row/column envelope".into());
+    Ok(())
 }
 
 fn wild_match(pattern: &str, s: &str) -> bool {
@@ -295,6 +354,10 @@ fn main() -> ExitCode {
             }
         };
     }
+    if let Err(error) = requested_cli_bounds(&cli) {
+        eprintln!("ncv: {error}");
+        return ExitCode::from(2);
+    }
     let is_diff = cli.diff || cli.first.is_some() || cli.second.is_some();
     if let Err(error) = parse_formulas(&cli.formula) {
         eprintln!("ncv: {error}");
@@ -343,6 +406,7 @@ fn main() -> ExitCode {
 fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_diff = cli.diff || cli.first.is_some() || cli.second.is_some();
     let no_restore = cli.no_restore;
+    let cli_bounds = requested_cli_bounds(cli)?;
 
     let (datasets, diff_mapping) = if is_diff {
         let (set1_files, set2_files) = resolve_diff_inputs(cli)?;
@@ -645,11 +709,15 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let (slice_tx, slice_rx) = std::sync::mpsc::channel::<RemoteSliceMessage>();
+    let (bounds_tx, bounds_rx) = std::sync::mpsc::channel::<BoundsResolutionMessage>();
     let mut slice_cancelled = Arc::new(AtomicBool::new(false));
     let (plot_tx, plot_rx) = std::sync::mpsc::channel::<RemotePlotMessage>();
     let mut plot_cancelled = Arc::new(AtomicBool::new(false));
     select_initial_variable(&mut state, sources[active_file].metadata());
     configure_timeline(&mut state, &sources, &manifest, active_file);
+    if let Some(requested) = cli_bounds {
+        apply_requested_view_bounds(&mut state, sources[active_file].as_ref(), requested)?;
+    }
     terminal.draw(|frame| {
         status::render_loading(
             frame,
@@ -757,6 +825,32 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(message) = slice_rx.try_recv() {
             apply_remote_slice(&mut state, &sources, message);
             dirty = true;
+        }
+        while let Ok(message) = bounds_rx.try_recv() {
+            let approximate = message
+                .result
+                .as_ref()
+                .is_ok_and(|(_, approximate)| *approximate);
+            if state
+                .accept_view_bounds(message.generation, message.result.map(|(bounds, _)| bounds))
+            {
+                if state.view.zoom_bounds.is_some()
+                    && state.view.overlay != Some(Overlay::ViewBounds)
+                {
+                    if approximate {
+                        state.view.zoom_approximation =
+                            Some("curvilinear grid uses a row/column envelope".into());
+                    }
+                    load_selected(
+                        &mut state,
+                        &sources,
+                        active_file,
+                        &slice_tx,
+                        &mut slice_cancelled,
+                    );
+                }
+                dirty = true;
+            }
         }
         while let Ok(message) = plot_rx.try_recv() {
             apply_remote_plot(&mut state, message);
@@ -876,6 +970,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &manifest,
                     finished,
                     &slice_tx,
+                    &bounds_tx,
                     &mut slice_cancelled,
                     &plot_tx,
                     &mut plot_cancelled,
@@ -945,6 +1040,7 @@ fn handle_command(
     manifest: &VirtualDatasetManifest,
     finished: usize,
     slice_tx: &std::sync::mpsc::Sender<RemoteSliceMessage>,
+    bounds_tx: &std::sync::mpsc::Sender<BoundsResolutionMessage>,
     slice_cancelled: &mut Arc<AtomicBool>,
     plot_tx: &std::sync::mpsc::Sender<RemotePlotMessage>,
     plot_cancelled: &mut Arc<AtomicBool>,
@@ -1074,7 +1170,32 @@ fn handle_command(
         _ => None,
     };
     let previous_variable = state.view.selected_variable.clone();
-    let _ = state.reduce(command);
+    let effect = state.reduce(command);
+    if let Some(Effect::ResolveViewBounds {
+        generation,
+        variable,
+        x_axis,
+        y_axis,
+        bounds,
+    }) = effect
+        && let Some(source) = sources.get(*active_file).cloned()
+    {
+        let tx = bounds_tx.clone();
+        std::thread::spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                resolve_source_bounds_with_feedback(
+                    source.as_ref(),
+                    &variable,
+                    &x_axis,
+                    &y_axis,
+                    bounds,
+                )
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap_or_else(|_| Err("view bounds worker failed unexpectedly".into()));
+            let _ = tx.send(BoundsResolutionMessage { generation, result });
+        });
+    }
     if state.view.selected_variable != previous_variable
         && let Some(variable_name) = state.view.selected_variable.as_deref()
         && let Some(variable) = source
@@ -1633,6 +1754,11 @@ struct RemoteSliceMessage {
     variable: String,
     full_view: bool,
     result: Result<(Slice2D, Option<(f64, f64)>), String>,
+}
+
+struct BoundsResolutionMessage {
+    generation: Generation,
+    result: Result<(Bounds, bool), String>,
 }
 
 struct RemotePlotMessage {
@@ -2207,6 +2333,7 @@ fn translate_overlay_mouse(
         Overlay::PalettePicker => Command::Pointer { x, y },
         Overlay::Limits | Overlay::Filter => translate_limit_overlay_click(x, y, clicked, popup),
         Overlay::Axis => translate_axis_overlay_click(x, y, clicked, popup),
+        Overlay::ViewBounds => Command::Pointer { x, y },
         Overlay::Plot => translate_plot_overlay_click(x, y, clicked, popup),
         Overlay::TimeSeries | Overlay::Formula => Command::Pointer { x, y },
     }
@@ -2860,8 +2987,15 @@ fn apply_remote_slice(
                 .level_label
                 .as_deref()
                 .map_or_else(String::new, |label| format!("  level={label}"));
-            state.view.status =
-                format!("{}  time={time_text}{level_text}  ready", message.variable);
+            state.view.status = format!(
+                "{}  time={time_text}{level_text}  ready{}",
+                message.variable,
+                state
+                    .view
+                    .zoom_approximation
+                    .as_deref()
+                    .map_or_else(String::new, |text| format!("  ({text})")),
+            );
         }
         Err(error) => {
             // Keep the last valid slice visible while the remote request fails.
@@ -3946,6 +4080,114 @@ mod overlay_dismissal_tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("Choose a colormap"));
+    }
+}
+
+#[cfg(test)]
+mod cli_bounds_startup_tests {
+    use super::*;
+
+    struct CoordinateSource {
+        metadata: DatasetMetadata,
+    }
+
+    impl data::DataSource for CoordinateSource {
+        fn metadata(&self) -> &DatasetMetadata {
+            &self.metadata
+        }
+
+        fn read_slice(&self, _request: &SliceRequest) -> ncview_rs::error::Result<Slice2D> {
+            Err(ncview_rs::error::NcvError::WorkerStopped)
+        }
+
+        fn dimension_values(&self, _variable: &str, dimension: &str) -> Option<Vec<f64>> {
+            match dimension {
+                "longitude_dim" => Some(vec![0.0, 90.0, 180.0, 270.0]),
+                "latitude_dim" => Some(vec![-30.0, 0.0, 30.0]),
+                _ => None,
+            }
+        }
+    }
+
+    fn coordinate_source() -> CoordinateSource {
+        CoordinateSource {
+            metadata: DatasetMetadata {
+                path: "test-coordinate-source".into(),
+                format: DatasetFormat::NetCdf4,
+                dimensions: vec![
+                    data::Dimension {
+                        name: "latitude_dim".into(),
+                        length: 3,
+                        role: AxisRole::Latitude,
+                    },
+                    data::Dimension {
+                        name: "longitude_dim".into(),
+                        length: 4,
+                        role: AxisRole::Longitude,
+                    },
+                ],
+                variables: vec![Variable {
+                    name: "field".into(),
+                    dimensions: vec!["latitude_dim".into(), "longitude_dim".into()],
+                    numeric: true,
+                    units: None,
+                    long_name: None,
+                    standard_name: None,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn explicit_cli_bounds_override_restored_zoom_after_axis_selection() {
+        let source = coordinate_source();
+        let mut state = AppState::default();
+        state.view.selected_variable = Some("field".into());
+        state.view.x_axis = Some("longitude_dim".into());
+        state.view.y_axis = Some("latitude_dim".into());
+        state.view.zoom_bounds = Some(Bounds::new(1, 2, 1, 2).unwrap());
+
+        apply_requested_view_bounds(
+            &mut state,
+            &source,
+            NumericBounds {
+                min_x: 90.0,
+                max_x: 180.0,
+                min_y: -30.0,
+                max_y: 0.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.view.zoom_bounds,
+            Some(Bounds::new(0, 2, 1, 3).unwrap())
+        );
+    }
+
+    #[test]
+    fn invalid_source_bounds_do_not_replace_a_restored_zoom() {
+        let source = coordinate_source();
+        let mut state = AppState::default();
+        state.view.selected_variable = Some("field".into());
+        state.view.x_axis = Some("longitude_dim".into());
+        state.view.y_axis = Some("latitude_dim".into());
+        let restored = Bounds::new(1, 2, 1, 2).unwrap();
+        state.view.zoom_bounds = Some(restored);
+
+        let result = apply_requested_view_bounds(
+            &mut state,
+            &source,
+            NumericBounds {
+                min_x: 90.0,
+                max_x: 180.0,
+                min_y: 100.0,
+                max_y: 110.0,
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(state.view.zoom_bounds, Some(restored));
     }
 }
 

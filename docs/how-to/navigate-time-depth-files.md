@@ -1,7 +1,7 @@
 ---
 type: howto
 category: how_to
-tags: [timeline, playback, depth, level-bar, files, session]
+tags: [timeline, playback, depth, level-bar, files, session, zoom]
 ---
 
 # Navigate time, depth, and files
@@ -35,6 +35,26 @@ dimension name when the file has none):
   applies it, `Tab`/`Esc` leave focus.
 
 Two-dimensional variables hide the level bar entirely — no dead controls.
+
+## Zoom to a region
+
+Drag across the map to zoom to a rectangle. To enter numeric bounds, open the
+command palette with `Ctrl-P` or `:`, search for **Set view bounds**, and enter
+minimum and maximum x/y values. `Tab` moves between fields; `Enter` applies;
+`Esc` cancels. The existing box zoom and pan controls remain available.
+
+For geographic axes, longitude accepts signed degrees or `0..360`, and
+latitude must be within `-90..90`. The viewer maps coordinate endpoints to the
+smallest source-index range containing the samples. Other axes use their
+one-dimensional coordinate values when available, or inclusive zero-based
+indices when they are dimension-only. Invalid or non-overlapping bounds leave
+the accepted view unchanged. Curvilinear grids use a row/column envelope and
+disclose that approximation in the status line.
+
+Selecting a different variable returns to that variable's global view, since
+its coordinate system and domain may differ. The zoom for a dataset is still
+remembered between launches; explicit CLI bounds override the restored zoom.
+See the [CLI reference](../reference/cli.md) for startup examples.
 
 ## Session restore
 

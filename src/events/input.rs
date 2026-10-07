@@ -118,11 +118,13 @@ fn variable_search_command(key: KeyEvent) -> Option<Command> {
 
 fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
     command_palette_shortcut(key).or(match key.code {
+        KeyCode::Esc if overlay == Overlay::ViewBounds => Some(Command::CancelViewBounds),
         KeyCode::Esc if overlay == Overlay::PalettePicker => Some(Command::CancelPalettePicker),
         KeyCode::Esc => Some(Command::Quit),
         KeyCode::Enter => Some(match overlay {
             Overlay::CommandPalette => Command::ExecuteCommandPalette,
             Overlay::PalettePicker => Command::CommitPalettePicker,
+            Overlay::ViewBounds => Command::ApplyViewBounds,
             Overlay::Limits | Overlay::Filter => Command::ApplyLimitDraft,
             Overlay::Formula => Command::SubmitFormula,
             _ => Command::ActivatePoint,
@@ -381,6 +383,18 @@ mod tests {
             command_from_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
             Some(Command::TogglePaletteReverse)
         );
+    }
+
+    #[test]
+    fn numeric_view_bounds_overlay_uses_tab_enter_and_escape() {
+        let mode = InputMode::TextOverlay(Overlay::ViewBounds);
+        let map = |code| command_from_key_with_mode(KeyEvent::new(code, KeyModifiers::NONE), mode);
+        assert_eq!(map(KeyCode::Tab), Some(Command::NextLimitField));
+        assert_eq!(map(KeyCode::Enter), Some(Command::ApplyViewBounds));
+        assert_eq!(map(KeyCode::Esc), Some(Command::CancelViewBounds));
+        assert_eq!(map(KeyCode::Char('+')), Some(Command::InputChar('+')));
+        assert_eq!(map(KeyCode::Char(' ')), Some(Command::InputChar(' ')));
+        assert_eq!(map(KeyCode::Backspace), Some(Command::DeleteInput));
     }
 
     #[test]

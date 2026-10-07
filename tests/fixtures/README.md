@@ -20,6 +20,12 @@ regression test reads both variables and checks their 4×5 slices. Regenerate it
 ncgen -4 -o tests/fixtures/coards-float32.nc4 tests/fixtures/coards-float32.cdl
 ```
 
+Bounded-zoom coverage generates additional small fixtures in `tests/data_fidelity.rs`: signed
+longitude coordinates (-180 through 180), 0–360 longitude coordinates, dimension-only axes with no
+coordinate variables (which use zero-based cell indices), and the committed curvilinear grid. The
+generated arrays use ascending latitude/longitude axes; unit tests also cover descending coordinate
+vectors and invalid ranges directly.
+
 ## Raw-Dimension Display Fixture
 
 Feature 007 builds deterministic synthetic NetCDF-4 fixtures in temporary directories rather than
