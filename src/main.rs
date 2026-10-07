@@ -31,6 +31,7 @@ use ncview_rs::{
     data::{
         self, AxisRole, DatasetFormat, DatasetMetadata, Variable,
         bounds::{NumericBounds, resolve_source_bounds_with_feedback},
+        formula::FormulaDefinition,
         grib2_manifest::{self, ManifestFormat},
         slice::{Bounds, Slice2D, SliceRequest},
         virtual_dataset::VirtualDatasetManifest,
@@ -74,6 +75,22 @@ struct Cli {
     /// Second file or glob pattern for diff mode.
     #[arg(long)]
     second: Option<String>,
+    /// Derived variable to add, e.g. "O3[1] - O3[2]" or "avg = mean(T)". Repeatable.
+    /// `NAME[n]` refers to the n-th DATASET; `-formula` is accepted as a VERDI-style alias.
+    #[arg(long = "formula", value_name = "EXPR")]
+    formula: Vec<String>,
+    /// Evaluate every --formula and export PNG/SVG/JSON images without opening the terminal UI.
+    #[arg(long)]
+    batch: bool,
+    /// Output directory for --batch exports (defaults to NCVIEW_EXPORT_DIR or the current directory).
+    #[arg(long, value_name = "DIR")]
+    export_dir: Option<PathBuf>,
+    /// Zero-based time step exported by --batch.
+    #[arg(long, value_name = "INDEX", default_value_t = 0)]
+    time: usize,
+    /// Zero-based vertical level exported by --batch.
+    #[arg(long, value_name = "INDEX", default_value_t = 0)]
+    level: usize,
     /// One or more NetCDF-4 or GRIB2 datasets to inspect. Shell globs are supported.
     #[arg(value_name = "DATASET", num_args = 0..)]
     dataset: Vec<String>,
@@ -300,7 +317,14 @@ fn setup_panic_hook() {
 fn main() -> ExitCode {
     setup_panic_hook();
     ncview_rs::render::configure_thread_pool();
-    let cli = Cli::parse();
+    // VERDI batch scripts spell the flag with a single dash.
+    let cli = Cli::parse_from(env::args_os().map(|argument| {
+        if argument == "-formula" {
+            "--formula".into()
+        } else {
+            argument
+        }
+    }));
     if let Some(CliCommand::Manifest {
         format,
         input,
@@ -335,6 +359,24 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let is_diff = cli.diff || cli.first.is_some() || cli.second.is_some();
+    if let Err(error) = parse_formulas(&cli.formula) {
+        eprintln!("ncv: {error}");
+        return ExitCode::from(2);
+    }
+    if cli.batch {
+        return match run_batch(&cli) {
+            Ok(paths) => {
+                for path in paths {
+                    println!("{}", path.display());
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("ncv: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
     if !is_diff && cli.dataset.is_empty() {
         let mut command = Cli::command();
         let _ = command.print_help();
@@ -568,7 +610,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         loaded = datasets.len();
         finished = datasets.len();
     }
-    let (datasets, mut sources) = if let Some((set1_files, set2_files)) = diff_mapping {
+    let (datasets, mut raw_sources) = if let Some((set1_files, set2_files)) = diff_mapping {
         let count = if set1_files.len() == set2_files.len() || set2_files.len() == 1 {
             set1_files.len()
         } else if set1_files.len() == 1 {
@@ -625,6 +667,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<Arc<dyn data::DataSource>>>();
         (datasets, sources)
     };
+    let formula_texts = cli.formula.clone();
+    let (mut sources, formula_errors) = formula_sources(&raw_sources, &formula_texts);
     let source_refs = sources
         .iter()
         .map(|source| source.as_ref())
@@ -697,6 +741,25 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             state.variables.len()
         );
     }
+    state.view.formula_datasets = datasets.clone();
+    state.view.formula_request = parse_formulas(&formula_texts).ok().and_then(|definitions| {
+        definitions
+            .first()
+            .map(|definition| definition.name.clone())
+    });
+    state.view.formulas = formula_texts;
+    apply_formula_changes(
+        &mut state,
+        &raw_sources,
+        &mut sources,
+        &mut manifest,
+        &mut active_file,
+        &slice_tx,
+        &mut slice_cancelled,
+    );
+    if !formula_errors.is_empty() {
+        state.view.status = formula_errors.join("; ");
+    }
     let mut dirty = true;
     let mut last_render = Instant::now();
     let frame_budget = Duration::from_millis(33); // ~30 FPS throttle max
@@ -711,7 +774,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 SourceLoadMessage::Started(_, _) | SourceLoadMessage::Progress(_, _, _) => {}
                 SourceLoadMessage::Finished(index, result) => match result {
                     Ok(source) => {
-                        sources[index] = Arc::from(source);
+                        raw_sources[index] = Arc::from(source);
+                        sources = formula_sources(&raw_sources, &state.view.formulas).0;
                         loaded += 1;
                         finished += 1;
                         state.view.collection_progress = Some((finished, datasets.len()));
@@ -920,6 +984,17 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if should_continue {
                     continue;
                 }
+                if state.view.formulas_changed || state.view.formula_request.is_some() {
+                    apply_formula_changes(
+                        &mut state,
+                        &raw_sources,
+                        &mut sources,
+                        &mut manifest,
+                        &mut active_file,
+                        &slice_tx,
+                        &mut slice_cancelled,
+                    );
+                }
             }
         }
     }
@@ -984,11 +1059,17 @@ fn handle_command(
         let show_land_borders = state.view.show_land_borders;
         let playback_speed = state.view.playback_speed;
         let plot_generation = state.view.plot_generation;
+        let formulas = std::mem::take(&mut state.view.formulas);
+        let formula_datasets = std::mem::take(&mut state.view.formula_datasets);
+        let formula_draft = std::mem::take(&mut state.view.formula_draft);
 
         *active_file = bounded_file_index(*active_file, delta, sources.len());
         let source = sources[*active_file].as_ref();
         let previous_point = state.view.timeline.get(state.view.time_index).cloned();
         *state = state_for_source(source);
+        state.view.formulas = formulas;
+        state.view.formula_datasets = formula_datasets;
+        state.view.formula_draft = formula_draft;
         state.view.collection_diagnostics = manifest.diagnostics().to_vec();
         state.view.collection_progress = Some((finished, datasets.len()));
         state.view.palette = palette;
@@ -1022,6 +1103,7 @@ fn handle_command(
     let dataset = &datasets[*active_file];
     let activate_point = matches!(command, Command::ActivatePoint);
     let cycle_image_filter = matches!(command, Command::CycleImageFilter);
+    let reset_variable_view = matches!(command, Command::ResetVariableView);
     let export_current = matches!(command, Command::ExportCurrent);
     let refresh_time_series = activate_point
         || matches!(command, Command::OpenPlot)
@@ -1055,6 +1137,7 @@ fn handle_command(
             | Command::TickPlayback
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
+            | Command::ResetVariableView
             | Command::Zoom(_)
             | Command::ResetZoom
             | Command::Pan { .. }
@@ -1072,6 +1155,7 @@ fn handle_command(
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
             | Command::SetAxes { .. }
+            | Command::ResetVariableView
     ) || axis_submit;
     let point_target = match &command {
         Command::HoverPoint { row, col, .. } | Command::SelectPoint { row, col } => {
@@ -1133,6 +1217,9 @@ fn handle_command(
                     .into();
         }
     }
+    if reset_variable_view {
+        graphics.reset_filter();
+    }
     if export_current {
         match export_current_slice(state, dataset, source.metadata()) {
             Ok(path) => state.view.status = format!("exported {}", path.display()),
@@ -1178,6 +1265,184 @@ enum SourceLoadMessage {
     Started(usize, OperationPhase),
     Progress(usize, OperationPhase, String),
     Finished(usize, Result<Box<dyn data::DataSource>, String>),
+}
+
+fn parse_formulas(texts: &[String]) -> Result<Vec<FormulaDefinition>, String> {
+    texts
+        .iter()
+        .map(|text| FormulaDefinition::parse(text).map_err(|error| format!("{text:?}: {error}")))
+        .collect()
+}
+
+/// Wrap opened datasets with the formulas that parse, reporting every failure.
+fn formula_sources(
+    raw_sources: &[Arc<dyn data::DataSource>],
+    texts: &[String],
+) -> (Vec<Arc<dyn data::DataSource>>, Vec<String>) {
+    let mut errors = Vec::new();
+    let definitions = texts
+        .iter()
+        .filter_map(|text| match FormulaDefinition::parse(text) {
+            Ok(definition) => Some(definition),
+            Err(error) => {
+                errors.push(format!("{text:?}: {error}"));
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let (sources, apply_errors) = data::formula::apply_formulas(raw_sources, &definitions);
+    errors.extend(apply_errors);
+    (sources, errors)
+}
+
+/// Rebuild formula-backed sources after the editor changed them and select
+/// the requested derived variable.
+fn apply_formula_changes(
+    state: &mut AppState,
+    raw_sources: &[Arc<dyn data::DataSource>],
+    sources: &mut Vec<Arc<dyn data::DataSource>>,
+    manifest: &mut VirtualDatasetManifest,
+    active_file: &mut usize,
+    slice_tx: &std::sync::mpsc::Sender<RemoteSliceMessage>,
+    slice_cancelled: &mut Arc<AtomicBool>,
+) {
+    let mut errors = Vec::new();
+    if std::mem::take(&mut state.view.formulas_changed) {
+        let (rebuilt, rebuild_errors) = formula_sources(raw_sources, &state.view.formulas);
+        *sources = rebuilt;
+        errors = rebuild_errors;
+        *manifest = VirtualDatasetManifest::from_sources(
+            &sources
+                .iter()
+                .map(|source| source.as_ref())
+                .collect::<Vec<_>>(),
+        );
+        state.view.collection_diagnostics = manifest.diagnostics().to_vec();
+        state.variables = collection_variables(sources);
+        let selected_exists = state
+            .view
+            .selected_variable
+            .as_deref()
+            .is_some_and(|name| state.variables.iter().any(|variable| variable.name == name));
+        if !selected_exists && state.view.formula_request.is_none() {
+            select_initial_variable(state, sources[*active_file].metadata());
+            configure_timeline(state, sources, manifest, *active_file);
+            load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
+        }
+    }
+    if let Some(name) = state.view.formula_request.take() {
+        let has_variable = |source: &Arc<dyn data::DataSource>| {
+            source
+                .metadata()
+                .variables
+                .iter()
+                .any(|variable| variable.name == name)
+        };
+        if let Some(owner) = sources.iter().position(has_variable) {
+            if !has_variable(&sources[*active_file]) {
+                *active_file = owner;
+            }
+            if !state.variables.iter().any(|variable| variable.name == name) {
+                state.variables = collection_variables(sources);
+            }
+            state.select_variable(name.clone());
+            configure_timeline(state, sources, manifest, *active_file);
+            load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
+            state.view.status = format!("formula {name}: evaluating…");
+        } else if errors.is_empty() {
+            errors.push(format!("{name}: formula could not be evaluated"));
+        }
+    }
+    if !errors.is_empty() {
+        state.view.status = errors.join("; ");
+    }
+}
+
+/// Evaluate each --formula headlessly and export it like the `e` key does.
+fn run_batch(cli: &Cli) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    if cli.formula.is_empty() {
+        return Err("--batch requires at least one --formula expression".into());
+    }
+    if cli.dataset.is_empty() {
+        return Err("--batch requires at least one dataset".into());
+    }
+    let definitions = parse_formulas(&cli.formula)?;
+    let datasets = cli
+        .dataset
+        .iter()
+        .flat_map(|dataset| expand_glob_pattern(dataset))
+        .collect::<Vec<_>>();
+    let raw_sources = datasets
+        .iter()
+        .map(|dataset| {
+            data::open_location(dataset)
+                .map(Arc::from)
+                .map_err(|error| format!("{dataset}: {error}"))
+        })
+        .collect::<Result<Vec<Arc<dyn data::DataSource>>, String>>()?;
+    let (sources, errors) = data::formula::apply_formulas(&raw_sources, &definitions);
+    if !errors.is_empty() {
+        return Err(errors.join("; ").into());
+    }
+    let directory = cli
+        .export_dir
+        .clone()
+        .or_else(|| env::var_os("NCVIEW_EXPORT_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut written = Vec::new();
+    for definition in &definitions {
+        let (index, source) = sources
+            .iter()
+            .enumerate()
+            .find(|(_, source)| {
+                source
+                    .metadata()
+                    .variables
+                    .iter()
+                    .any(|variable| variable.name == definition.name)
+            })
+            .ok_or_else(|| format!("{}: formula could not be evaluated", definition.name))?;
+        let metadata = source.metadata();
+        let variable = metadata
+            .variables
+            .iter()
+            .find(|variable| variable.name == definition.name)
+            .ok_or("formula variable disappeared")?;
+        let (bounds, time_length, depth_length) = spatial_bounds(metadata, variable)
+            .ok_or_else(|| format!("{}: needs two spatial dimensions", definition.name))?;
+        if cli.time >= time_length {
+            return Err(format!(
+                "{}: --time {} is out of range ({time_length} step(s))",
+                definition.name, cli.time
+            )
+            .into());
+        }
+        if cli.level >= depth_length {
+            return Err(format!(
+                "{}: --level {} is out of range ({depth_length} level(s))",
+                definition.name, cli.level
+            )
+            .into());
+        }
+        let slice = source
+            .read_slice(&SliceRequest {
+                variable: definition.name.clone(),
+                time: cli.time,
+                depth: cli.level,
+                bounds,
+            })
+            .map_err(|error| format!("{}: {error}", definition.name))?;
+        let mut state = state_for_source(source.as_ref());
+        state.view.selected_variable = Some(definition.name.clone());
+        state.view.time_index = cli.time;
+        state.view.depth_index = cli.level;
+        state.view.time_label = source.time_label_for_variable(&definition.name, cli.time);
+        state.set_slice(slice);
+        let path = export_slice_to(&state, &datasets[index], metadata, &directory)
+            .map_err(|error| format!("{}: {error}", definition.name))?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 struct PlaceholderSource {
@@ -1542,6 +1807,18 @@ fn export_current_slice(
     dataset: &str,
     metadata: &DatasetMetadata,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let directory = env::var_os("NCVIEW_EXPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    export_slice_to(state, dataset, metadata, &directory)
+}
+
+fn export_slice_to(
+    state: &AppState,
+    dataset: &str,
+    metadata: &DatasetMetadata,
+    directory: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let slice = state
         .view
         .slice
@@ -1560,7 +1837,16 @@ fn export_current_slice(
         .view
         .limits
         .or_else(|| slice.statistics.map(|stats| (stats.min, stats.max)))
-        .filter(|(min, max)| min.is_finite() && max.is_finite() && max > min)
+        .filter(|(min, max)| min.is_finite() && max.is_finite() && max >= min)
+        .map(|(min, max)| {
+            // A constant field (e.g. a zero difference) still needs a drawable range.
+            if max > min {
+                (min, max)
+            } else {
+                let pad = min.abs().max(1.0) * 0.5;
+                (min - pad, max + pad)
+            }
+        })
         .ok_or("current slice has no finite color range")?;
     let raster = ncview_rs::render::raster::rgb_raster_with_options(
         slice,
@@ -1572,10 +1858,7 @@ fn export_current_slice(
         None,
         state.view.selected_point,
     );
-    let directory = env::var_os("NCVIEW_EXPORT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    fs::create_dir_all(&directory)?;
+    fs::create_dir_all(directory)?;
     let dataset_stem = Path::new(dataset)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -2052,7 +2335,7 @@ fn translate_overlay_mouse(
         Overlay::Axis => translate_axis_overlay_click(x, y, clicked, popup),
         Overlay::ViewBounds => Command::Pointer { x, y },
         Overlay::Plot => translate_plot_overlay_click(x, y, clicked, popup),
-        Overlay::TimeSeries => Command::Pointer { x, y },
+        Overlay::TimeSeries | Overlay::Formula => Command::Pointer { x, y },
     }
 }
 
@@ -2168,7 +2451,10 @@ fn overlay_rect(area: Rect, overlay: Overlay) -> Rect {
     if overlay == Overlay::PalettePicker {
         return ncview_rs::ui::popup::picker_popup_rect(area);
     }
-    let large = matches!(overlay, Overlay::CommandPalette | Overlay::Plot);
+    let large = matches!(
+        overlay,
+        Overlay::CommandPalette | Overlay::Plot | Overlay::Formula
+    );
     let width = if large {
         area.width.saturating_mul(3) / 4
     } else {

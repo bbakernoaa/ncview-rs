@@ -152,6 +152,21 @@ impl GraphicsRenderer {
         true
     }
 
+    /// Restore the configured initial interpolation mode and invalidate any
+    /// cached raster/protocol image that used the previous mode.
+    pub fn reset_filter(&mut self) {
+        self.resize_filter = if self.scientific_mode {
+            FilterType::Nearest
+        } else {
+            image_filter()
+        };
+        self.image = None;
+        self.image_key = None;
+        self.raster = None;
+        self.pending = None;
+        self.image_bytes = 0;
+    }
+
     /// Human-readable renderer mode for the dashboard header. This makes it
     /// obvious when a terminal is using a graphics protocol versus the cell fallback.
     pub fn mode_label(&self) -> &'static str {

@@ -5,6 +5,30 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.18](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.17...v0.5.18) - 2026-10-05
+
+### Added
+
+- Adding formula editor support. ([#43](https://github.com/bbakernoaa/ncview-rs/pull/43))
+
+## [0.5.17](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.16...v0.5.17) - 2026-10-05
+
+### Other
+
+- Add Crameri Scientific Colour Maps v8.0 and colormap categories ([#58](https://github.com/bbakernoaa/ncview-rs/pull/58))
+
+## [0.5.16](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.15...v0.5.16) - 2026-10-05
+
+### Added
+
+- enhance Zarr and Icechunk manifest support ([#54](https://github.com/bbakernoaa/ncview-rs/pull/54))
+
+## [0.5.15](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.14...v0.5.15) - 2026-10-02
+
+### Added
+
+- add ResetVariableView command to restore default view settings ([#52](https://github.com/bbakernoaa/ncview-rs/pull/52))
+
 ## [0.5.14](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.13...v0.5.14) - 2026-10-02
 
 ### Fixed

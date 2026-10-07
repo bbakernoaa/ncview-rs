@@ -78,6 +78,7 @@ pub enum Command {
     FocusAxisField(AxisField),
     Zoom(Bounds),
     ResetZoom,
+    ResetVariableView,
     Pan {
         rows: isize,
         cols: isize,
@@ -140,6 +141,10 @@ pub enum Command {
     TickPlayback,
     PreviousFile,
     NextFile,
+    OpenFormulaEditor,
+    SubmitFormula,
+    FormulaMove(isize),
+    RemoveFormula,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +229,16 @@ pub struct ViewModel {
     pub scale_mode: ScaleMode,
     pub color_scale_scope: ColorScaleScope,
     pub is_diff: bool,
+    /// Expression being typed in the formula editor.
+    pub formula_draft: String,
+    /// Formulas defined this session, as entered (`name = expr` or `expr`).
+    pub formulas: Vec<String>,
+    pub formula_index: Option<usize>,
+    /// Labels of opened datasets, addressed in formulas as `NAME[n]`.
+    pub formula_datasets: Vec<String>,
+    /// Variable to select once the formula sources are rebuilt.
+    pub formula_request: Option<String>,
+    pub formulas_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +280,7 @@ pub enum Overlay {
     TimeSeries,
     Plot,
     CommandPalette,
+    Formula,
     PalettePicker,
     ViewBounds,
 }
@@ -289,6 +305,7 @@ impl ViewModel {
                 | Overlay::Filter
                 | Overlay::Axis
                 | Overlay::CommandPalette
+                | Overlay::Formula
                 | Overlay::PalettePicker => InputMode::TextOverlay(overlay),
                 Overlay::ViewBounds => InputMode::TextOverlay(overlay),
                 Overlay::Plot | Overlay::TimeSeries => InputMode::PlotOverlay,
@@ -487,6 +504,12 @@ impl Default for ViewModel {
             scale_mode: ScaleMode::Linear,
             color_scale_scope: ColorScaleScope::CurrentView,
             is_diff: false,
+            formula_draft: String::new(),
+            formulas: Vec::new(),
+            formula_index: None,
+            formula_datasets: Vec::new(),
+            formula_request: None,
+            formulas_changed: false,
         }
     }
 }
@@ -601,6 +624,7 @@ impl AppState {
             | Command::CycleImageFilter
             | Command::ExportCurrent
             | Command::AutomaticLimits
+            | Command::ResetVariableView
             | Command::ManualLimits { .. }
             | Command::OpenLimits
             | Command::OpenViewBounds
@@ -650,7 +674,76 @@ impl AppState {
             | Command::ToggleLandBorders
             | Command::ToggleColorScaleScope
             | Command::ToggleScale) => self.reduce_commands(command),
+            command @ (Command::OpenFormulaEditor
+            | Command::SubmitFormula
+            | Command::FormulaMove(_)
+            | Command::RemoveFormula) => self.reduce_formula(command),
         }
+    }
+
+    fn reduce_formula(&mut self, command: Command) -> Option<Effect> {
+        match command {
+            Command::OpenFormulaEditor => {
+                self.view.help_visible = false;
+                self.view.formula_index = None;
+                self.view.overlay = Some(Overlay::Formula);
+                self.view.status =
+                    "formula editor: type an expression, Enter plots it, Esc closes".into();
+            }
+            Command::SubmitFormula => {
+                let text = self.view.formula_draft.trim().to_owned();
+                let definition = match crate::data::formula::FormulaDefinition::parse(&text) {
+                    Ok(definition) => definition,
+                    Err(error) => {
+                        self.view.status = error.to_string();
+                        return None;
+                    }
+                };
+                let existing = self.view.formulas.iter().position(|stored| {
+                    crate::data::formula::FormulaDefinition::parse(stored)
+                        .is_ok_and(|stored| stored.name == definition.name)
+                });
+                match existing {
+                    Some(index) if self.view.formulas[index] == text => {}
+                    Some(index) => {
+                        self.view.formulas[index] = text;
+                        self.view.formulas_changed = true;
+                    }
+                    None => {
+                        self.view.formulas.push(text);
+                        self.view.formulas_changed = true;
+                    }
+                }
+                self.view.formula_request = Some(definition.name);
+                self.view.formula_index = None;
+                self.view.overlay = None;
+            }
+            Command::FormulaMove(delta) => {
+                let length = self.view.formulas.len();
+                if length == 0 {
+                    return None;
+                }
+                let index = match self.view.formula_index {
+                    Some(index) => bounded_index(index, delta, length),
+                    None if delta < 0 => length - 1,
+                    None => 0,
+                };
+                self.view.formula_index = Some(index);
+                self.view.formula_draft = self.view.formulas[index].clone();
+            }
+            Command::RemoveFormula => {
+                let index = self.view.formula_index?;
+                if index < self.view.formulas.len() {
+                    let removed = self.view.formulas.remove(index);
+                    self.view.formula_draft.clear();
+                    self.view.formula_index = None;
+                    self.view.formulas_changed = true;
+                    self.view.status = format!("removed formula {removed}");
+                }
+            }
+            _ => unreachable!("formula reducer received unrelated command"),
+        }
+        None
     }
 
     fn reduce_navigation(&mut self, command: Command) -> Option<Effect> {
@@ -979,6 +1072,55 @@ impl AppState {
                 }
                 None
             }
+            Command::ResetVariableView => {
+                self.view.time_index = 0;
+                self.view.depth_index = 0;
+                self.view.depth_cursor = 0;
+                self.view.playing = false;
+                self.view.playback_speed = 1.0;
+                self.view.palette = Palette::Viridis;
+                self.view.palette_query.clear();
+                self.view.palette_index = 0;
+                self.view.limits = None;
+                self.view.global_limits = None;
+                self.view.limits_manual = false;
+                self.view.filter_range = None;
+                self.view.limit_draft = None;
+                self.view.axis_draft = None;
+                self.view.scale_mode = ScaleMode::Linear;
+                self.view.color_scale_scope = ColorScaleScope::CurrentView;
+                self.view.zoom_bounds = None;
+                self.view.zoom_approximation = None;
+                self.view.drag = None;
+                self.view.grid_mode = GridMode::Logical;
+                self.view.show_land_borders = false;
+                self.view.fixed_dimensions.iter_mut().for_each(|dimension| {
+                    dimension.index = 0;
+                });
+                self.view.focused_fixed_dimension = 0;
+                if self.view.axis_options.len() >= 2 {
+                    let (x, y) = default_axes(&self.view.axis_options);
+                    self.view.x_axis = Some(x);
+                    self.view.y_axis = Some(y);
+                } else {
+                    self.view.x_axis = None;
+                    self.view.y_axis = None;
+                }
+                self.view.selected_point = None;
+                self.view.selected_points.clear();
+                self.view.selected_coordinates = PointCoordinates::default();
+                self.view.hover_point = None;
+                self.view.cursor = None;
+                self.view.sidebar_focused = false;
+                self.view.time_series.clear();
+                self.view.time_series_labels.clear();
+                self.view.plot_series.clear();
+                self.view.plot_draft = PlotDraft::default();
+                self.view.palette_picker = None;
+                self.view.overlay = None;
+                self.view.help_visible = false;
+                None
+            }
             Command::OpenCommandPalette => {
                 self.view.help_visible = false;
                 self.view.palette_query.clear();
@@ -1165,6 +1307,11 @@ impl AppState {
                         self.view.palette_query.push(character);
                         self.view.palette_index = 0;
                     }
+                } else if matches!(self.view.overlay, Some(Overlay::Formula)) {
+                    if !character.is_control() && self.view.formula_draft.len() < 256 {
+                        self.view.formula_draft.push(character);
+                        self.view.formula_index = None;
+                    }
                 } else if matches!(self.view.overlay, Some(Overlay::PalettePicker))
                     && (character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ' '))
                     && let Some(picker) = self.view.palette_picker.as_mut()
@@ -1241,6 +1388,9 @@ impl AppState {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     self.view.palette_query.pop();
                     self.view.palette_index = 0;
+                } else if matches!(self.view.overlay, Some(Overlay::Formula)) {
+                    self.view.formula_draft.pop();
+                    self.view.formula_index = None;
                 } else if matches!(self.view.overlay, Some(Overlay::PalettePicker))
                     && let Some(picker) = self.view.palette_picker.as_mut()
                 {
@@ -1548,6 +1698,9 @@ impl AppState {
                 if matches!(self.view.overlay, Some(Overlay::CommandPalette)) {
                     return self.reduce(Command::ExecuteCommandPalette);
                 }
+                if matches!(self.view.overlay, Some(Overlay::Formula)) {
+                    return self.reduce(Command::SubmitFormula);
+                }
                 if matches!(self.view.overlay, Some(Overlay::Axis)) {
                     let draft = self.view.axis_draft.clone()?;
                     return self.reduce(Command::SetAxes {
@@ -1770,7 +1923,7 @@ impl AppState {
         }
     }
 
-    fn select_variable(&mut self, variable: String) -> Option<Effect> {
+    pub fn select_variable(&mut self, variable: String) -> Option<Effect> {
         self.view.bounds_generation = Generation(self.view.bounds_generation.0.saturating_add(1));
         self.view.variable_search_active = false;
         self.variable_query.clear();
@@ -2087,6 +2240,10 @@ pub const COMMAND_PALETTE: &[PaletteEntry] = &[
         label: "Next file",
         shortcut: "}",
     },
+    PaletteEntry {
+        label: "Open formula editor",
+        shortcut: "=",
+    },
 ];
 
 pub fn palette_matches(query: &str) -> Vec<usize> {
@@ -2104,7 +2261,9 @@ pub fn palette_catalog_matches(catalog: &[Palette], query: &str) -> Vec<usize> {
     catalog
         .iter()
         .enumerate()
-        .filter(|(_, palette)| fuzzy_match(palette.name(), &query))
+        .filter(|(_, palette)| {
+            fuzzy_match(palette.name(), &query) || fuzzy_match(palette.category().name(), &query)
+        })
         .map(|(index, _)| index)
         .collect()
 }
@@ -2150,6 +2309,7 @@ fn palette_command(index: usize) -> Command {
         25 => Command::OpenVariableSearch,
         26 => Command::PreviousFile,
         27 => Command::NextFile,
+        28 => Command::OpenFormulaEditor,
         _ => Command::ToggleHelp,
     }
 }
@@ -2216,6 +2376,55 @@ mod raw_dimension_navigation_tests {
         assert_eq!(state.view.fixed_dimensions[1].index, 2);
         state.reduce(Command::MoveFixedDimension(1));
         assert_eq!(state.view.fixed_dimensions[1].index, 2);
+    }
+
+    #[test]
+    fn reset_variable_view_restores_defaults_and_keeps_selected_variable() {
+        let mut state = AppState {
+            variables: vec![variable("temperature", &["latitude", "longitude", "time"])],
+            ..AppState::default()
+        };
+        state.reduce(Command::SelectVariableAt(0));
+        state.view.time_length = 4;
+        state.view.time_index = 3;
+        state.view.depth_length = 5;
+        state.view.depth_index = 2;
+        state.view.depth_cursor = 4;
+        state.view.palette = Palette::Magma.toggle_reversed();
+        state.view.scale_mode = ScaleMode::Log;
+        state.view.color_scale_scope = ColorScaleScope::GlobalView;
+        state.view.limits = Some((2.0, 20.0));
+        state.view.limits_manual = true;
+        state.view.filter_range = Some((4.0, 10.0));
+        state.view.zoom_bounds = Some(Bounds::new(1, 3, 2, 5).unwrap());
+        state.view.grid_mode = GridMode::Projected;
+        state.view.show_land_borders = true;
+        state.view.playing = true;
+        state.view.playback_speed = 4.0;
+        state.view.selected_point = Some((1, 2));
+        state.view.selected_points = vec![(1, 2)];
+
+        state.reduce(Command::ResetVariableView);
+
+        assert_eq!(state.view.selected_variable.as_deref(), Some("temperature"));
+        assert_eq!(state.view.time_index, 0);
+        assert_eq!(state.view.depth_index, 0);
+        assert_eq!(state.view.depth_cursor, 0);
+        assert_eq!(state.view.palette, Palette::Viridis);
+        assert_eq!(state.view.scale_mode, ScaleMode::Linear);
+        assert_eq!(state.view.color_scale_scope, ColorScaleScope::CurrentView);
+        assert_eq!(state.view.limits, None);
+        assert!(!state.view.limits_manual);
+        assert_eq!(state.view.filter_range, None);
+        assert_eq!(state.view.zoom_bounds, None);
+        assert_eq!(state.view.grid_mode, GridMode::Logical);
+        assert!(!state.view.show_land_borders);
+        assert!(!state.view.playing);
+        assert_eq!(state.view.playback_speed, 1.0);
+        assert_eq!(state.view.selected_point, None);
+        assert!(state.view.selected_points.is_empty());
+        assert_eq!(state.view.x_axis.as_deref(), Some("longitude"));
+        assert_eq!(state.view.y_axis.as_deref(), Some("latitude"));
     }
 
     #[test]

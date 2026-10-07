@@ -1256,6 +1256,7 @@ fn dimension_scale_names(
 ) -> std::collections::HashMap<i64, String> {
     variables
         .iter()
+        .filter(|entry| entry.variable.shape.len() == 1)
         .filter_map(|entry| {
             let id = read_integer_attribute(file, entry.variable, "_Netcdf4Dimid")?
                 .into_iter()

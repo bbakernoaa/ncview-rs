@@ -104,11 +104,28 @@ impl ManifestSource {
         let mut chunk_refs = BTreeMap::new();
         let mut dimensions_map = BTreeMap::<String, usize>::new();
 
-        // Gather .zarray and .zattrs to define variables
+        // Gather .zarray / zarr.json and .zattrs to define variables
         for (key, val) in &refs_map {
-            if let Some(var_name) = key.strip_suffix("/.zarray") {
+            let var_name_opt = if let Some(var_name) = key.strip_suffix("/.zarray") {
+                Some(var_name.to_string())
+            } else if key == ".zarray" {
+                Some(String::new())
+            } else if let Some(var_name) = key.strip_suffix("/zarr.json") {
+                Some(var_name.to_string())
+            } else if key == "zarr.json" {
+                Some(String::new())
+            } else {
+                None
+            };
+
+            if let Some(var_name) = var_name_opt {
                 let zarray = val;
-                let zattrs = refs_map.get(&format!("{var_name}/.zattrs"));
+                let zattrs_key = if var_name.is_empty() {
+                    ".zattrs".to_string()
+                } else {
+                    format!("{var_name}/.zattrs")
+                };
+                let zattrs = refs_map.get(&zattrs_key);
 
                 let shape = zarray
                     .get("shape")
@@ -130,15 +147,53 @@ impl ManifestSource {
                             .map(|v| v as usize)
                             .collect::<Vec<_>>()
                     })
+                    .or_else(|| {
+                        // Zarr v3 chunk_grid configuration
+                        zarray
+                            .get("chunk_grid")
+                            .and_then(|cg| cg.get("configuration"))
+                            .and_then(|c| c.get("chunk_shape"))
+                            .and_then(Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(Value::as_u64)
+                                    .map(|v| v as usize)
+                                    .collect::<Vec<_>>()
+                            })
+                    })
                     .unwrap_or_default();
 
                 let dtype = zarray
                     .get("dtype")
                     .and_then(Value::as_str)
+                    .or_else(|| {
+                        // Zarr v3 data_type field
+                        zarray.get("data_type").and_then(Value::as_str)
+                    })
                     .unwrap_or("<f4")
                     .to_string();
 
-                let fill_value = zarray.get("fill_value").and_then(Value::as_f64);
+                let fill_value = zarray
+                    .get("fill_value")
+                    .and_then(Value::as_f64)
+                    .or_else(|| {
+                        zarray
+                            .get("fill_value")
+                            .and_then(Value::as_u64)
+                            .map(|v| v as f64)
+                    })
+                    .or_else(|| {
+                        zarray
+                            .get("fill_value")
+                            .and_then(Value::as_i64)
+                            .map(|v| v as f64)
+                    })
+                    .or_else(|| {
+                        zarray
+                            .get("fill_value")
+                            .and_then(Value::as_bool)
+                            .map(|v| if v { 1.0 } else { 0.0 })
+                    });
 
                 let is_grib = zarray
                     .get("filters")
@@ -152,7 +207,9 @@ impl ManifestSource {
                     .unwrap_or(false)
                     || zattrs.and_then(|a| a.get("grib2_discipline")).is_some();
 
-                let dim_names = zattrs
+                let attributes_node = zattrs.or_else(|| zarray.get("attributes"));
+
+                let dim_names = attributes_node
                     .and_then(|a| a.get("_ARRAY_DIMENSIONS"))
                     .and_then(Value::as_array)
                     .map(|arr| {
@@ -161,17 +218,33 @@ impl ManifestSource {
                             .map(String::from)
                             .collect::<Vec<_>>()
                     })
+                    .or_else(|| {
+                        // Zarr v3 dimension_names
+                        zarray
+                            .get("dimension_names")
+                            .and_then(Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(String::from)
+                                    .collect::<Vec<_>>()
+                            })
+                    })
                     .unwrap_or_else(|| (0..shape.len()).map(|i| format!("dim_{i}")).collect());
 
-                let units = zattrs
+                let units = attributes_node
                     .and_then(|a| a.get("units"))
                     .and_then(Value::as_str)
                     .map(String::from);
-                let long_name = zattrs
-                    .and_then(|a| a.get("long_name").or_else(|| a.get("grib2_description")))
+                let long_name = attributes_node
+                    .and_then(|a| {
+                        a.get("long_name")
+                            .or_else(|| a.get("grib2_description"))
+                            .or_else(|| a.get("description"))
+                    })
                     .and_then(Value::as_str)
                     .map(String::from);
-                let standard_name = zattrs
+                let standard_name = attributes_node
                     .and_then(|a| a.get("standard_name"))
                     .and_then(Value::as_str)
                     .map(String::from);
@@ -184,9 +257,9 @@ impl ManifestSource {
                 }
 
                 variable_meta.insert(
-                    var_name.to_string(),
+                    var_name.clone(),
                     ManifestVariableMetadata {
-                        name: var_name.to_string(),
+                        name: var_name,
                         dimensions: dim_names,
                         shape,
                         chunks,
@@ -201,8 +274,11 @@ impl ManifestSource {
             } else if !key.ends_with("/.zarray")
                 && !key.ends_with("/.zattrs")
                 && !key.ends_with("/.zgroup")
+                && !key.ends_with("/zarr.json")
                 && key != ".zgroup"
                 && key != ".zattrs"
+                && key != ".zarray"
+                && key != "zarr.json"
             {
                 // Parse chunk reference
                 if let Some(chunk_ref) = parse_chunk_ref(val) {
@@ -552,6 +628,66 @@ fn resolve_chunk_key(
         if chunk_refs.contains_key(&single_key) {
             return Some(single_key);
         }
+        let single_key_v3 = format!(
+            "c/{}",
+            chunk_indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let full_v3_key = if var_name.is_empty() {
+            single_key_v3
+        } else {
+            format!("{var_name}/{single_key_v3}")
+        };
+        if chunk_refs.contains_key(&full_v3_key) {
+            return Some(full_v3_key);
+        }
+    }
+
+    // Zarr v3 chunk key format `c/0/0`
+    let c_v3_key = if var_name.is_empty() {
+        format!(
+            "c/{}",
+            chunk_indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join("/")
+        )
+    } else {
+        format!(
+            "{}/c/{}",
+            var_name,
+            chunk_indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join("/")
+        )
+    };
+    if chunk_refs.contains_key(&c_v3_key) {
+        return Some(c_v3_key);
+    }
+
+    if var_name.is_empty() {
+        let root_dot = chunk_indices
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        if chunk_refs.contains_key(&root_dot) {
+            return Some(root_dot);
+        }
+        let root_slash = chunk_indices
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        if chunk_refs.contains_key(&root_slash) {
+            return Some(root_slash);
+        }
     }
 
     None
@@ -563,8 +699,53 @@ fn resolve_chunk_key(
     clippy::chunks_exact_to_as_chunks
 )]
 fn decode_numeric_chunk(bytes: &[u8], dtype: &str) -> Result<Vec<f64>> {
+    // Check if chunk is zlib/gzip compressed (magic bytes 0x1f 0x8b or zlib header)
+    let decompressed_buf;
+    let bytes = if (bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
+        || (bytes.len() >= 2
+            && bytes[0] == 0x78
+            && (bytes[1] == 0x01 || bytes[1] == 0x9c || bytes[1] == 0xda))
+    {
+        use std::io::Read;
+        let mut gz = flate2::read::GzDecoder::new(bytes);
+        let mut buf = Vec::new();
+        if gz.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            decompressed_buf = buf;
+            &decompressed_buf[..]
+        } else {
+            let mut zlib = flate2::read::ZlibDecoder::new(bytes);
+            let mut buf2 = Vec::new();
+            if zlib.read_to_end(&mut buf2).is_ok() && !buf2.is_empty() {
+                decompressed_buf = buf2;
+                &decompressed_buf[..]
+            } else {
+                bytes
+            }
+        }
+    } else {
+        bytes
+    };
+
     let dt = dtype.trim();
-    if dt.contains("f4") || dt.contains("float32") || dt.ends_with("f") {
+    if dt.contains("f2") || dt.contains("float16") {
+        if dt.starts_with('>') {
+            Ok(bytes
+                .chunks_exact(2)
+                .map(|b| {
+                    let u = u16::from_be_bytes(b.try_into().unwrap());
+                    f16_to_f64(u)
+                })
+                .collect())
+        } else {
+            Ok(bytes
+                .chunks_exact(2)
+                .map(|b| {
+                    let u = u16::from_le_bytes(b.try_into().unwrap());
+                    f16_to_f64(u)
+                })
+                .collect())
+        }
+    } else if dt.contains("f4") || dt.contains("float32") || dt.ends_with("f") {
         if dt.starts_with('>') {
             Ok(bytes
                 .chunks_exact(4)
@@ -636,6 +817,11 @@ fn decode_numeric_chunk(bytes: &[u8], dtype: &str) -> Result<Vec<f64>> {
                 .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f64)
                 .collect())
         }
+    } else if dt.contains("b1") || dt.contains("bool") {
+        Ok(bytes
+            .iter()
+            .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+            .collect())
     } else if dt.contains("i1") || dt.contains("int8") {
         Ok(bytes.iter().map(|&b| (b as i8) as f64).collect())
     } else if dt.contains("u1") || dt.contains("uint8") {
@@ -707,6 +893,39 @@ fn parse_chunk_ref(val: &Value) -> Option<ChunkReference> {
         }
     }
     None
+}
+
+/// Convert IEEE 754 binary16 (f16) to f64.
+fn f16_to_f64(i: u16) -> f64 {
+    let sign = (i >> 15) & 0x0001;
+    let exp = (i >> 10) & 0x001f;
+    let frac = i & 0x03ff;
+
+    if exp == 0 {
+        if frac == 0 {
+            if sign == 1 { -0.0 } else { 0.0 }
+        } else {
+            // Subnormal
+            let val = (frac as f64) * 2.0_f64.powi(-24);
+            if sign == 1 { -val } else { val }
+        }
+    } else if exp == 0x1f {
+        if frac == 0 {
+            if sign == 1 {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            f64::NAN
+        }
+    } else {
+        // Normal
+        let mantissa = 1.0 + (frac as f64) / 1024.0;
+        let e = (exp as i32) - 15;
+        let val = mantissa * 2.0_f64.powi(e);
+        if sign == 1 { -val } else { val }
+    }
 }
 
 fn infer_axis_role(name: &str) -> AxisRole {

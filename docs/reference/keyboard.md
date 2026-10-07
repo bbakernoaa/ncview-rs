@@ -28,12 +28,14 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 | `v` | reverse the active colormap; in the chooser, reverse the focused preview |
 | `i` | cycle interpolation (set `NCVIEW_SCIENTIFIC_RENDERING=0` to unlock) |
 | `e` | export current slice (PNG + SVG + JSON) |
+| `=` | formula editor — derive variables such as `O3[1]-O3[2]` or `mean(T)` |
 | `a` | automatic limits |
 | `l` | edit min/max limits |
 | `f` | mask data outside a range |
 | `s` | toggle linear/log color scale |
 | `z` | toggle current/global color scale |
-| `r` | reset zoom |
+| `r` | reset zoom to the full view |
+| `R` | reset variable settings and view |
 | `g` | logical / projected grid |
 | `b` | toggle filled land/ocean map backdrop |
 | `Enter` | open pinned-point plot menu |

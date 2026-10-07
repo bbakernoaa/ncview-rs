@@ -298,3 +298,123 @@ fn handles_multi_chunk_spanning_and_missing_chunks() {
     assert_eq!(slice.values[(3, 2)], 15.0);
     assert_eq!(slice.values[(3, 3)], 16.0);
 }
+
+#[test]
+fn handles_f16_bool_and_zstd_zlib_compressed_chunks() {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let manifest_path = dir.path().join("zarr_v3_compressed.json");
+
+    // Prepare compressed 2x2 f16 bytes (1.0, 2.0, 3.0, 4.0 in IEEE f16: 0x3c00, 0x4000, 0x4200, 0x4400)
+    let f16_raw: [u16; 4] = [0x3c00, 0x4000, 0x4200, 0x4400];
+    let raw_bytes: Vec<u8> = f16_raw.iter().flat_map(|u| u.to_le_bytes()).collect();
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&raw_bytes).unwrap();
+    let zlib_bytes = encoder.finish().unwrap();
+
+    let compressed_file = dir.path().join("c00.zlib");
+    fs::write(&compressed_file, &zlib_bytes).unwrap();
+
+    let json_content = serde_json::json!({
+        "refs": {
+            "v3_var/zarr.json": {
+                "zarr_format": 3,
+                "node_type": "array",
+                "data_type": "<f2",
+                "shape": [2, 2],
+                "chunk_grid": {
+                    "type": "regular",
+                    "configuration": {
+                        "chunk_shape": [2, 2]
+                    }
+                },
+                "dimension_names": ["lat", "lon"],
+                "attributes": {
+                    "units": "K",
+                    "description": "Temperature in f16 with zlib compression"
+                }
+            },
+            "v3_var/c/0/0": {
+                "path": compressed_file.file_name().unwrap().to_str().unwrap(),
+                "offset": 0,
+                "length": zlib_bytes.len()
+            }
+        }
+    });
+
+    fs::write(&manifest_path, json_content.to_string()).unwrap();
+
+    let source = ManifestSource::open(&manifest_path).unwrap();
+    let metadata = source.metadata();
+
+    assert_eq!(metadata.variables.len(), 1);
+    let var = &metadata.variables[0];
+    assert_eq!(var.name, "v3_var");
+    assert_eq!(var.units.as_deref(), Some("K"));
+    assert_eq!(
+        var.long_name.as_deref(),
+        Some("Temperature in f16 with zlib compression")
+    );
+
+    let request = SliceRequest {
+        variable: "v3_var".into(),
+        time: 0,
+        depth: 0,
+        bounds: Bounds::new(0, 2, 0, 2).unwrap(),
+    };
+
+    let slice = source.read_slice(&request).unwrap();
+    assert!((slice.values[(0, 0)] - 1.0).abs() < 1e-3);
+    assert!((slice.values[(0, 1)] - 2.0).abs() < 1e-3);
+    assert!((slice.values[(1, 0)] - 3.0).abs() < 1e-3);
+    assert!((slice.values[(1, 1)] - 4.0).abs() < 1e-3);
+}
+
+#[test]
+fn handles_bool_dtype_and_slash_chunk_keys() {
+    let dir = tempdir().unwrap();
+    let manifest_path = dir.path().join("bool_manifest.json");
+
+    let bool_bytes: Vec<u8> = vec![1, 0, 1, 1];
+    let backing_file = dir.path().join("mask.bin");
+    fs::write(&backing_file, &bool_bytes).unwrap();
+
+    let json_content = serde_json::json!({
+        "refs": {
+            "mask/.zarray": {
+                "zarr_format": 2,
+                "shape": [2, 2],
+                "chunks": [2, 2],
+                "dtype": "|b1"
+            },
+            "mask/.zattrs": {
+                "_ARRAY_DIMENSIONS": ["lat", "lon"]
+            },
+            "mask/0/0": {
+                "path": backing_file.file_name().unwrap().to_str().unwrap(),
+                "offset": 0,
+                "length": bool_bytes.len()
+            }
+        }
+    });
+
+    fs::write(&manifest_path, json_content.to_string()).unwrap();
+
+    let source = ManifestSource::open(&manifest_path).unwrap();
+    let request = SliceRequest {
+        variable: "mask".into(),
+        time: 0,
+        depth: 0,
+        bounds: Bounds::new(0, 2, 0, 2).unwrap(),
+    };
+
+    let slice = source.read_slice(&request).unwrap();
+    assert_eq!(slice.values[(0, 0)], 1.0);
+    assert_eq!(slice.values[(0, 1)], 0.0);
+    assert_eq!(slice.values[(1, 0)], 1.0);
+    assert_eq!(slice.values[(1, 1)], 1.0);
+}

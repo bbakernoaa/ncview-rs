@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "ncview-rs"
-version = "0.5.14"
+version = "0.5.18"
 dependencies = [
  "ab_glyph",
  "base64-simd",
@@ -1828,6 +1828,7 @@ dependencies = [
  "colorous",
  "criterion",
  "crossterm",
+ "flate2",
  "grib",
  "human-panic",
  "image",
