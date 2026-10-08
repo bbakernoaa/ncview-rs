@@ -455,7 +455,7 @@ pub(crate) fn select_mesh_values(
         .collect())
 }
 
-/// Replace each mesh dimension with a latitude/longitude plane, keeping every other dimension.
+/// Replace each mesh dimension with a latitude/longitude plane in variables; the mesh dimension stays listed.
 fn virtual_metadata(
     inner: &DatasetMetadata,
     latitude_length: usize,
@@ -467,7 +467,6 @@ fn virtual_metadata(
     let mut dimensions = inner
         .dimensions
         .iter()
-        .filter(|dimension| !is_mesh_dimension(&dimension.name))
         .map(|dimension| Dimension {
             name: dimension.name.clone(),
             length: dimension.length,
@@ -690,12 +689,12 @@ mod tests {
     fn virtual_metadata_replaces_mesh_dimension_with_lat_lon_plane() {
         let metadata = virtual_metadata(&field_metadata(), 720, 1440);
 
-        assert!(
-            metadata
-                .dimensions
-                .iter()
-                .all(|dimension| dimension.name != "nVertices")
-        );
+        let mesh = metadata
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.name == "nVertices")
+            .expect("mesh dimension stays listed");
+        assert_eq!((mesh.length, mesh.role), (3, AxisRole::Other));
         let depth = metadata
             .dimensions
             .iter()

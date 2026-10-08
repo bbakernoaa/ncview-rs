@@ -47,7 +47,7 @@ fn opens_real_mpas_mesh_and_resamples_coordinate_field() {
     let mesh_source = data::open(&path).expect("open MPAS mesh");
     let metadata = mesh_source.metadata();
 
-    // The x1.2562 mesh has 2562 cells; the raw nCells dimension is hidden behind the regular grid.
+    // The x1.2562 mesh has 2562 cells; nCells stays listed alongside the regular grid.
     let n_cells = 2562;
     let latitude = metadata
         .dimensions
@@ -59,7 +59,7 @@ fn opens_real_mpas_mesh_and_resamples_coordinate_field() {
         metadata
             .dimensions
             .iter()
-            .all(|dimension| dimension.name != "nCells")
+            .any(|dimension| dimension.name == "nCells" && dimension.length == n_cells)
     );
     assert!(
         metadata
