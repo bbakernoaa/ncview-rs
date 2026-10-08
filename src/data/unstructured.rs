@@ -3,6 +3,7 @@
 use std::num::NonZeroUsize;
 
 use kiddo::{ImmutableKdTree, SquaredEuclidean};
+use rayon::prelude::*;
 
 use crate::error::{NcvError, Result};
 
@@ -59,7 +60,7 @@ impl SphereIndex {
         });
         let reach_sq = match NonZeroUsize::new(points.len().min(REACH_NEIGHBOURS)) {
             Some(count) if points.len() > 1 => points
-                .iter()
+                .par_iter()
                 .map(|point| {
                     tree.query(point)
                         .nearest_n::<SquaredEuclidean<f64>>(count)
@@ -68,7 +69,7 @@ impl SphereIndex {
                         .last()
                         .map_or(0.0, |candidate| candidate.distance)
                 })
-                .fold(0.0, f64::max),
+                .reduce(|| 0.0, f64::max),
             _ => f64::INFINITY,
         };
         Self {
