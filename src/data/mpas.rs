@@ -1,12 +1,13 @@
 use std::{
     collections::HashMap,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
+use kiddo::{ImmutableKdTree, SquaredEuclidean};
 use ndarray::Array2;
 
-use crate::analysis::projection::ProjectionIndex;
 use crate::error::{NcvError, Result};
 
 use super::{
@@ -132,6 +133,51 @@ fn to_degrees(values: Vec<f64>, units: Option<&str>) -> Vec<f64> {
     }
 }
 
+fn unit_vector(latitude_deg: f64, longitude_deg: f64) -> [f64; 3] {
+    let latitude = latitude_deg.to_radians();
+    let longitude = longitude_deg.to_radians();
+    [
+        latitude.cos() * longitude.cos(),
+        latitude.cos() * longitude.sin(),
+        latitude.sin(),
+    ]
+}
+
+/// Nearest-point lookup on the unit sphere, so distances stay true near the poles.
+struct SphereIndex {
+    tree: ImmutableKdTree<f64, 3>,
+    sources: Vec<usize>,
+}
+
+impl SphereIndex {
+    fn build(lat: &[f64], lon: &[f64]) -> Self {
+        let mut points = Vec::new();
+        let mut sources = Vec::new();
+        for (index, (&latitude, &longitude)) in lat.iter().zip(lon).enumerate() {
+            if latitude.is_finite() && longitude.is_finite() {
+                points.push(unit_vector(latitude, longitude));
+                sources.push(index);
+            }
+        }
+        let tree = ImmutableKdTree::new_from_slice(&points).unwrap_or_else(|_| {
+            ImmutableKdTree::new_from_slice(&[[0.0, 0.0, 1.0]]).expect("non-empty fallback")
+        });
+        Self { tree, sources }
+    }
+
+    fn nearest(&self, latitude: f64, longitude: f64) -> Option<usize> {
+        let query = unit_vector(latitude, longitude);
+        let count = NonZeroUsize::new(1)?;
+        self.tree
+            .query(&query)
+            .nearest_n::<SquaredEuclidean<f64>>(count)
+            .execute()
+            .into_iter()
+            .next()
+            .and_then(|candidate| self.sources.get(candidate.item as usize).copied())
+    }
+}
+
 fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
     (
         (180.0 / resolution_deg).round() as usize,
@@ -238,19 +284,14 @@ impl MpasSource {
             return Ok(Arc::clone(map));
         }
         let (lat, lon) = self.read_mesh_coordinates(mesh)?;
-        let cols = lat.len().max(1);
-        let index = ProjectionIndex::build(&lat, &lon, cols);
+        let index = SphereIndex::build(&lat, &lon);
         let (rows, grid_cols) = self.grid_shape();
         let mut nearest = Vec::with_capacity(rows * grid_cols);
         for row in 0..rows {
             let latitude = self.grid_latitude(row);
             for col in 0..grid_cols {
                 let longitude = self.grid_longitude(col);
-                nearest.push(
-                    index
-                        .nearest(latitude, longitude)
-                        .map_or(usize::MAX, |source| source.row * cols + source.col),
-                );
+                nearest.push(index.nearest(latitude, longitude).unwrap_or(usize::MAX));
             }
         }
         let map = Arc::new(NearestMap {
@@ -720,5 +761,19 @@ mod tests {
         assert_eq!(shape_for_resolution(DEFAULT_RESOLUTION_DEG), (720, 1440));
         let latitude = -90.0 + 0.5 * DEFAULT_RESOLUTION_DEG;
         assert!((latitude + 89.875).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sphere_nearest_prefers_the_close_point_across_the_pole() {
+        // Degree distance picks (80, 90), but on the sphere (89, 0) is about 1.4 degrees away.
+        let index = SphereIndex::build(&[80.0, 89.0], &[90.0, 0.0]);
+        assert_eq!(index.nearest(89.0, 90.0), Some(1));
+    }
+
+    #[test]
+    fn sphere_nearest_skips_non_finite_mesh_points() {
+        let index = SphereIndex::build(&[f64::NAN, 10.0], &[0.0, 0.0]);
+        assert_eq!(index.nearest(10.0, 0.0), Some(1));
+        assert_eq!(SphereIndex::build(&[], &[]).nearest(0.0, 0.0), None);
     }
 }
