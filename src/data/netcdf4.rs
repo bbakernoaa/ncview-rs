@@ -17,13 +17,17 @@ use crate::error::{NcvError, Result};
 
 const HDF5_SIGNATURE: &[u8; 8] = b"\x89HDF\r\n\x1a\n";
 const MAX_BYTES: usize = 768 * 1024 * 1024;
+type CoordinateGridCacheKey = (String, usize, usize, usize, usize);
+type CoordinateGridCache = Mutex<Option<(CoordinateGridCacheKey, Arc<CoordinateGrid>)>>;
 
 pub struct NetCdf4Source {
     path: PathBuf,
     file: NcFile,
     root: NcGroup,
     metadata: DatasetMetadata,
-    coord_cache: Mutex<std::collections::HashMap<String, Vec<f64>>>,
+    dimension_names_by_id: std::collections::HashMap<i64, String>,
+    coord_cache: Mutex<std::collections::HashMap<String, Arc<Vec<f64>>>>,
+    coordinate_grid_cache: CoordinateGridCache,
 }
 
 impl NetCdf4Source {
@@ -97,6 +101,7 @@ impl NetCdf4Source {
                 reason: format!("missing NetCDF-4 conventions: {error}"),
             })?;
         let group_variables = collect_group_variables(&root);
+        let dimension_names_by_id = dimension_scale_names(&file, &group_variables);
         let mut dimensions: Vec<Dimension> = root
             .dimensions
             .iter()
@@ -141,10 +146,12 @@ impl NetCdf4Source {
             .iter()
             .map(|entry| Variable {
                 name: entry.qualified_name.clone(),
-                dimensions: canonical_dimension_names(
+                dimensions: canonical_dimension_names_with_ids(
                     entry.variable,
                     &dimensions,
                     &coordinate_dimension_aliases(entry.group),
+                    &dimension_names_by_id,
+                    read_integer_attribute(&file, entry.variable, "_Netcdf4Coordinates"),
                 ),
                 units: entry.variable.units(),
                 long_name: attribute_text(entry.variable, "long_name"),
@@ -166,6 +173,19 @@ impl NetCdf4Source {
         dimensions.retain(|dimension| {
             !dimension.name.starts_with("phony_dim_") || used_phony.contains(&dimension.name)
         });
+        for entry in group_variables.iter().filter(|entry| {
+            entry.variable.attr("_Netcdf4Dimid").is_some() && entry.variable.shape.len() == 1
+        }) {
+            let name = entry.variable.name.clone();
+            let length = usize::try_from(entry.variable.shape[0]).unwrap_or(usize::MAX);
+            if !dimensions.iter().any(|dimension| dimension.name == name) {
+                dimensions.push(Dimension {
+                    role: role_for_name(&name),
+                    name,
+                    length,
+                });
+            }
+        }
         Ok(Self {
             path: path.to_path_buf(),
             file,
@@ -176,7 +196,9 @@ impl NetCdf4Source {
                 dimensions,
                 variables,
             },
+            dimension_names_by_id,
             coord_cache: Mutex::new(std::collections::HashMap::new()),
+            coordinate_grid_cache: Mutex::new(None),
         })
     }
 }
@@ -240,8 +262,13 @@ impl DataSource for NetCdf4Source {
             });
         }
         let aliases = coordinate_dimension_aliases(group);
-        let canonical_names =
-            canonical_dimension_names(variable, &self.metadata.dimensions, &aliases);
+        let canonical_names = canonical_dimension_names_with_ids(
+            variable,
+            &self.metadata.dimensions,
+            &aliases,
+            &self.dimension_names_by_id,
+            read_integer_attribute(&self.file, variable, "_Netcdf4Coordinates"),
+        );
         let canonical_refs = canonical_names
             .iter()
             .map(String::as_str)
@@ -380,14 +407,14 @@ impl DataSource for NetCdf4Source {
             // the root CF lookup table. The data slice remains fully usable;
             // source indices are retained until group-local coordinate support
             // is available.
-            CoordinateGrid {
+            Arc::new(CoordinateGrid {
                 latitude: None,
                 longitude: None,
                 latitude_axis: None,
                 longitude_axis: None,
-            }
+            })
         };
-        Ok(slice.with_coordinates(coordinates))
+        Ok(slice.with_shared_coordinates(coordinates))
     }
 
     fn time_label(&self, index: usize) -> Option<String> {
@@ -460,11 +487,14 @@ impl NetCdf4Source {
         Ok(values)
     }
 
-    fn read_coordinate_values_cached(&self, variable: &oxinetcdf::NcVariable) -> Result<Vec<f64>> {
+    fn read_coordinate_values_cached(
+        &self,
+        variable: &oxinetcdf::NcVariable,
+    ) -> Result<Arc<Vec<f64>>> {
         if let Ok(cache) = self.coord_cache.lock()
             && let Some(cached) = cache.get(&variable.h5_path)
         {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
 
         let element_count = variable
@@ -495,16 +525,47 @@ impl NetCdf4Source {
                 reason: error.to_string(),
             })?;
 
-        let values = decode_coordinate_values(&raw, variable)?;
+        let values = Arc::new(decode_coordinate_values(&raw, variable)?);
         if values.len() == element_count
             && let Ok(mut cache) = self.coord_cache.lock()
         {
-            cache.insert(variable.h5_path.clone(), values.clone());
+            cache.insert(variable.h5_path.clone(), Arc::clone(&values));
         }
         Ok(values)
     }
 
     fn read_coordinate_grid(
+        &self,
+        variable: &oxinetcdf::NcVariable,
+        data_names: &[&str],
+        data_shape: &[usize],
+        row_axis: usize,
+        col_axis: usize,
+        bounds: super::slice::Bounds,
+    ) -> Arc<CoordinateGrid> {
+        let key = (
+            variable.h5_path.clone(),
+            bounds.row_start,
+            bounds.row_end,
+            bounds.col_start,
+            bounds.col_end,
+        );
+        if let Ok(cache) = self.coordinate_grid_cache.lock()
+            && let Some((cached_key, cached)) = cache.as_ref()
+            && cached_key == &key
+        {
+            return Arc::clone(cached);
+        }
+        let coordinates = Arc::new(self.read_coordinate_grid_uncached(
+            variable, data_names, data_shape, row_axis, col_axis, bounds,
+        ));
+        if let Ok(mut cache) = self.coordinate_grid_cache.lock() {
+            *cache = Some((key, Arc::clone(&coordinates)));
+        }
+        coordinates
+    }
+
+    fn read_coordinate_grid_uncached(
         &self,
         variable: &oxinetcdf::NcVariable,
         data_names: &[&str],
@@ -870,7 +931,9 @@ impl NetCdf4Source {
                     })
                 })
             })?;
-        self.read_coordinate_values_cached(coordinate).ok()
+        self.read_coordinate_values_cached(coordinate)
+            .ok()
+            .map(|values| values.as_ref().clone())
     }
 
     fn point_coordinates(&self, variable_name: &str, row: usize, col: usize) -> PointCoordinates {
@@ -892,7 +955,13 @@ impl NetCdf4Source {
             };
         };
         let aliases = coordinate_dimension_aliases(&self.root);
-        let names = canonical_dimension_names(variable, &self.metadata.dimensions, &aliases);
+        let names = canonical_dimension_names_with_ids(
+            variable,
+            &self.metadata.dimensions,
+            &aliases,
+            &self.dimension_names_by_id,
+            read_integer_attribute(&self.file, variable, "_Netcdf4Coordinates"),
+        );
         let (row_axis, col_axis) = spatial_axes(
             variable,
             &self.root,
@@ -1047,11 +1116,9 @@ fn spatial_axes(
     row_fallback: usize,
     col_fallback: usize,
 ) -> (usize, usize) {
-    let mut row = spatial_axis(names, AxisKind::Latitude, row_fallback);
-    let mut col = spatial_axis(names, AxisKind::Longitude, col_fallback);
-    if row != row_fallback || col != col_fallback {
-        return (row, col);
-    }
+    let row = spatial_axis(names, AxisKind::Latitude, row_fallback);
+    let col = spatial_axis(names, AxisKind::Longitude, col_fallback);
+    let mut coordinate_axes = (row != row_fallback || col != col_fallback).then_some((row, col));
 
     // CF curvilinear coordinates carry their role on 2-D coordinate
     // variables, not on the dimensions themselves. Their dimension order is
@@ -1078,13 +1145,79 @@ fn spatial_axes(
                 continue;
             }
             match axis_role(coordinate) {
-                AxisRole::Latitude => row = first,
-                AxisRole::Longitude => col = second,
+                AxisRole::Latitude => coordinate_axes = Some((first, second)),
+                AxisRole::Longitude => coordinate_axes = Some((first, second)),
                 _ => {}
             }
         }
     }
-    (row, col)
+
+    let lengths = variable
+        .shape
+        .iter()
+        .map(|length| usize::try_from(*length).unwrap_or(0))
+        .collect::<Vec<_>>();
+    resolve_plane_axes(names, &lengths, coordinate_axes).unwrap_or((row_fallback, col_fallback))
+}
+
+fn resolve_plane_axes(
+    names: &[&str],
+    lengths: &[usize],
+    coordinate_axes: Option<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    if names.len() != lengths.len() || names.len() < 2 {
+        return None;
+    }
+
+    let is_valid_pair = |(row, col): (usize, usize)| {
+        row != col
+            && lengths.get(row).is_some_and(|length| *length > 0)
+            && lengths.get(col).is_some_and(|length| *length > 0)
+    };
+    if let Some(axes) = coordinate_axes.filter(|axes| is_valid_pair(*axes)) {
+        return Some(axes);
+    }
+
+    let row = names
+        .iter()
+        .position(|name| has_dimension_token(name, &["row", "rows", "height", "y"]));
+    let col = names.iter().position(|name| {
+        has_dimension_token(name, &["column", "columns", "col", "cols", "width", "x"])
+    });
+    if let (Some(row), Some(col)) = (row, col)
+        && is_valid_pair((row, col))
+    {
+        return Some((row, col));
+    }
+
+    let mut eligible = names
+        .iter()
+        .enumerate()
+        .filter(|(axis, name)| {
+            lengths[*axis] > 0 && !matches!(role_for_name(name), AxisRole::Time | AxisRole::Depth)
+        })
+        .map(|(axis, _)| axis)
+        .collect::<Vec<_>>();
+    if eligible.len() < 2 {
+        eligible = lengths
+            .iter()
+            .enumerate()
+            .filter(|(_, length)| **length > 0)
+            .map(|(axis, _)| axis)
+            .collect();
+    }
+    let col = eligible.last().copied()?;
+    let row = eligible.get(eligible.len().checked_sub(2)?).copied()?;
+    Some((row, col))
+}
+
+fn has_dimension_token(name: &str, wanted: &[&str]) -> bool {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            wanted
+                .iter()
+                .any(|candidate| token.eq_ignore_ascii_case(candidate))
+        })
 }
 
 fn canonical_dimension_names(
@@ -1094,7 +1227,7 @@ fn canonical_dimension_names(
 ) -> Vec<String> {
     let original = variable.dim_names();
     let variable_role = axis_role(variable);
-    if original.len() == 1 && variable_role != AxisRole::Other {
+    if original.len() == 1 && (variable_role != AxisRole::Other || variable.is_coordinate) {
         return vec![variable.name.clone()];
     }
     // A 2-D latitude/longitude variable is a coordinate field, not a
@@ -1144,6 +1277,62 @@ fn canonical_dimension_names(
                 .unwrap_or_else(|| (*name).to_owned())
         })
         .collect()
+}
+
+/// Some netCDF-4 producers store a valid `_Netcdf4Coordinates` id vector and
+/// dimension-scale `_Netcdf4Dimid` attributes while writing `DIMENSION_LIST`
+/// in a vlen-of-references encoding that OxiNetCDF cannot decode. Recover the
+/// declared dimension names from those ids before falling back to phony axes.
+fn canonical_dimension_names_with_ids(
+    variable: &oxinetcdf::NcVariable,
+    dimensions: &[Dimension],
+    aliases: &std::collections::HashMap<String, String>,
+    names_by_id: &std::collections::HashMap<i64, String>,
+    ids: Option<Vec<i64>>,
+) -> Vec<String> {
+    if let Some(ids) = ids.filter(|ids| ids.len() == variable.shape.len()) {
+        let names = ids
+            .iter()
+            .map(|id| names_by_id.get(id).cloned())
+            .collect::<Option<Vec<_>>>();
+        if let Some(names) = names {
+            return names;
+        }
+    }
+    canonical_dimension_names(variable, dimensions, aliases)
+}
+
+fn dimension_scale_names(
+    file: &NcFile,
+    variables: &[GroupVariable<'_>],
+) -> std::collections::HashMap<i64, String> {
+    variables
+        .iter()
+        .filter(|entry| entry.variable.shape.len() == 1)
+        .filter_map(|entry| {
+            let id = read_integer_attribute(file, entry.variable, "_Netcdf4Dimid")?
+                .into_iter()
+                .next()?;
+            Some((id, entry.variable.name.clone()))
+        })
+        .collect()
+}
+
+fn read_integer_attribute(
+    file: &NcFile,
+    variable: &oxinetcdf::NcVariable,
+    name: &str,
+) -> Option<Vec<i64>> {
+    file.h5()
+        .attr_views(&variable.h5_path)
+        .ok()?
+        .into_iter()
+        .find(|attribute| attribute.name() == name)
+        .and_then(|attribute| {
+            oxinetcdf::NcAttribute::new(attribute.attr.clone())
+                .as_i64()
+                .ok()
+        })
 }
 
 fn coordinate_dimension_aliases(root: &NcGroup) -> std::collections::HashMap<String, String> {
@@ -1504,4 +1693,119 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     (year + i64::from(month <= 2), month, day)
+}
+
+#[cfg(test)]
+mod raw_dimension_axis_tests {
+    use super::resolve_plane_axes;
+
+    #[test]
+    fn compatible_coordinate_axes_take_precedence() {
+        assert_eq!(
+            resolve_plane_axes(
+                &["SAT_Tile_Height", "SAT_Tile_Width", "Kernel_Num"],
+                &[300, 600, 3],
+                Some((1, 2)),
+            ),
+            Some((1, 2))
+        );
+    }
+
+    #[test]
+    fn row_and_column_names_select_the_raw_plane() {
+        assert_eq!(
+            resolve_plane_axes(
+                &["SAT_Tile_Height", "SAT_Tile_Width", "Kernel_Num"],
+                &[300, 600, 3],
+                None,
+            ),
+            Some((0, 1))
+        );
+    }
+
+    #[test]
+    fn fallback_uses_final_non_time_depth_dimensions() {
+        assert_eq!(
+            resolve_plane_axes(
+                &["forecast_time", "dimension_a", "dimension_b"],
+                &[4, 5, 6],
+                None,
+            ),
+            Some((1, 2))
+        );
+    }
+
+    #[test]
+    fn axes_must_be_distinct_nonempty_and_match_the_shape() {
+        assert_eq!(resolve_plane_axes(&["row", "column"], &[2, 0], None), None);
+        assert_eq!(resolve_plane_axes(&["row", "column"], &[2], None), None);
+        assert_eq!(
+            resolve_plane_axes(&["a", "b"], &[2, 3], Some((1, 1))),
+            Some((0, 1))
+        );
+    }
+}
+
+#[cfg(test)]
+mod coordinate_cache_tests {
+    use super::NetCdf4Source;
+    use crate::data::{
+        DataSource,
+        slice::{Bounds, SliceRequest},
+    };
+    use std::{path::Path, sync::Arc};
+
+    #[test]
+    fn warm_axis_and_curvilinear_coordinate_reads_share_storage() {
+        for fixture in ["regular.nc4", "curvilinear.nc4"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture);
+            let source = NetCdf4Source::open(&path).expect("coordinate fixture opens");
+            let variable = source
+                .metadata
+                .variables
+                .iter()
+                .find(|variable| variable.numeric && variable.dimensions.len() >= 2)
+                .expect("fixture has a data variable");
+            let shape = variable
+                .dimensions
+                .iter()
+                .filter_map(|name| {
+                    source
+                        .metadata
+                        .dimensions
+                        .iter()
+                        .find(|dimension| dimension.name == *name)
+                })
+                .map(|dimension| dimension.length)
+                .collect::<Vec<_>>();
+            let request = SliceRequest {
+                variable: variable.name.clone(),
+                time: 0,
+                depth: 0,
+                bounds: Bounds::new(0, shape[shape.len() - 2], 0, shape[shape.len() - 1])
+                    .expect("fixture bounds"),
+            };
+            let first = source.read_slice(&request).expect("first slice read");
+            let second = source.read_slice(&request).expect("warm slice read");
+            let first_coordinates = first.coordinates.as_ref().expect("first coordinates");
+            let second_coordinates = second.coordinates.as_ref().expect("second coordinates");
+
+            assert!(Arc::ptr_eq(
+                first.coordinates.as_ref().unwrap(),
+                second.coordinates.as_ref().unwrap()
+            ));
+            assert_eq!(first_coordinates.latitude, second_coordinates.latitude);
+            assert_eq!(first_coordinates.longitude, second_coordinates.longitude);
+            assert_eq!(
+                first_coordinates.latitude_axis,
+                second_coordinates.latitude_axis
+            );
+            assert_eq!(
+                first_coordinates.longitude_axis,
+                second_coordinates.longitude_axis
+            );
+        }
+    }
 }

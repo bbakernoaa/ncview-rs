@@ -68,5 +68,35 @@ mod tests {
         assert!(names.contains("batlow"));
         assert!(names.contains("vik"));
         assert!(names.contains("roma"));
+        assert!(names.contains("managua"));
+        assert!(names.contains("bukavu"));
+        assert!(names.contains("bamo"));
+    }
+
+    #[test]
+    fn palette_category_classifies_built_in_and_crameri_maps() {
+        use super::super::colors::PaletteCategory;
+
+        assert_eq!(Palette::Viridis.category(), PaletteCategory::Sequential);
+        assert_eq!(Palette::CoolWarm.category(), PaletteCategory::Diverging);
+
+        let catalog = discover_colormaps();
+
+        let find_cat = |name: &str| {
+            catalog
+                .iter()
+                .find(|p| p.name().eq_ignore_ascii_case(name))
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .category()
+        };
+
+        assert_eq!(find_cat("batlow"), PaletteCategory::Sequential);
+        assert_eq!(find_cat("glasgow"), PaletteCategory::Sequential);
+        assert_eq!(find_cat("managua"), PaletteCategory::Diverging);
+        assert_eq!(find_cat("vanimo"), PaletteCategory::Diverging);
+        assert_eq!(find_cat("bukavu"), PaletteCategory::MultiSequential);
+        assert_eq!(find_cat("fes"), PaletteCategory::MultiSequential);
+        assert_eq!(find_cat("bamO"), PaletteCategory::Cyclic);
+        assert_eq!(find_cat("romaO"), PaletteCategory::Cyclic);
     }
 }

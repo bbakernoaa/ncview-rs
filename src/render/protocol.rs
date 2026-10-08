@@ -152,6 +152,21 @@ impl GraphicsRenderer {
         true
     }
 
+    /// Restore the configured initial interpolation mode and invalidate any
+    /// cached raster/protocol image that used the previous mode.
+    pub fn reset_filter(&mut self) {
+        self.resize_filter = if self.scientific_mode {
+            FilterType::Nearest
+        } else {
+            image_filter()
+        };
+        self.image = None;
+        self.image_key = None;
+        self.raster = None;
+        self.pending = None;
+        self.image_bytes = 0;
+    }
+
     /// Human-readable renderer mode for the dashboard header. This makes it
     /// obvious when a terminal is using a graphics protocol versus the cell fallback.
     pub fn mode_label(&self) -> &'static str {
@@ -172,10 +187,10 @@ impl GraphicsRenderer {
         }
         let key = image_hash(&image);
         let image_is_needed = self.image_key != Some(key)
-            && !self
+            && self
                 .pending
                 .as_ref()
-                .is_some_and(|pending| pending.key == key);
+                .is_none_or(|pending| pending.key != key);
         if image_is_needed {
             self.raster = Some((key, image));
         }
@@ -276,6 +291,30 @@ impl GraphicsRenderer {
     /// this to keep rendering while the old image remains on screen.
     pub fn has_pending_image(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Forget an overlay image when its popup closes. The next popup draw is
+    /// encoded afresh, and Kitty virtual placements are removed as Ratatui
+    /// replaces their placeholder cells with the map frame.
+    pub fn retire_overlay(&mut self) {
+        self.image = None;
+        self.image_key = None;
+        self.raster = None;
+        self.pending = None;
+        self.image_bytes = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stage_test_overlay_state(&mut self) {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        self.image_bytes = 12;
+        self.raster = Some((1, DynamicImage::new_rgb8(2, 2)));
+        self.pending = Some(PendingImage {
+            key: 2,
+            bytes: 8,
+            receiver,
+        });
     }
 
     /// Bytes retained by the current encoded image and the replacement being
@@ -406,20 +445,27 @@ impl ProtocolState {
         if picker.protocol_type() == ProtocolType::Halfblocks && iterm2_hint() {
             picker.set_protocol_type(ProtocolType::Iterm2);
         }
-        // Useful for terminals whose capability query is blocked by a
-        // multiplexer. The renderer still self-disables if the forced
-        // protocol cannot encode, so this is safe to experiment with.
-        if let Ok(forced) = env::var("NCVIEW_IMAGE_PROTOCOL") {
-            let protocol_type = match forced.to_ascii_lowercase().as_str() {
-                "kitty" => Some(ProtocolType::Kitty),
-                "sixel" => Some(ProtocolType::Sixel),
-                "iterm2" | "iterm" => Some(ProtocolType::Iterm2),
-                "cells" | "halfblocks" => Some(ProtocolType::Halfblocks),
-                _ => None,
-            };
-            if let Some(protocol_type) = protocol_type {
-                picker.set_protocol_type(protocol_type);
-            }
+        // Useful for terminals whose capability detection is unavailable (for
+        // example behind a multiplexer). Unknown values keep the detected
+        // protocol, and a requested protocol the detected terminal cannot
+        // render is downgraded below rather than emitting escape garbage.
+        if let Some(protocol_type) = env::var("NCVIEW_IMAGE_PROTOCOL")
+            .ok()
+            .as_deref()
+            .and_then(parse_protocol_override)
+        {
+            picker.set_protocol_type(protocol_type);
+        }
+        // Some terminals advertise themselves through the environment but do
+        // not implement every graphics protocol. WezTerm, for example, has no
+        // Kitty support: the unicode placeholder code points that carry the
+        // image render as literal glyphs, producing a field of garbage. Apply
+        // the downgrade after the override so an explicit (and unsupported)
+        // request still yields a working render instead of silently printing
+        // escape payloads.
+        let resolved = downgrade_unsupported(picker.protocol_type(), wezterm_hint());
+        if resolved != picker.protocol_type() {
+            picker.set_protocol_type(resolved);
         }
         let protocol = match picker.protocol_type() {
             ProtocolType::Kitty => ImageProtocol::Kitty,
@@ -428,6 +474,28 @@ impl ProtocolState {
             _ => ImageProtocol::Halfblocks,
         };
         Self { picker, protocol }
+    }
+}
+
+fn parse_protocol_override(forced: &str) -> Option<ProtocolType> {
+    match forced.to_ascii_lowercase().as_str() {
+        "kitty" => Some(ProtocolType::Kitty),
+        "sixel" => Some(ProtocolType::Sixel),
+        "iterm2" | "iterm" => Some(ProtocolType::Iterm2),
+        "cells" | "halfblocks" => Some(ProtocolType::Halfblocks),
+        _ => None,
+    }
+}
+
+/// Map a requested protocol to one the detected terminal can actually render.
+/// Kitty is the only protocol with a known-bad terminal here: WezTerm lacks the
+/// graphics protocol entirely, so fall back to Sixel (a truecolor raster path
+/// it does implement). Pure over the terminal hint so it is unit-testable.
+fn downgrade_unsupported(requested: ProtocolType, is_wezterm: bool) -> ProtocolType {
+    if requested == ProtocolType::Kitty && is_wezterm {
+        ProtocolType::Sixel
+    } else {
+        requested
     }
 }
 
@@ -451,4 +519,57 @@ fn iterm2_hint() -> bool {
     env::var("ITERM_SESSION_ID").is_ok_and(|value| !value.is_empty())
         || env::var("TERM_PROGRAM").is_ok_and(|value| value.to_ascii_lowercase().contains("iterm"))
         || env::var("LC_TERMINAL").is_ok_and(|value| value.to_ascii_lowercase().contains("iterm"))
+}
+
+/// WezTerm sets `TERM_PROGRAM=WezTerm` and exports `WEZTERM_EXECUTABLE` to
+/// every child process, so either marker is reliable even through shells that
+/// rewrite TERM.
+fn wezterm_hint() -> bool {
+    env::var("TERM_PROGRAM").is_ok_and(|value| value.to_ascii_lowercase().contains("wezterm"))
+        || env::var("WEZTERM_EXECUTABLE").is_ok_and(|value| !value.is_empty())
+        || env::var("WEZTERM_PANE").is_ok_and(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wezterm_downgrades_kitty_to_sixel() {
+        assert_eq!(
+            downgrade_unsupported(ProtocolType::Kitty, true),
+            ProtocolType::Sixel
+        );
+    }
+
+    #[test]
+    fn other_terminals_keep_kitty() {
+        assert_eq!(
+            downgrade_unsupported(ProtocolType::Kitty, false),
+            ProtocolType::Kitty
+        );
+    }
+
+    #[test]
+    fn wezterm_keeps_protocols_it_implements() {
+        for protocol in [
+            ProtocolType::Sixel,
+            ProtocolType::Iterm2,
+            ProtocolType::Halfblocks,
+        ] {
+            assert_eq!(downgrade_unsupported(protocol, true), protocol);
+        }
+    }
+
+    #[test]
+    fn override_names_parse_case_insensitively() {
+        assert_eq!(parse_protocol_override("KITTY"), Some(ProtocolType::Kitty));
+        assert_eq!(parse_protocol_override("Sixel"), Some(ProtocolType::Sixel));
+        assert_eq!(parse_protocol_override("iterm"), Some(ProtocolType::Iterm2));
+        assert_eq!(
+            parse_protocol_override("cells"),
+            Some(ProtocolType::Halfblocks)
+        );
+        assert_eq!(parse_protocol_override("bogus"), None);
+    }
 }

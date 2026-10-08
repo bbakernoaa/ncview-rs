@@ -72,6 +72,32 @@ fn variable_selection_advances_generation_and_emits_read_effect() {
 }
 
 #[test]
+fn switching_variables_discards_a_zoom_and_supersedes_pending_bounds() {
+    let mut state = AppState {
+        variables: vec![Variable {
+            name: "next_field".into(),
+            dimensions: vec!["row".into(), "column".into()],
+            numeric: true,
+            units: None,
+            long_name: None,
+            standard_name: None,
+        }],
+        ..AppState::default()
+    };
+    state.view.zoom_bounds = Some(Bounds::new(2, 4, 3, 6).unwrap());
+    let old_bounds_generation = state.view.bounds_generation;
+
+    state.reduce(Command::SelectVariableAt(0));
+
+    assert!(state.view.zoom_bounds.is_none());
+    assert_eq!(state.view.bounds_generation.0, old_bounds_generation.0 + 1);
+    assert!(matches!(
+        state.pending.back(),
+        Some(Effect::ReadSlice { variable, .. }) if variable == "next_field"
+    ));
+}
+
+#[test]
 fn variable_selection_moves_between_plottable_fields() {
     let mut state = AppState {
         variables: vec![
@@ -95,7 +121,9 @@ fn variable_selection_moves_between_plottable_fields() {
         ..AppState::default()
     };
     state.view.selected_variable = Some("MACCity".into());
-    state.reduce(Command::SelectVariable(0));
+    // The list is alphabetical, so MACCity sorts before Pixel_area; moving
+    // down from the first field lands on the second.
+    state.reduce(Command::SelectVariable(1));
     assert_eq!(state.view.selected_variable.as_deref(), Some("Pixel_area"));
 }
 
@@ -125,9 +153,11 @@ fn variable_browser_moves_without_loading_until_submit() {
     state.view.selected_variable = Some("temperature".into());
     state.reduce(Command::OpenVariableSearch);
 
-    assert!(state.reduce(Command::SelectVariable(1)).is_none());
+    // Alphabetical order is [humidity, temperature], so the cursor opens on
+    // temperature (index 1); moving up targets humidity without loading.
+    assert!(state.reduce(Command::SelectVariable(0)).is_none());
     assert_eq!(state.view.selected_variable.as_deref(), Some("temperature"));
-    assert_eq!(state.view.variable_browser_index, 1);
+    assert_eq!(state.view.variable_browser_index, 0);
 
     let effect = state.reduce(Command::SubmitVariableSearch);
     assert!(matches!(effect, Some(Effect::ReadSlice { .. })));
@@ -213,9 +243,13 @@ fn command_palette_filters_and_executes_actions() {
     state.reduce(Command::ActivatePoint);
     assert_eq!(
         state.view.palette,
-        ncview_rs::render::colors::Palette::Plasma
+        ncview_rs::render::colors::Palette::Viridis
     );
-    assert!(state.view.overlay.is_none());
+    assert_eq!(state.view.overlay, Some(Overlay::PalettePicker));
+    assert_eq!(
+        state.view.palette_picker.as_ref().unwrap().focused_palette,
+        ncview_rs::render::colors::Palette::Viridis
+    );
 }
 
 #[test]
@@ -422,14 +456,14 @@ fn input_mode_key_events_do_not_trigger_main_shortcuts() {
     let e_key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
     let c_key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
 
-    // In normal mode 'e' exports and 'c' cycles palette
+    // In normal mode 'e' exports and 'c' opens the palette chooser.
     assert_eq!(
         command_from_key_with_mode(e_key, InputMode::Normal),
         Some(Command::ExportCurrent)
     );
     assert_eq!(
         command_from_key_with_mode(c_key, InputMode::Normal),
-        Some(Command::CyclePalette)
+        Some(Command::OpenPalettePicker)
     );
 
     // In text overlay mode, 'e' and 'c' are captured as input characters
@@ -466,12 +500,66 @@ fn backspace_in_axis_draft_clears_or_pops_input() {
 fn execute_palette_choice_runs_specified_matching_entry() {
     let mut state = AppState::default();
     state.reduce(Command::OpenCommandPalette);
-    state.reduce(Command::ExecutePaletteChoice(1)); // 1 is "Cycle colormap"
+    state.reduce(Command::ExecutePaletteChoice(1)); // chooser action
     assert_eq!(
         state.view.palette,
-        ncview_rs::render::colors::Palette::Plasma
+        ncview_rs::render::colors::Palette::Viridis
     );
-    assert!(state.view.overlay.is_none());
+    assert_eq!(state.view.overlay, Some(Overlay::PalettePicker));
+    assert!(state.view.palette_picker.is_some());
+}
+
+#[test]
+fn keyboard_palette_picker_retains_focus_across_resize_and_supports_cancel_and_apply() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ncview_rs::{
+        events::input::{command_from_event_with_mode, command_from_key_with_mode},
+        render::colors::Palette,
+    };
+
+    let mut state = AppState::default();
+    state.view.palette = Palette::Viridis;
+    state.view.palette_catalog = vec![Palette::Viridis, Palette::Plasma, Palette::Magma];
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let open = command_from_key_with_mode(key(KeyCode::Char('c')), InputMode::Normal).unwrap();
+    state.reduce(open);
+    state.reduce(command_from_key_with_mode(key(KeyCode::Down), state.view.input_mode()).unwrap());
+    state.reduce(
+        command_from_key_with_mode(key(KeyCode::Char('v')), state.view.input_mode()).unwrap(),
+    );
+    let focused = Palette::Plasma.toggle_reversed();
+    assert_eq!(
+        state.view.palette_picker.as_ref().unwrap().focused_palette,
+        focused
+    );
+    state.reduce(
+        command_from_event_with_mode(
+            crossterm::event::Event::Resize(38, 9),
+            state.view.input_mode(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(state.view.palette, Palette::Viridis);
+    assert_eq!(
+        state.view.palette_picker.as_ref().unwrap().focused_palette,
+        focused
+    );
+    state.reduce(command_from_key_with_mode(key(KeyCode::Esc), state.view.input_mode()).unwrap());
+    assert_eq!(state.view.palette, Palette::Viridis);
+    assert!(state.view.palette_picker.is_none());
+
+    state.reduce(Command::OpenPalettePicker);
+    state.reduce(Command::MovePalettePicker(2));
+    state.reduce(
+        command_from_event_with_mode(
+            crossterm::event::Event::Resize(100, 30),
+            state.view.input_mode(),
+        )
+        .unwrap(),
+    );
+    state.reduce(command_from_key_with_mode(key(KeyCode::Enter), state.view.input_mode()).unwrap());
+    assert_eq!(state.view.palette, Palette::Magma);
+    assert!(state.view.palette_picker.is_none());
 }
 
 #[test]
@@ -611,4 +699,38 @@ fn palette_depth_entries_dispatch_depth_commands() {
 #[test]
 fn help_documents_the_level_bar() {
     assert!(ncview_rs::ui::help::help_text().contains("level bar"));
+}
+
+#[test]
+fn raw_dimension_keyboard_navigation_survives_terminal_resize() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ncview_rs::app::FixedDimension;
+
+    let mut state = AppState::default();
+    state.view.fixed_dimensions = vec![
+        FixedDimension {
+            name: "Retrieval".into(),
+            index: 0,
+            length: 2,
+        },
+        FixedDimension {
+            name: "Kernel_Num".into(),
+            index: 0,
+            length: 3,
+        },
+    ];
+    let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    for code in [KeyCode::Char('.'), KeyCode::Char('\''), KeyCode::Char('\'')] {
+        let command = ncview_rs::events::input::command_from_event(key(code)).unwrap();
+        state.reduce(command);
+    }
+    assert_eq!(state.view.focused_fixed_dimension, 1);
+    assert_eq!(state.view.fixed_dimensions[1].index, 2);
+
+    let resize = ncview_rs::events::input::command_from_event(Event::Resize(40, 7)).unwrap();
+    state.reduce(resize);
+    let layout = ncview_rs::ui::layout::dashboard(ratatui::layout::Rect::new(0, 0, 40, 7), false);
+    assert!(layout.constrained);
+    assert_eq!(state.view.fixed_dimensions[0].index, 0);
+    assert_eq!(state.view.fixed_dimensions[1].index, 2);
 }

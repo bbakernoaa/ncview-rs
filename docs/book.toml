@@ -1,0 +1,25 @@
+[book]
+title = "ncv — terminal scientific data viewer"
+authors = ["ncview-rs contributors"]
+description = "User guide, reference, and explanation for ncv"
+src = "."
+language = "en"
+
+[build]
+build-dir = "_site"
+
+[output.html]
+site-url = "/ncview-rs/"
+git-repository-url = "https://github.com/bbakernoaa/ncview-rs"
+edit-url-template = "https://github.com/bbakernoaa/ncview-rs/edit/main/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[preprocessor]
+
+[preprocessor.frontmatter]
+command = "python3 ../tools/docs/frontmatter_preprocessor.py"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

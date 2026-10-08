@@ -19,18 +19,23 @@ pub fn help_text() -> String {
   - / +         decrease / increase playback speed\n\
   { / }         previous / next file\n\
   [ / ]         previous / next depth slice\n\
+  , / .         select previous / next extra dimension\n\
+  ; / '         previous / next index in selected dimension\n\
   Tab           focus the sidebar level list (Tab/Esc leaves it)\n\
   Shift+arrows   pan the zoomed map\n\
-  c             cycle colormap\n\
+  c             choose colormap with preview\n\
   v             reverse colormap\n\
   i             cycle interpolation (set NCVIEW_SCIENTIFIC_RENDERING=0 to unlock)\n\
   e             export current slice (PNG + SVG + JSON)\n\
+  =             formula editor: derive variables, e.g. O3[1]-O3[2], mean(T)\n\
   a             automatic limits\n\
   l             edit min/max limits\n\
   f             mask data outside a range\n\
   s             toggle linear/log color scale\n\
   z             toggle current/global color scale\n\
-  r             reset zoom\n\
+  r             reset zoom to the full view\n\
+  R             reset variable settings and view\n\
+  Ctrl-P / :    command palette → Set view bounds\n\
   drag map      zoom to a rectangle; drag zoomed map to pan\n\
   Shift+drag    zoom again while already zoomed\n\
   g             logical/projected grid\n\
@@ -50,8 +55,12 @@ Mouse\n\
   wheel over the sidebar  scroll the level or variable list\n\
   right-click or ? closes this help\n\
 Command palette\n\
-  Ctrl-P or :   search actions, then Enter to run\n\
+  Ctrl-P / :    search actions, then Enter to run\n\
   /             browse and search all plottable variables\n\
+Colormap chooser\n\
+  ↑ / ↓         browse colormaps; preview follows focus\n\
+  Enter         apply focused colormap; Esc cancels\n\
+  v             reverse focused preview in chooser\n\
 Limits dialog: type numbers, Tab switches fields, Enter applies, Esc cancels"
         .to_string()
 }
@@ -81,4 +90,16 @@ pub fn render(frame: &mut Frame, area: Rect) {
             .block(theme::panel("󰋖  Help", theme::TEAL).title_top(theme::close_button())),
         popup,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn help_describes_palette_picker_controls() {
+        let text = super::help_text();
+        assert!(text.contains("c             choose colormap with preview"));
+        assert!(text.contains("↑ / ↓         browse colormaps"));
+        assert!(text.contains("Enter         apply focused colormap; Esc cancels"));
+        assert!(text.contains("v             reverse focused preview in chooser"));
+    }
 }

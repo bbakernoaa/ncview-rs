@@ -1,4 +1,5 @@
 use ndarray::Array2;
+use std::sync::Arc;
 
 use crate::error::{NcvError, Result};
 
@@ -224,7 +225,8 @@ pub struct Slice2D {
     pub validity: Array2<Validity>,
     pub source_bounds: Bounds,
     pub statistics: Option<Statistics>,
-    pub coordinates: Option<CoordinateGrid>,
+    pub coordinates: Option<Arc<CoordinateGrid>>,
+    pub is_diff: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -332,6 +334,7 @@ impl Slice2D {
             source_bounds,
             statistics,
             coordinates: None,
+            is_diff: false,
         })
     }
 
@@ -379,7 +382,11 @@ impl Slice2D {
         Self::with_statistics(values, validity, source_bounds, statistics)
     }
 
-    pub fn with_coordinates(mut self, coordinates: CoordinateGrid) -> Self {
+    pub fn with_coordinates(self, coordinates: CoordinateGrid) -> Self {
+        self.with_shared_coordinates(Arc::new(coordinates))
+    }
+
+    pub fn with_shared_coordinates(mut self, coordinates: Arc<CoordinateGrid>) -> Self {
         if !coordinates.is_empty()
             && coordinates
                 .latitude
@@ -414,7 +421,7 @@ impl Slice2D {
         )?;
         Self::with_statistics(values, validity, bounds, self.statistics).map(|mut slice| {
             if let Some(coordinates) = &self.coordinates {
-                slice.coordinates = Some(CoordinateGrid {
+                slice.coordinates = Some(Arc::new(CoordinateGrid {
                     latitude: coordinates
                         .latitude
                         .as_ref()
@@ -429,7 +436,7 @@ impl Slice2D {
                     // fallback rather than allocating a huge temporary grid.
                     latitude_axis: None,
                     longitude_axis: None,
-                });
+                }));
             }
             slice
         })

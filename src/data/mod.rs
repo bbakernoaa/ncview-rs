@@ -1,13 +1,17 @@
 //! Read-only dataset and slice abstractions.
 
+pub mod bounds;
 pub mod coordinates;
+pub mod diff;
 pub mod fixtures;
+pub mod formula;
 pub mod grib2;
 pub mod grib2_catalog;
 pub mod grib2_identity;
 pub mod grib2_index;
 pub mod grib2_manifest;
 pub mod grib2_types;
+pub mod manifest;
 pub mod mpas;
 pub mod netcdf3;
 pub mod netcdf4;
@@ -21,7 +25,7 @@ pub mod virtual_dataset;
 use std::{
     fs::File,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -33,6 +37,7 @@ pub enum DatasetFormat {
     NetCdf3,
     NetCdf4,
     Grib2,
+    VirtualManifest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,12 +81,6 @@ pub fn normalize_longitude(value: f64) -> f64 {
     } else {
         value
     }
-}
-
-pub fn is_mesh_variable(variable: &Variable) -> bool {
-    variable.dimensions.iter().any(|dimension| {
-        dimension.eq_ignore_ascii_case("nCells") || dimension.eq_ignore_ascii_case("nVertices")
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,18 +215,12 @@ pub fn open_with_grid(
             return mpas::MpasSource::open(path, grid_path);
         }
         Ok(Box::new(source) as Box<dyn DataSource>)
+    } else if manifest::is_manifest_file(path) {
+        manifest::ManifestSource::open(path).map(|source| Box::new(source) as Box<dyn DataSource>)
     } else {
         let source = netcdf4::NetCdf4Source::open(path)?;
-        if let Some(mesh) = mpas::detect(source.metadata()) {
-            let mut path_for_grid = grid_path;
-            if path_for_grid.is_none() {
-                path_for_grid = Some(path);
-            }
-            let wrapped = mpas::MpasSource::open(path, path_for_grid)
-                .map(|source| source as Box<dyn DataSource>)?;
-            if matches!(mesh, mpas::MeshLocation::Cell | mpas::MeshLocation::Vertex) {
-                return Ok(wrapped);
-            }
+        if mpas::detect(source.metadata()).is_some() {
+            return mpas::MpasSource::open(path, grid_path.or(Some(path)));
         }
         Ok(Box::new(source) as Box<dyn DataSource>)
     }
@@ -238,28 +231,30 @@ pub fn open_location(location: impl AsRef<str>) -> Result<Box<dyn DataSource>> {
     open_location_with_progress(location, &|_| true)
 }
 
-pub fn open_location_with_grid(
-    location: impl AsRef<str>,
-    grid: Option<&str>,
-) -> Result<Box<dyn DataSource>> {
-    let source = SourceLocation::parse(location.as_ref())?;
-    if source.is_remote() {
-        remote::open_remote_with_progress(source, &|_| true)
-    } else {
-        let path = source.local_path().expect("local source has a path");
-        let grid_path = grid.map(Path::new);
-        open_with_grid(path, grid_path)
-    }
-}
-
 pub fn open_location_with_progress(
     location: impl AsRef<str>,
     progress: &dyn Fn(&str) -> bool,
 ) -> Result<Box<dyn DataSource>> {
+    open_location_with_progress_and_grid(location, None, progress)
+}
+
+/// `grid` supplies MPAS coordinates from a separate file and applies to local sources only.
+pub fn open_location_with_progress_and_grid(
+    location: impl AsRef<str>,
+    grid: Option<&str>,
+    progress: &dyn Fn(&str) -> bool,
+) -> Result<Box<dyn DataSource>> {
     let source = SourceLocation::parse(location.as_ref())?;
     if source.is_remote() {
+        if let Some(grid) = grid {
+            return Err(crate::error::NcvError::InvalidDataset {
+                path: PathBuf::from(location.as_ref()),
+                reason: format!("--grid {grid} is not supported for remote sources"),
+            });
+        }
         remote::open_remote_with_progress(source, progress)
     } else {
-        open(source.local_path().expect("local source has a path"))
+        let path = source.local_path().expect("local source has a path");
+        open_with_grid(path, grid.map(Path::new))
     }
 }

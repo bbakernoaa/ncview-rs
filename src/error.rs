@@ -22,6 +22,8 @@ pub enum NcvError {
     UnsupportedVariable { variable: String, reason: String },
     #[error("invalid slice request: {0}")]
     InvalidSlice(String),
+    #[error("invalid formula: {0}")]
+    Formula(String),
     #[error("invalid byte range: {0}")]
     InvalidRange(String),
     #[error("terminal capability unavailable: {0}")]

@@ -2,8 +2,10 @@
 
 use std::{
     collections::HashMap,
+    env,
+    net::{IpAddr, SocketAddr, TcpStream},
     ops::Range,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant},
 };
 
@@ -13,7 +15,7 @@ use object_store::{GetOptions, ObjectMeta, ObjectStore, ObjectStoreExt, path::Pa
 use crate::{
     error::{NcvError, Result},
     storage::{
-        location::SourceLocation,
+        location::{Provider, SourceLocation},
         operation::{is_retryable_message, retry_delay},
     },
 };
@@ -245,6 +247,182 @@ impl ProviderStoreRegistry {
     }
 }
 
+/// Environment variable that forces credential-free (anonymous) access for
+/// public object stores, skipping the provider credential chain entirely.
+/// A truthy value forces anonymous access; any other value leaves the
+/// automatic decision (ambient credentials, then metadata-endpoint probe) in
+/// charge.
+pub const ANONYMOUS_ACCESS_ENV: &str = "NCVIEW_ANONYMOUS_ACCESS";
+
+/// Link-local address hosting the AWS, GCP, and Azure instance metadata
+/// services. Unreachable on laptops and most networks, where a credential
+/// chain that falls through to the metadata endpoint stalls on retries for
+/// every object request.
+const METADATA_LINK_LOCAL_IP: &str = "169.254.169.254";
+
+/// Budget for the single metadata-endpoint reachability probe. An unroutable
+/// link-local address fails immediately; a real metadata service answers well
+/// inside this window.
+const METADATA_PROBE_TIMEOUT: Duration = Duration::from_millis(800);
+
+fn env_value(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+/// Decide whether to use anonymous (unsigned, credential-free) access for a
+/// provider. The decision is pure so it can be tested without touching the
+/// process environment or the network.
+fn anonymous_access_decision(
+    forced: bool,
+    ambient_credentials: bool,
+    metadata_reachable: bool,
+) -> bool {
+    forced || !(ambient_credentials || metadata_reachable)
+}
+
+/// Environment keys that place a provider's credential chain on a named
+/// source other than the instance metadata endpoint, mirroring the ambient
+/// configuration the pinned object_store builders read.
+fn ambient_credential_env_vars(provider: Provider) -> &'static [&'static str] {
+    match provider {
+        Provider::S3 => &[
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_ROLE_ARN",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_SHARED_CREDENTIALS_FILE",
+        ],
+        Provider::Gcs => &[
+            "GOOGLE_SERVICE_ACCOUNT",
+            "SERVICE_ACCOUNT",
+            "GOOGLE_SERVICE_ACCOUNT_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_BEARER_TOKEN",
+        ],
+        Provider::Azure => &[
+            "AZURE_STORAGE_ACCOUNT_KEY",
+            "AZURE_STORAGE_TOKEN",
+            "AZURE_STORAGE_CLIENT_ID",
+            "AZURE_STORAGE_CLIENT_SECRET",
+            "AZURE_STORAGE_TENANT_ID",
+            "AZURE_STORAGE_SAS_KEY",
+            "AZURE_USE_AZURE_CLI",
+            "IDENTITY_ENDPOINT",
+        ],
+        Provider::Local => &[],
+    }
+}
+
+fn ambient_credentials_configured_with(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    provider: Provider,
+) -> bool {
+    ambient_credential_env_vars(provider)
+        .iter()
+        .any(|name| lookup(name).is_some())
+}
+
+fn ambient_credentials_configured(provider: Provider) -> bool {
+    ambient_credentials_configured_with(&env_value, provider)
+}
+
+fn explicit_anonymous_requested_with(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(ANONYMOUS_ACCESS_ENV).is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "y"
+        )
+    })
+}
+
+fn explicit_anonymous_requested() -> bool {
+    explicit_anonymous_requested_with(&env_value)
+}
+
+/// Parse a configured metadata endpoint (bare host, host:port, or absolute
+/// URL) into the address to probe.
+fn parse_endpoint_host_port(raw: &str) -> Option<(String, u16)> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = if raw.contains("://") {
+        raw.to_owned()
+    } else {
+        format!("http://{raw}")
+    };
+    let url = url::Url::parse(&candidate).ok()?;
+    let host = url.host_str()?.to_owned();
+    Some((host, url.port_or_known_default().unwrap_or(80)))
+}
+
+fn configured_metadata_endpoints_with(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, u16)> {
+    let mut endpoints = vec![(METADATA_LINK_LOCAL_IP.to_owned(), 80u16)];
+    for name in [
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+        "GCE_METADATA_HOST",
+        "GCE_METADATA_IP",
+        "MSI_ENDPOINT",
+        "IDENTITY_ENDPOINT",
+    ] {
+        if let Some(endpoint) = lookup(name).as_deref().and_then(parse_endpoint_host_port) {
+            endpoints.push(endpoint);
+        }
+    }
+    endpoints
+}
+
+/// Only literal addresses are probed: a custom endpoint behind a hostname is
+/// assumed to be a real metadata service, so the signed chain is kept.
+fn tcp_host_reachable(host: &str, port: u16, timeout: Duration) -> bool {
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return true;
+    };
+    TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok()
+}
+
+/// Cached reachability of the cloud instance metadata services. Opening a
+/// collection of sibling objects must pay the probe at most once per process.
+fn metadata_endpoint_reachable() -> bool {
+    static REACHABLE: OnceLock<bool> = OnceLock::new();
+    *REACHABLE.get_or_init(|| {
+        configured_metadata_endpoints_with(&env_value)
+            .iter()
+            .any(|(host, port)| tcp_host_reachable(host, *port, METADATA_PROBE_TIMEOUT))
+    })
+}
+
+/// Whether this provider should build an unsigned, credential-free store.
+/// Forced by [`ANONYMOUS_ACCESS_ENV`]; otherwise signed access is kept when
+/// ambient credentials are configured or the instance metadata service is
+/// reachable (an on-VM workload identity), and public anonymous access is used
+/// when neither applies.
+fn use_anonymous_access(provider: Provider) -> bool {
+    let forced = explicit_anonymous_requested();
+    let ambient = ambient_credentials_configured(provider);
+    let reachable = if forced || ambient {
+        false
+    } else {
+        metadata_endpoint_reachable()
+    };
+    anonymous_access_decision(forced, ambient, reachable)
+}
+
+/// Bound provider-internal retries so a missing or misconfigured credential
+/// chain surfaces in seconds instead of stalling for minutes per object.
+fn provider_retry_config() -> object_store::RetryConfig {
+    object_store::RetryConfig {
+        max_retries: 3,
+        retry_timeout: Duration::from_secs(10),
+        ..Default::default()
+    }
+}
+
 pub fn build_provider_store(source: &SourceLocation) -> Result<Arc<dyn ObjectStore>> {
     if !source.is_remote() {
         return Err(NcvError::remote_failure(
@@ -257,25 +435,32 @@ pub fn build_provider_store(source: &SourceLocation) -> Result<Arc<dyn ObjectSto
         NcvError::remote_failure(source.clone(), "provider", "remote container is missing")
     })?;
     install_crypto_provider();
+    let anonymous = use_anonymous_access(source.provider());
     let store: Arc<dyn ObjectStore> = match source.provider() {
-        crate::storage::location::Provider::S3 => Arc::new(
-            object_store::aws::AmazonS3Builder::from_env()
+        crate::storage::location::Provider::S3 => {
+            let mut builder = object_store::aws::AmazonS3Builder::from_env()
                 .with_bucket_name(container)
-                .build()
-                .map_err(|error| {
-                    NcvError::remote_failure(source.clone(), "provider", &error.to_string())
-                })?,
-        ),
-        crate::storage::location::Provider::Gcs => Arc::new(
-            object_store::gcp::GoogleCloudStorageBuilder::from_env()
+                .with_retry(provider_retry_config());
+            if anonymous {
+                builder = builder.with_skip_signature(true);
+            }
+            Arc::new(builder.build().map_err(|error| {
+                NcvError::remote_failure(source.clone(), "provider", &error.to_string())
+            })?)
+        }
+        crate::storage::location::Provider::Gcs => {
+            let mut builder = object_store::gcp::GoogleCloudStorageBuilder::from_env()
                 .with_bucket_name(container)
-                .build()
-                .map_err(|error| {
-                    NcvError::remote_failure(source.clone(), "provider", &error.to_string())
-                })?,
-        ),
-        crate::storage::location::Provider::Azure => Arc::new(
-            source
+                .with_retry(provider_retry_config());
+            if anonymous {
+                builder = builder.with_skip_signature(true);
+            }
+            Arc::new(builder.build().map_err(|error| {
+                NcvError::remote_failure(source.clone(), "provider", &error.to_string())
+            })?)
+        }
+        crate::storage::location::Provider::Azure => {
+            let mut builder = source
                 .azure_account()
                 .map_or_else(
                     object_store::azure::MicrosoftAzureBuilder::from_env,
@@ -284,11 +469,14 @@ pub fn build_provider_store(source: &SourceLocation) -> Result<Arc<dyn ObjectSto
                     },
                 )
                 .with_container_name(container)
-                .build()
-                .map_err(|error| {
-                    NcvError::remote_failure(source.clone(), "provider", &error.to_string())
-                })?,
-        ),
+                .with_retry(provider_retry_config());
+            if anonymous {
+                builder = builder.with_skip_signature(true);
+            }
+            Arc::new(builder.build().map_err(|error| {
+                NcvError::remote_failure(source.clone(), "provider", &error.to_string())
+            })?)
+        }
         crate::storage::location::Provider::Local => unreachable!(),
     };
     Ok(store)
@@ -536,5 +724,152 @@ impl RemoteStore {
             "range",
             "request exhausted its retry budget",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn map_lookup<'a>(map: &'a HashMap<String, String>) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            map.get(name)
+                .cloned()
+                .filter(|value| !value.trim().is_empty())
+        }
+    }
+
+    #[test]
+    fn anonymous_only_when_no_credentials_and_metadata_unreachable() {
+        assert!(anonymous_access_decision(false, false, false));
+        assert!(!anonymous_access_decision(false, true, false));
+        assert!(!anonymous_access_decision(false, false, true));
+        assert!(!anonymous_access_decision(false, true, true));
+    }
+
+    #[test]
+    fn forced_anonymous_overrides_credentials_and_metadata() {
+        assert!(anonymous_access_decision(true, false, false));
+        assert!(anonymous_access_decision(true, true, false));
+        assert!(anonymous_access_decision(true, false, true));
+        assert!(anonymous_access_decision(true, true, true));
+    }
+
+    #[test]
+    fn ambient_credentials_cover_each_provider_chain() {
+        let map = HashMap::from([
+            ("AWS_ACCESS_KEY_ID".to_owned(), "AKIA-example".to_owned()),
+            (
+                "GOOGLE_APPLICATION_CREDENTIALS".to_owned(),
+                "/tmp/adc.json".to_owned(),
+            ),
+            (
+                "AZURE_STORAGE_SAS_KEY".to_owned(),
+                "sv=2024-01-01".to_owned(),
+            ),
+        ]);
+        let lookup = map_lookup(&map);
+        assert!(ambient_credentials_configured_with(&lookup, Provider::S3));
+        assert!(ambient_credentials_configured_with(&lookup, Provider::Gcs));
+        assert!(ambient_credentials_configured_with(
+            &lookup,
+            Provider::Azure
+        ));
+        assert!(!ambient_credentials_configured_with(
+            &lookup,
+            Provider::Local
+        ));
+    }
+
+    #[test]
+    fn empty_ambient_credential_values_are_not_configured() {
+        let map = HashMap::from([
+            ("AWS_ACCESS_KEY_ID".to_owned(), "   ".to_owned()),
+            ("AWS_ROLE_ARN".to_owned(), String::new()),
+        ]);
+        let lookup = map_lookup(&map);
+        assert!(!ambient_credentials_configured_with(&lookup, Provider::S3));
+    }
+
+    #[test]
+    fn anonymous_env_flag_only_accepts_truthy_values() {
+        for truthy in ["1", "true", "TRUE", " yes ", "on", "y"] {
+            let map = HashMap::from([(ANONYMOUS_ACCESS_ENV.to_owned(), truthy.to_owned())]);
+            let lookup = map_lookup(&map);
+            assert!(
+                explicit_anonymous_requested_with(&lookup),
+                "{truthy:?} must force anonymous access"
+            );
+        }
+        for falsy in ["0", "false", "no", "off", "auto", "", "   "] {
+            let map = HashMap::from([(ANONYMOUS_ACCESS_ENV.to_owned(), falsy.to_owned())]);
+            let lookup = map_lookup(&map);
+            assert!(
+                !explicit_anonymous_requested_with(&lookup),
+                "{falsy:?} must keep automatic detection"
+            );
+        }
+        assert!(!explicit_anonymous_requested_with(&|_| None));
+    }
+
+    #[test]
+    fn metadata_endpoints_default_to_link_local_and_honor_config() {
+        let default = configured_metadata_endpoints_with(&|_| None);
+        assert_eq!(default, vec![("169.254.169.254".to_owned(), 80u16)]);
+
+        let map = HashMap::from([
+            (
+                "AWS_EC2_METADATA_SERVICE_ENDPOINT".to_owned(),
+                "http://169.254.170.2:1338".to_owned(),
+            ),
+            (
+                "GCE_METADATA_HOST".to_owned(),
+                "metadata.google.internal".to_owned(),
+            ),
+        ]);
+        let lookup = map_lookup(&map);
+        let endpoints = configured_metadata_endpoints_with(&lookup);
+        assert_eq!(endpoints[0], ("169.254.169.254".to_owned(), 80u16));
+        assert!(endpoints.contains(&("169.254.170.2".to_owned(), 1338u16)));
+        assert!(endpoints.contains(&("metadata.google.internal".to_owned(), 80u16)));
+    }
+
+    #[test]
+    fn endpoint_parsing_accepts_host_port_and_url() {
+        assert_eq!(
+            parse_endpoint_host_port("169.254.169.254"),
+            Some(("169.254.169.254".to_owned(), 80))
+        );
+        assert_eq!(
+            parse_endpoint_host_port("http://127.0.0.1:1338/"),
+            Some(("127.0.0.1".to_owned(), 1338))
+        );
+        assert_eq!(
+            parse_endpoint_host_port("127.0.0.1:1338"),
+            Some(("127.0.0.1".to_owned(), 1338))
+        );
+        assert_eq!(parse_endpoint_host_port("  "), None);
+    }
+
+    #[test]
+    fn probe_skips_named_hosts_and_fails_fast_on_unroutable_address() {
+        // A hostname is assumed to be a deliberate metadata configuration.
+        assert!(tcp_host_reachable(
+            "metadata.google.internal",
+            80,
+            Duration::from_millis(50)
+        ));
+        // The unroutable link-local address must not hang the probe budget.
+        let started = Instant::now();
+        let reachable = tcp_host_reachable(METADATA_LINK_LOCAL_IP, 80, Duration::from_millis(50));
+        assert!(!reachable || started.elapsed() < METADATA_PROBE_TIMEOUT * 4);
+    }
+
+    #[test]
+    fn provider_retries_are_bounded() {
+        let retry = provider_retry_config();
+        assert_eq!(retry.max_retries, 3);
+        assert_eq!(retry.retry_timeout, Duration::from_secs(10));
     }
 }

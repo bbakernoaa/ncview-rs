@@ -154,6 +154,24 @@ fn rapid_time_level_zoom_pan_and_resize_navigation_rejects_stale_results() {
         assert_eq!(state.view.slice.as_ref().unwrap().values[[0, 0]], 1.0);
     }
 
+    let delayed_generations = (0..100)
+        .map(|_| {
+            state.reduce(Command::MoveTime(1));
+            state.next_generation()
+        })
+        .collect::<Vec<_>>();
+    for generation in delayed_generations.iter().take(99).rev() {
+        assert!(!state.accept_slice(*generation, previous.clone()));
+    }
+    let newest = Slice2D::new(
+        arr2(&[[99.0, 2.0], [3.0, 4.0]]),
+        Array2::from_elem((2, 2), Validity::Finite),
+        Bounds::new(0, 2, 0, 2).unwrap(),
+    )
+    .unwrap();
+    assert!(state.accept_slice(*delayed_generations.last().unwrap(), newest));
+    assert_eq!(state.view.slice.as_ref().unwrap().values[[0, 0]], 99.0);
+
     let stale_plot = state.view.plot_generation;
     state.next_plot_generation();
     assert!(!state.accept_plot(

@@ -118,18 +118,27 @@ fn variable_search_command(key: KeyEvent) -> Option<Command> {
 
 fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
     command_palette_shortcut(key).or(match key.code {
+        KeyCode::Esc if overlay == Overlay::ViewBounds => Some(Command::CancelViewBounds),
+        KeyCode::Esc if overlay == Overlay::PalettePicker => Some(Command::CancelPalettePicker),
         KeyCode::Esc => Some(Command::Quit),
         KeyCode::Enter => Some(match overlay {
             Overlay::CommandPalette => Command::ExecuteCommandPalette,
+            Overlay::PalettePicker => Command::CommitPalettePicker,
+            Overlay::ViewBounds => Command::ApplyViewBounds,
             Overlay::Limits | Overlay::Filter => Command::ApplyLimitDraft,
+            Overlay::Formula => Command::SubmitFormula,
             _ => Command::ActivatePoint,
         }),
+        KeyCode::Delete if overlay == Overlay::Formula => Some(Command::RemoveFormula),
         KeyCode::Tab | KeyCode::Backspace => Some(match key.code {
             KeyCode::Tab => Command::NextLimitField,
             _ => Command::DeleteInput,
         }),
         KeyCode::Up => Some(text_overlay_direction(overlay, -1)),
         KeyCode::Down => Some(text_overlay_direction(overlay, 1)),
+        KeyCode::Char('v') if overlay == Overlay::PalettePicker => {
+            Some(Command::TogglePalettePickerReverse)
+        }
         KeyCode::Char(character) => Some(Command::InputChar(character)),
         _ => None,
     })
@@ -138,7 +147,9 @@ fn text_overlay_command(key: KeyEvent, overlay: Overlay) -> Option<Command> {
 fn text_overlay_direction(overlay: Overlay, direction: isize) -> Command {
     match overlay {
         Overlay::CommandPalette => Command::PaletteMove(direction),
+        Overlay::PalettePicker => Command::MovePalettePicker(direction),
         Overlay::Axis => Command::CycleAxis(direction),
+        Overlay::Formula => Command::FormulaMove(direction),
         _ => Command::NextLimitField,
     }
 }
@@ -171,6 +182,10 @@ fn help_command(key: KeyEvent) -> Option<Command> {
 fn sidebar_command(key: KeyEvent) -> Option<Command> {
     match key.code {
         KeyCode::Tab | KeyCode::Esc => Some(Command::ToggleSidebarFocus),
+        KeyCode::Char(',') => Some(Command::CycleFixedDimension(-1)),
+        KeyCode::Char('.') => Some(Command::CycleFixedDimension(1)),
+        KeyCode::Char(';') => Some(Command::MoveFixedDimension(-1)),
+        KeyCode::Char('\'') => Some(Command::MoveFixedDimension(1)),
         KeyCode::Enter => Some(Command::ApplyDepthCursor),
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('[') => Some(Command::MoveDepthCursor(-1)),
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char(']') => {
@@ -212,7 +227,11 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char('+') => Some(Command::IncreasePlaybackSpeed),
         KeyCode::Char('[') => Some(Command::MoveDepth(-1)),
         KeyCode::Char(']') => Some(Command::MoveDepth(1)),
-        KeyCode::Char('c') => Some(Command::CyclePalette),
+        KeyCode::Char(',') => Some(Command::CycleFixedDimension(-1)),
+        KeyCode::Char('.') => Some(Command::CycleFixedDimension(1)),
+        KeyCode::Char(';') => Some(Command::MoveFixedDimension(-1)),
+        KeyCode::Char('\'') => Some(Command::MoveFixedDimension(1)),
+        KeyCode::Char('c') => Some(Command::OpenPalettePicker),
         KeyCode::Char('v') => Some(Command::TogglePaletteReverse),
         KeyCode::Char('i') => Some(Command::CycleImageFilter),
         KeyCode::Char('e') => Some(Command::ExportCurrent),
@@ -226,6 +245,7 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char('k') => Some(Command::SetPlotKind(crate::app::PlotKind::Cdf)),
         KeyCode::Char('u') => Some(Command::SetPlotKind(crate::app::PlotKind::VerticalProfile)),
         KeyCode::Char('r') => Some(Command::ResetZoom),
+        KeyCode::Char('R') => Some(Command::ResetVariableView),
         KeyCode::Char('x') => Some(Command::OpenAxisOverlay),
         KeyCode::Enter => Some(Command::ActivatePoint),
         KeyCode::Char('g') => Some(Command::ToggleGridMode),
@@ -236,6 +256,7 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char(' ') => Some(Command::TogglePlayback),
         KeyCode::Char('{') => Some(Command::PreviousFile),
         KeyCode::Char('}') => Some(Command::NextFile),
+        KeyCode::Char('=') => Some(Command::OpenFormulaEditor),
         KeyCode::Tab => Some(Command::ToggleSidebarFocus),
         KeyCode::Backspace => Some(Command::DeleteInput),
         KeyCode::Char(character) => Some(Command::InputChar(character)),
@@ -301,6 +322,14 @@ mod tests {
             command_from_key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE)),
             Some(Command::NextFile)
         );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(Command::ResetZoom)
+        );
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some(Command::ResetVariableView)
+        );
     }
 
     #[test]
@@ -314,6 +343,58 @@ mod tests {
             command_from_key_with_mode(enter, InputMode::TextOverlay(Overlay::Filter)),
             Some(Command::ApplyLimitDraft)
         );
+    }
+
+    #[test]
+    fn formula_editor_keys_edit_and_submit() {
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE)),
+            Some(Command::OpenFormulaEditor)
+        );
+        let mode = InputMode::TextOverlay(Overlay::Formula);
+        let map = |code| command_from_key_with_mode(KeyEvent::new(code, KeyModifiers::NONE), mode);
+        assert_eq!(map(KeyCode::Enter), Some(Command::SubmitFormula));
+        assert_eq!(map(KeyCode::Up), Some(Command::FormulaMove(-1)));
+        assert_eq!(map(KeyCode::Down), Some(Command::FormulaMove(1)));
+        assert_eq!(map(KeyCode::Delete), Some(Command::RemoveFormula));
+        assert_eq!(map(KeyCode::Char('q')), Some(Command::InputChar('q')));
+        assert_eq!(map(KeyCode::Esc), Some(Command::Quit));
+    }
+
+    #[test]
+    fn palette_picker_keys_open_navigate_apply_cancel_and_reverse_draft() {
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Some(Command::OpenPalettePicker)
+        );
+        let mode = InputMode::TextOverlay(Overlay::PalettePicker);
+        let map = |code| command_from_key_with_mode(KeyEvent::new(code, KeyModifiers::NONE), mode);
+        assert_eq!(map(KeyCode::Up), Some(Command::MovePalettePicker(-1)));
+        assert_eq!(map(KeyCode::Down), Some(Command::MovePalettePicker(1)));
+        assert_eq!(map(KeyCode::Enter), Some(Command::CommitPalettePicker));
+        assert_eq!(map(KeyCode::Esc), Some(Command::CancelPalettePicker));
+        assert_eq!(
+            map(KeyCode::Char('v')),
+            Some(Command::TogglePalettePickerReverse)
+        );
+        assert_eq!(map(KeyCode::Char('p')), Some(Command::InputChar('p')));
+        assert_eq!(map(KeyCode::Backspace), Some(Command::DeleteInput));
+        assert_eq!(
+            command_from_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
+            Some(Command::TogglePaletteReverse)
+        );
+    }
+
+    #[test]
+    fn numeric_view_bounds_overlay_uses_tab_enter_and_escape() {
+        let mode = InputMode::TextOverlay(Overlay::ViewBounds);
+        let map = |code| command_from_key_with_mode(KeyEvent::new(code, KeyModifiers::NONE), mode);
+        assert_eq!(map(KeyCode::Tab), Some(Command::NextLimitField));
+        assert_eq!(map(KeyCode::Enter), Some(Command::ApplyViewBounds));
+        assert_eq!(map(KeyCode::Esc), Some(Command::CancelViewBounds));
+        assert_eq!(map(KeyCode::Char('+')), Some(Command::InputChar('+')));
+        assert_eq!(map(KeyCode::Char(' ')), Some(Command::InputChar(' ')));
+        assert_eq!(map(KeyCode::Backspace), Some(Command::DeleteInput));
     }
 
     #[test]
@@ -340,6 +421,22 @@ mod tests {
         assert_eq!(map(KeyCode::Enter), Some(Command::ApplyDepthCursor));
         assert_eq!(map(KeyCode::Tab), Some(Command::ToggleSidebarFocus));
         assert_eq!(map(KeyCode::Esc), Some(Command::ToggleSidebarFocus));
+        assert_eq!(
+            map(KeyCode::Char(',')),
+            Some(Command::CycleFixedDimension(-1))
+        );
+        assert_eq!(
+            map(KeyCode::Char('.')),
+            Some(Command::CycleFixedDimension(1))
+        );
+        assert_eq!(
+            map(KeyCode::Char(';')),
+            Some(Command::MoveFixedDimension(-1))
+        );
+        assert_eq!(
+            map(KeyCode::Char('\'')),
+            Some(Command::MoveFixedDimension(1))
+        );
     }
 
     #[test]

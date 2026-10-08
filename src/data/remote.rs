@@ -163,11 +163,35 @@ pub fn open_remote_with_store_progress(
                 bounded_fallback: identity.size() <= 64 * 1024 * 1024,
             },
         )
+    } else if is_manifest(&source, &magic) {
+        let full_range = ByteRange::new(0, identity.size(), identity.size())?;
+        let bytes = receive(&runtime, {
+            let remote = Arc::clone(&remote);
+            let identity = identity.clone();
+            async move { remote.read_range(&identity, full_range).await }
+        })??;
+        let json_text = String::from_utf8_lossy(&bytes);
+        let manifest_source = super::manifest::ManifestSource::from_json_str(
+            &json_text,
+            source.safe_display(),
+            std::path::PathBuf::from("."),
+            true,
+        )?;
+        (
+            Box::new(manifest_source) as Box<dyn DataSource>,
+            AccessCapabilities {
+                range_reads: true,
+                chunked_reads: false,
+                sidecar_index: false,
+                curvilinear_coordinates: false,
+                bounded_fallback: true,
+            },
+        )
     } else {
         Err(NcvError::remote_failure(
             source,
             "format detection",
-            "object is neither a supported GRIB2 object nor a NetCDF-4/HDF5 object",
+            "object is neither a supported GRIB2 object, NetCDF-4/HDF5 object, nor VirtualiZarr/Icechunk manifest",
         ))?
     };
     Ok(Box::new(RemoteDatasetSession::new(
@@ -183,6 +207,17 @@ fn report(progress: &dyn Fn(&str) -> bool, message: &str) -> Result<()> {
     } else {
         Err(NcvError::WorkerStopped)
     }
+}
+
+fn is_manifest(source: &SourceLocation, magic: &[u8]) -> bool {
+    source
+        .object_key()
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| {
+            matches!(extension.to_ascii_lowercase().as_str(), "json" | "manifest")
+        })
+        || magic.starts_with(b"{")
+        || magic.starts_with(b"[")
 }
 
 fn is_grib2(source: &SourceLocation, magic: &[u8]) -> bool {

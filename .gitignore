@@ -2,6 +2,16 @@
 /target/
 **/*.rs.bk
 
+# mdBook site output
+docs/_site/
+
+# Locally vendored tool binaries (see tools/docs/TOOLING.md)
+tools/bin/
+
+# Python tooling caches
+__pycache__/
+*.pyc
+
 # Local datasets and generated presentation exports
 *.nc
 *.nc4
@@ -33,6 +43,7 @@ coverage/
 .agents/
 specs/
 .specify/
+docs/superpowers/
 
 *.grib2
 *.grib

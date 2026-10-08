@@ -1,9 +1,10 @@
 use super::chart;
 use crate::app::{
     AxisField, COMMAND_PALETTE, LimitField, Overlay, PlotAxisField, PlotKind, PlotXAxis, PlotYAxis,
-    ViewModel, palette_matches,
+    ViewModel, palette_catalog_matches, palette_matches,
 };
 use crate::data::{DatasetMetadata, Variable};
+use crate::render::colors::Palette;
 use crate::render::protocol::GraphicsRenderer;
 use ratatui::{
     Frame,
@@ -24,11 +25,12 @@ pub fn render(
     area: Rect,
     view: &ViewModel,
     metadata: &DatasetMetadata,
+    plottable: &[Variable],
     variable_query: &str,
     chart_graphics: Option<&mut GraphicsRenderer>,
 ) {
     if view.variable_search_active {
-        render_variable_browser(frame, area, view, metadata, variable_query);
+        render_variable_browser(frame, area, view, plottable, variable_query);
         return;
     }
     let Some(overlay) = view.overlay else { return };
@@ -39,6 +41,9 @@ pub fn render(
         Overlay::TimeSeries => "Time series",
         Overlay::Plot => "Plot",
         Overlay::CommandPalette => "Command Palette",
+        Overlay::Formula => "Formula editor",
+        Overlay::PalettePicker => "Colormap",
+        Overlay::ViewBounds => "Set view bounds",
     };
     let message = match overlay {
         Overlay::Limits => "Type to replace the selected value; Tab switches fields",
@@ -47,29 +52,26 @@ pub fn render(
         Overlay::TimeSeries => "Values across the time dimension",
         Overlay::Plot => "Choose a plot and its axes",
         Overlay::CommandPalette => "Type to filter commands; Enter runs the selected action",
+        Overlay::Formula => "Combine variables with arithmetic and functions",
+        Overlay::PalettePicker => "Choose a colormap; Enter applies it",
+        Overlay::ViewBounds => "Enter x/y coordinate bounds for the displayed region",
     };
-    let width = if matches!(overlay, Overlay::CommandPalette | Overlay::Plot) {
+    let large = matches!(
+        overlay,
+        Overlay::CommandPalette | Overlay::Plot | Overlay::Formula | Overlay::PalettePicker
+    );
+    let width = if large {
         area.width.saturating_mul(3) / 4
     } else {
         area.width.saturating_mul(3) / 5
     };
-    let height = if matches!(overlay, Overlay::CommandPalette | Overlay::Plot) {
+    let height = if large {
         area.height.saturating_mul(3) / 5
     } else {
         area.height.saturating_mul(2) / 5
     };
-    let popup = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    };
-    let shadow = Rect {
-        x: popup.x.saturating_add(1),
-        y: popup.y.saturating_add(1),
-        width: popup.width,
-        height: popup.height,
-    };
+    let popup = overlay_popup_rect(area, overlay, width, height);
+    let shadow = popup_shadow_rect(area, popup);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         ratatui::widgets::Block::default().style(Style::default().bg(theme::SHADOW)),
@@ -98,6 +100,8 @@ pub fn render(
             Paragraph::new(lines.join("\n")).block(popup_panel(title, theme::MAUVE)),
             popup,
         );
+    } else if matches!(overlay, Overlay::PalettePicker) {
+        render_palette_picker(frame, popup, title, view);
     } else if matches!(overlay, Overlay::Limits | Overlay::Filter) {
         let draft = view.limit_draft.as_ref();
         let min = draft.map_or("".to_string(), |draft| draft.min.clone());
@@ -130,6 +134,29 @@ pub fn render(
         );
         frame.render_widget(
             Paragraph::new(text).block(popup_panel(title, theme::PEACH)),
+            popup,
+        );
+    } else if overlay == Overlay::ViewBounds {
+        let draft = view.view_bounds_draft.as_ref();
+        let labels = ["Min X", "Max X", "Min Y", "Max Y"];
+        let mut lines = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let active = draft.is_some_and(|draft| draft.active == index);
+                let value = draft.map_or("", |draft| draft.fields[index].as_str());
+                format!("{label}: [{}{}]", if active { "> " } else { "  " }, value)
+            })
+            .collect::<Vec<_>>();
+        lines.push("Type replaces   Backspace edits".into());
+        lines.push("Tab next field   Enter apply   Esc cancel".into());
+        if let Some(error) = draft.and_then(|draft| draft.error.as_deref()) {
+            lines.push(error.to_string());
+        }
+        frame.render_widget(
+            Paragraph::new(lines.join("\n"))
+                .wrap(Wrap { trim: false })
+                .block(popup_panel(title, theme::MAUVE)),
             popup,
         );
     } else if matches!(overlay, Overlay::Axis) {
@@ -168,6 +195,8 @@ pub fn render(
         );
     } else if matches!(overlay, Overlay::Plot) {
         render_plot(frame, popup, view, chart_graphics);
+    } else if matches!(overlay, Overlay::Formula) {
+        render_formula_editor(frame, popup, view, plottable);
     } else if matches!(overlay, Overlay::TimeSeries) {
         let series = plot_series_for_view(view);
         chart::render_plot(
@@ -187,6 +216,183 @@ pub fn render(
             popup,
         );
     }
+}
+
+fn overlay_popup_rect(area: Rect, overlay: Overlay, width: u16, height: u16) -> Rect {
+    if overlay == Overlay::PalettePicker && (area.width < 54 || area.height < 12) {
+        return area;
+    }
+    if overlay == Overlay::ViewBounds && (area.width < 52 || area.height < 14) {
+        return area;
+    }
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+fn popup_shadow_rect(area: Rect, popup: Rect) -> Rect {
+    let x = popup.x.saturating_add(1).max(area.x);
+    let y = popup.y.saturating_add(1).max(area.y);
+    Rect::new(
+        x,
+        y,
+        popup
+            .width
+            .min(area.x.saturating_add(area.width).saturating_sub(x)),
+        popup
+            .height
+            .min(area.y.saturating_add(area.height).saturating_sub(y)),
+    )
+}
+
+pub fn picker_popup_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(3) / 4;
+    let height = area.height.saturating_mul(3) / 5;
+    overlay_popup_rect(area, Overlay::PalettePicker, width, height)
+}
+
+fn render_palette_picker(frame: &mut Frame, popup: Rect, title: &str, view: &ViewModel) {
+    let block = popup_panel(title, theme::MAUVE);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let focused = view
+        .palette_picker
+        .as_ref()
+        .map(|picker| &picker.focused_palette);
+    let query = view
+        .palette_picker
+        .as_ref()
+        .map_or("", |picker| picker.query.as_str());
+    let matches = palette_catalog_matches(&view.palette_catalog, query);
+    let focus_index = focused
+        .and_then(|palette| {
+            matches
+                .iter()
+                .position(|&index| palette_identity_eq(&view.palette_catalog[index], palette))
+        })
+        .unwrap_or(0);
+    let compact = inner.width < 54 || inner.height < 7;
+    let (list_area, preview_area, instruction_area, search_area) = if compact {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ])
+            .split(inner);
+        (sections[1], None, sections[2], sections[0])
+    } else {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(2),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        (sections[1], Some(sections[2]), sections[3], sections[0])
+    };
+    let mut rendered_lines: Vec<Line<'static>> = Vec::new();
+    let mut focused_line_index = 0;
+    let mut current_category = None;
+
+    if matches.is_empty() {
+        rendered_lines.push(Line::from(if query.is_empty() {
+            "No colormaps available"
+        } else {
+            "No colormaps match this search"
+        }));
+    } else {
+        for (pos, &catalog_idx) in matches.iter().enumerate() {
+            let palette = &view.palette_catalog[catalog_idx];
+            let cat = palette.category();
+            if current_category != Some(cat) {
+                current_category = Some(cat);
+                let header_text = format!("── {} ──", cat.name());
+                rendered_lines.push(Line::from(Span::styled(
+                    header_text,
+                    theme::title_style(theme::TEAL),
+                )));
+            }
+
+            if pos == focus_index {
+                focused_line_index = rendered_lines.len();
+            }
+
+            let is_focused = focused.is_some_and(|focused| palette_identity_eq(palette, focused));
+            let is_applied = palette_identity_eq(palette, &view.palette);
+            let marker = if is_focused { ">" } else { " " };
+            let state = match (is_applied, is_focused) {
+                (true, true) => "applied, focused",
+                (true, false) => "applied",
+                (false, true) => "focused",
+                (false, false) => "",
+            };
+            let reversed = is_focused && focused.is_some_and(|focused| focused.is_reversed());
+            let line_str = format!(
+                "{marker} {:<24} {state}{}",
+                palette.name(),
+                if reversed { ", reversed" } else { "" }
+            );
+
+            let style = if is_focused {
+                theme::title_style(theme::TEXT)
+            } else {
+                theme::muted_style()
+            };
+            rendered_lines.push(Line::from(Span::styled(line_str, style)));
+        }
+    }
+
+    let total_lines = rendered_lines.len();
+    let visible_height = usize::from(list_area.height);
+    let start_line = visible_palette_start(total_lines, focused_line_index, visible_height);
+    let end_line = (start_line + visible_height).min(total_lines);
+
+    let visible_lines = if start_line < end_line {
+        rendered_lines[start_line..end_line].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Search: {query}  {} / {} palettes",
+            matches.len(),
+            view.palette_catalog.len()
+        )),
+        search_area,
+    );
+    frame.render_widget(
+        Paragraph::new(visible_lines).wrap(Wrap { trim: true }),
+        list_area,
+    );
+    if let (Some(focused), Some(preview_area)) = (focused, preview_area) {
+        super::colorbar::render_preview(frame, preview_area, focused, view.limits, view.scale_mode);
+    }
+    let instructions = if compact {
+        "↑↓ browse  Enter apply\nEsc cancel  v reverse"
+    } else {
+        "↑↓ choose   v reverse   Enter apply   Esc cancel"
+    };
+    frame.render_widget(Paragraph::new(instructions), instruction_area);
+}
+
+fn visible_palette_start(total: usize, focus: usize, visible: usize) -> usize {
+    if total <= visible || visible == 0 {
+        0
+    } else {
+        focus.saturating_sub(visible / 2).min(total - visible)
+    }
+}
+
+fn palette_identity_eq(left: &Palette, right: &Palette) -> bool {
+    left.name() == right.name()
 }
 
 fn render_plot(
@@ -302,6 +508,71 @@ Tab switches axes  •  ↑↓/←→ changes the selected axis  •  m adds/rem
     );
 }
 
+fn render_formula_editor(frame: &mut Frame, popup: Rect, view: &ViewModel, plottable: &[Variable]) {
+    let heading = |text: &'static str| Span::styled(text, theme::title_style(theme::TEAL));
+    let mut lines = vec![Line::from(heading("Datasets"))];
+    if view.formula_datasets.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  [1] current dataset",
+            theme::muted_style(),
+        )));
+    }
+    for (index, dataset) in view.formula_datasets.iter().enumerate() {
+        lines.push(Line::from(Span::styled(
+            format!("  [{}] {dataset}", index + 1),
+            theme::muted_style(),
+        )));
+    }
+    let names = plottable
+        .iter()
+        .map(|variable| variable.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    lines.push(Line::from(vec![
+        heading("Variables: "),
+        Span::styled(names, theme::muted_style()),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        heading("Formula: "),
+        Span::styled(
+            format!("> {}█", view.formula_draft),
+            theme::title_style(theme::TEXT),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(heading("Defined formulas")));
+    if view.formulas.is_empty() {
+        lines.push(Line::from(Span::styled("  none yet", theme::muted_style())));
+    }
+    for (index, formula) in view.formulas.iter().enumerate() {
+        let selected = view.formula_index == Some(index);
+        lines.push(Line::from(Span::styled(
+            format!("{} {formula}", if selected { "▶" } else { " " }),
+            if selected {
+                theme::title_style(theme::TEXT)
+            } else {
+                theme::muted_style()
+            },
+        )));
+    }
+    lines.push(Line::from(""));
+    for help in [
+        "Operators: + - * / ^ (or **)   Functions: sin cos tan log(ln) log10 exp sqrt abs",
+        "Per-cell over time: mean sum min max   over layers: layer_mean layer_sum layer_min layer_max",
+        "NAME[n] reads dataset n; prefix with name = to label the result",
+        "Enter plot   ↑↓ recall   Del remove recalled   Esc close",
+    ] {
+        lines.push(Line::from(Span::styled(help, theme::muted_style())));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(popup_panel("Formula editor", theme::TEAL)),
+        popup,
+    );
+}
+
 fn plot_series_for_view(view: &ViewModel) -> Vec<crate::app::PlotSeries> {
     if view.plot_series.is_empty() {
         vec![crate::app::PlotSeries {
@@ -319,7 +590,7 @@ fn render_variable_browser(
     frame: &mut Frame,
     area: Rect,
     view: &ViewModel,
-    metadata: &DatasetMetadata,
+    plottable: &[Variable],
     variable_query: &str,
 ) {
     let width = area.width.saturating_mul(4).saturating_div(5).max(1);
@@ -344,16 +615,9 @@ fn render_variable_browser(
 
     let block = popup_panel("Variables", theme::MAUVE);
     let inner = block.inner(popup);
-    let plottable = metadata
-        .variables
-        .iter()
-        .filter(|variable| {
-            variable.numeric
-                && (crate::data::is_mesh_variable(variable) || variable.dimensions.len() >= 2)
-        })
-        .cloned()
-        .collect::<Vec<Variable>>();
-    let filtered = sidebar::filter_variables(&plottable, variable_query);
+    // The browser lists exactly the selectable set (the cross-file plottable
+    // union), so a click or Enter always resolves to the row that is shown.
+    let filtered = sidebar::filter_variables(plottable, variable_query);
     let selected = view
         .variable_browser_index
         .min(filtered.len().saturating_sub(1));
@@ -453,4 +717,374 @@ fn visible_window_start(entries: &[Vec<Line<'_>>], selected: usize, height: usiz
         used += entries[start].len();
     }
     start
+}
+
+#[cfg(test)]
+mod palette_picker_tests {
+    use super::render;
+    use crate::{
+        app::{AppState, Overlay, PalettePickerState},
+        data::{DatasetFormat, DatasetMetadata},
+        render::colors::{Palette, ScaleMode},
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn picker_popup_shows_applied_and_focused_palette_preview_and_controls() {
+        let mut state = AppState::default();
+        state.view.palette = Palette::Viridis;
+        state.view.palette_catalog = vec![Palette::Viridis, Palette::Plasma];
+        state.view.palette_picker = Some(PalettePickerState {
+            focused_palette: Palette::Plasma,
+            query: String::new(),
+        });
+        state.view.overlay = Some(Overlay::PalettePicker);
+        state.view.limits = Some((0.0, 10.0));
+        state.view.scale_mode = ScaleMode::Linear;
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<String>();
+        assert!(text.contains("Sequential"));
+        assert!(text.contains("Viridis"));
+        assert!(text.contains("Plasma"));
+        assert!(text.contains("applied"));
+        assert!(text.contains("focused"));
+        assert!(text.contains("Enter"));
+        assert!(text.contains("Esc"));
+        assert!(text.contains("v reverse"));
+        assert!(text.contains("linear"));
+        assert!(text.contains("10"));
+        let first_sample = Palette::Plasma.sample(0.0);
+        assert!(buffer.content().iter().any(|cell| {
+            cell.style().bg
+                == Some(ratatui::style::Color::Rgb(
+                    first_sample[0],
+                    first_sample[1],
+                    first_sample[2],
+                ))
+        }));
+    }
+
+    #[test]
+    fn long_picker_catalog_scrolls_focus_into_view_and_small_popup_keeps_text_controls() {
+        use crate::render::colors::ScientificColorMap;
+        use std::sync::Arc;
+
+        let choices = (0..24)
+            .map(|index| {
+                Palette::Custom(Arc::new(ScientificColorMap {
+                    name: format!("Choice{index:02}"),
+                    colors: vec![[12, 34, 56], [200, 201, 202]],
+                }))
+            })
+            .collect::<Vec<_>>();
+        let mut state = AppState::default();
+        state.view.palette = choices[0].clone();
+        state.view.palette_catalog = choices.clone();
+        state.view.palette_picker = Some(PalettePickerState {
+            focused_palette: choices[20].clone(),
+            query: String::new(),
+        });
+        state.view.overlay = Some(Overlay::PalettePicker);
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+
+        let render_text = |width, height| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<String>();
+            let has_preview_color = buffer
+                .content()
+                .iter()
+                .any(|cell| cell.style().bg == Some(ratatui::style::Color::Rgb(12, 34, 56)));
+            (text, has_preview_color)
+        };
+
+        let (normal, normal_preview) = render_text(80, 16);
+        assert!(normal.contains("Choice20"));
+        assert!(normal.contains("focused"));
+        assert!(normal_preview);
+        let constrained_area = ratatui::layout::Rect::new(0, 0, 48, 9);
+        let popup = super::picker_popup_rect(constrained_area);
+        assert!(popup.width <= constrained_area.width);
+        assert!(popup.height <= constrained_area.height);
+        assert!(popup.x + popup.width <= constrained_area.width);
+        assert!(popup.y + popup.height <= constrained_area.height);
+        let (constrained, constrained_preview) = render_text(48, 9);
+        assert!(constrained.contains("Choice20"));
+        assert!(constrained.contains("Enter"));
+        assert!(constrained.contains("Esc"));
+        assert!(constrained.contains("v reverse"));
+        assert!(!constrained_preview);
+    }
+
+    #[test]
+    fn picker_search_shows_filtered_count_and_no_match_feedback() {
+        let mut state = AppState::default();
+        state.view.palette_catalog = vec![Palette::Viridis, Palette::Plasma, Palette::Magma];
+        state.view.palette = Palette::Viridis;
+        state.reduce(crate::app::Command::OpenPalettePicker);
+        state.reduce(crate::app::Command::InputChar('p'));
+        state.reduce(crate::app::Command::InputChar('l'));
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("1 / 3 palettes"));
+        assert!(text.contains("Plasma"));
+        assert!(!text.contains("Magma"));
+
+        state.reduce(crate::app::Command::InputChar('z'));
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("No colormaps match this search"));
+    }
+
+    #[test]
+    fn picker_renders_category_headers_and_filters_by_category_name() {
+        let mut state = AppState::default();
+        state.view.palette_catalog = vec![Palette::Viridis, Palette::CoolWarm];
+        state.view.palette = Palette::Viridis;
+        state.reduce(crate::app::Command::OpenPalettePicker);
+
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("Sequential"));
+        assert!(text.contains("Diverging"));
+        assert!(text.contains("Viridis"));
+        assert!(text.contains("CoolWarm"));
+
+        // Filter by category name 'diverging'
+        state.reduce(crate::app::Command::InputChar('d'));
+        state.reduce(crate::app::Command::InputChar('i'));
+        state.reduce(crate::app::Command::InputChar('v'));
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata, &[], "", None))
+            .unwrap();
+
+        let text_filtered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text_filtered.contains("CoolWarm"));
+        assert!(!text_filtered.contains("Viridis"));
+    }
+}
+
+#[cfg(test)]
+mod view_bounds_popup_tests {
+    use super::render;
+    use crate::{
+        app::{AppState, Overlay, ViewBoundsDraft},
+        data::{DatasetFormat, DatasetMetadata},
+    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    fn metadata() -> DatasetMetadata {
+        DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        }
+    }
+
+    fn rendered_text(width: u16, height: u16, error: Option<&str>) -> String {
+        let mut state = AppState::default();
+        state.view.overlay = Some(Overlay::ViewBounds);
+        state.view.view_bounds_draft = Some(ViewBoundsDraft {
+            fields: ["-90".into(), "90".into(), "-30".into(), "30".into()],
+            active: 2,
+            replace_active: true,
+            error: error.map(str::to_string),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state.view, &metadata(), &[], "", None))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn view_bounds_popup_shows_four_fields_and_actionable_errors() {
+        let text = rendered_text(
+            80,
+            24,
+            Some("latitude bounds must be between -90 and 90 degrees"),
+        );
+        for field in ["Min X", "Max X", "Min Y", "Max Y"] {
+            assert!(text.contains(field), "missing {field}: {text}");
+        }
+        assert!(text.contains("-90"));
+        assert!(text.contains("90"));
+        assert!(text.contains("latitude bounds"));
+        assert!(text.contains("Tab"));
+        assert!(text.contains("Enter"));
+        assert!(text.contains("Esc"));
+    }
+
+    #[test]
+    fn view_bounds_popup_uses_available_area_on_small_terminals() {
+        let area = Rect::new(0, 0, 40, 10);
+        let popup = super::overlay_popup_rect(area, Overlay::ViewBounds, 24, 4);
+        assert_eq!(popup, area);
+        let text = rendered_text(40, 10, None);
+        assert!(text.contains("Min X"));
+        assert!(text.contains("Max Y"));
+    }
+}
+
+#[cfg(test)]
+mod dismissal_tests {
+    use super::{popup_shadow_rect, render};
+    use crate::{
+        app::{AppState, Overlay},
+        data::{DatasetFormat, DatasetMetadata},
+    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::Paragraph};
+
+    #[test]
+    fn dismissing_each_popup_restores_the_underlying_frame() {
+        let overlays = [
+            Overlay::Limits,
+            Overlay::Filter,
+            Overlay::Axis,
+            Overlay::TimeSeries,
+            Overlay::Plot,
+            Overlay::CommandPalette,
+            Overlay::PalettePicker,
+            Overlay::ViewBounds,
+        ];
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        for overlay in overlays {
+            let mut state = AppState::default();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal builds");
+            for _ in 0..100 {
+                state.view.overlay = Some(overlay);
+                terminal
+                    .draw(|frame| {
+                        frame.render_widget(Paragraph::new("MAP BACKDROP"), frame.area());
+                        render(frame, frame.area(), &state.view, &metadata, &[], "", None);
+                    })
+                    .expect("popup frame renders");
+
+                state.view.overlay = None;
+                terminal
+                    .draw(|frame| {
+                        frame.render_widget(Paragraph::new("MAP BACKDROP"), frame.area());
+                        render(frame, frame.area(), &state.view, &metadata, &[], "", None);
+                    })
+                    .expect("dismissed frame renders");
+                let buffer = terminal.backend().buffer();
+                let text = (0..buffer.area.height)
+                    .map(|y| {
+                        (0..buffer.area.width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<String>();
+                assert!(text.contains("MAP BACKDROP"));
+                assert!(!text.contains("Choose a colormap"));
+                assert!(!text.contains("Limits"));
+                assert!(
+                    buffer
+                        .content()
+                        .iter()
+                        .all(|cell| { cell.style().bg != Some(crate::ui::theme::SHADOW) })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn popup_shadow_is_clipped_to_terminal_area() {
+        let area = Rect::new(4, 3, 12, 7);
+        let shadow = popup_shadow_rect(area, area);
+        assert!(shadow.x >= area.x && shadow.y >= area.y);
+        assert!(shadow.right() <= area.right());
+        assert!(shadow.bottom() <= area.bottom());
+    }
 }

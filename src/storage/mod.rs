@@ -7,6 +7,7 @@ pub mod location;
 pub mod object_store;
 pub mod operation;
 pub mod range_cache;
+pub mod session;
 
 use std::{
     future::Future,

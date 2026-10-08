@@ -1,0 +1,160 @@
+# Docs publishing pipeline — feature 006-mdbook-docs-site.
+# Contract: specs/006-mdbook-docs-site/contracts/docs-pipeline.md (§C1-§C4).
+#
+# - `build`  : validate + mdbook build + cargo doc + upload Pages artifact.
+#              Runs on PRs (preview artifact only, no deploy) and on pushes to main.
+# - `deploy` : publishes to GitHub Pages, ONLY on a push/dispatch from main.
+#
+# Broken docs never publish: `validate_docs.py` (FR-013) runs before any build
+# output is used, and `deploy` depends on `build` succeeding.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "tools/docs/**"
+      - "Cargo.toml"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "tools/docs/**"
+      - "Cargo.toml"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Least privilege at the top level; the `deploy` job escalates to Pages scopes.
+permissions:
+  contents: read
+
+env:
+  # Pinned documentation tooling — single source of truth is tools/docs/TOOLING.md.
+  # The install step below verifies each tarball against these SHA256 sums before use.
+  MDBOOK_VERSION: "0.5.4"
+  MDBOOK_SHA256: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+  MDBOOK_URL: "https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz"
+  MERMAID_VERSION: "0.17.1"
+  MERMAID_SHA256: "9afcfa5b8463afe606d48595a7ae338564302903e626ea5b6edb8007d29393a5"
+  MERMAID_URL: "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.1/mdbook-mermaid-v0.17.1-x86_64-unknown-linux-gnu.tar.gz"
+
+jobs:
+  build:
+    name: Build and validate docs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Cache pinned doc tooling
+        uses: actions/cache@v6
+        id: tool-cache
+        with:
+          path: ${{ github.workspace }}/.docs-tools
+          key: docs-tools-${{ env.MDBOOK_VERSION }}-${{ env.MERMAID_VERSION }}-${{ runner.os }}
+
+      - name: Install mdBook + mdbook-mermaid (SHA256-verified)
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          bindir="${{ github.workspace }}/.docs-tools"
+          mkdir -p "$bindir"
+          # mdBook
+          curl -sSL -o "$bindir/mdbook.tar.gz" "$MDBOOK_URL"
+          echo "$MDBOOK_SHA256  $bindir/mdbook.tar.gz" | sha256sum -c -
+          tar xzf "$bindir/mdbook.tar.gz" -C "$bindir" mdbook
+          # mdbook-mermaid
+          curl -sSL -o "$bindir/mermaid.tar.gz" "$MERMAID_URL"
+          echo "$MERMAID_SHA256  $bindir/mermaid.tar.gz" | sha256sum -c -
+          tar xzf "$bindir/mermaid.tar.gz" -C "$bindir" mdbook-mermaid
+          rm -f "$bindir/mdbook.tar.gz" "$bindir/mermaid.tar.gz"
+
+      - name: Add doc tooling to PATH
+        run: echo "${{ github.workspace }}/.docs-tools" >> "$GITHUB_PATH"
+
+      - name: Tool versions
+        run: |
+          mdbook --version
+          mdbook-mermaid --version
+
+      - name: Run docs tooling tests
+        run: python3 -m unittest discover tools/docs/tests
+
+      - name: Validate docs (FR-013 gate)
+        run: python3 tools/docs/validate_docs.py .
+
+      - name: Build the mdBook site
+        run: mdbook build docs
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build rustdoc API reference
+        run: cargo doc --no-deps --lib -p ncview-rs
+
+      - name: Assemble API reference into the site
+        run: |
+          set -euo pipefail
+          src="target/doc/ncview_rs"
+          dest="docs/_site/api"
+          if [ ! -d "$src" ]; then
+            echo "::error::rustdoc output not found at $src"
+            exit 1
+          fi
+          mkdir -p "$dest"
+          # rustdoc writes the crate's own landing page as $src/index.html plus
+          # sibling modules; copy the whole crate directory into api/.
+          cp -R "$src/." "$dest/"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/_site
+          # mdBook emits .nojekyll in the site root; dot files are dropped from
+          # the artifact unless explicitly included.
+          include-hidden-files: true
+          retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
+
+      - name: PR preview instructions
+        if: github.event_name == 'pull_request'
+        run: |
+          {
+            echo "## Docs preview"
+            echo ""
+            echo "The \`github-pages\` artifact for this run is a full preview of the"
+            echo "site. Download it from the **Artifacts** section of this run,"
+            echo "unzip it, and open \`index.html\` in a browser."
+            echo ""
+            echo "No deployment happens on pull requests; the site publishes only"
+            echo "when this change is merged to \`main\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    # Publish only on the default branch, never from a pull request.
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

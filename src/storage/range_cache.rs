@@ -1,7 +1,7 @@
 //! Bounded identity-scoped range cache.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap},
     hash::Hash,
 };
 
@@ -28,7 +28,7 @@ pub struct WorkingSetUsage {
     pub total_bytes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct CacheKey {
     identity: String,
     start: u64,
@@ -39,6 +39,7 @@ struct CacheKey {
 struct CacheEntry {
     category: CacheCategory,
     block: RangeBlock,
+    recency: u64,
 }
 
 #[derive(Debug)]
@@ -46,7 +47,9 @@ pub struct RangeCache {
     limit: usize,
     used: usize,
     entries: HashMap<CacheKey, CacheEntry>,
-    lru: VecDeque<CacheKey>,
+    lru: BTreeSet<(u8, u64, CacheKey)>,
+    next_recency: u64,
+    last_hit: Option<CacheKey>,
 }
 
 impl RangeCache {
@@ -55,7 +58,9 @@ impl RangeCache {
             limit,
             used: 0,
             entries: HashMap::new(),
-            lru: VecDeque::new(),
+            lru: BTreeSet::new(),
+            next_recency: 0,
+            last_hit: None,
         }
     }
 
@@ -74,25 +79,24 @@ impl RangeCache {
         let key = key_for(&block);
         self.remove_key(&key);
         while self.used + bytes > self.limit {
-            let Some((_, oldest)) = self
-                .lru
-                .iter()
-                .enumerate()
-                .filter_map(|(position, key)| {
-                    self.entries
-                        .get(key)
-                        .map(|entry| (eviction_priority(entry.category), position, key.clone()))
-                })
-                .min_by_key(|(priority, position, _)| (*priority, *position))
-                .map(|(_, position, key)| (position, key))
-            else {
+            let Some((_, _, oldest)) = self.lru.first().cloned() else {
                 break;
             };
             self.remove_key(&oldest);
         }
         self.used += bytes;
-        self.lru.push_back(key.clone());
-        self.entries.insert(key, CacheEntry { category, block });
+        let recency = self.take_recency();
+        self.lru
+            .insert((eviction_priority(category), recency, key.clone()));
+        self.entries.insert(
+            key.clone(),
+            CacheEntry {
+                category,
+                block,
+                recency,
+            },
+        );
+        self.last_hit = Some(key);
         Ok(())
     }
 
@@ -103,7 +107,10 @@ impl RangeCache {
             end: range.end(),
         };
         if self.entries.contains_key(&key) {
-            self.touch(&key);
+            if self.last_hit.as_ref() != Some(&key) {
+                self.touch(&key);
+            }
+            self.last_hit = Some(key.clone());
         }
         self.entries.get(&key).map(|entry| &entry.block)
     }
@@ -144,19 +151,41 @@ impl RangeCache {
     }
 
     fn touch(&mut self, key: &CacheKey) {
-        if let Some(position) = self.lru.iter().position(|candidate| candidate == key) {
-            self.lru.remove(position);
+        let Some((category, old_recency)) = self
+            .entries
+            .get(key)
+            .map(|entry| (entry.category, entry.recency))
+        else {
+            return;
+        };
+        let old = (eviction_priority(category), old_recency, key.clone());
+        self.lru.remove(&old);
+        let recency = self.take_recency();
+        self.lru
+            .insert((eviction_priority(category), recency, key.clone()));
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.recency = recency;
         }
-        self.lru.push_back(key.clone());
     }
 
     fn remove_key(&mut self, key: &CacheKey) {
         if let Some(entry) = self.entries.remove(key) {
             self.used -= entry.block.bytes().len();
+            self.lru.remove(&(
+                eviction_priority(entry.category),
+                entry.recency,
+                key.clone(),
+            ));
+            if self.last_hit.as_ref() == Some(key) {
+                self.last_hit = None;
+            }
         }
-        if let Some(position) = self.lru.iter().position(|candidate| candidate == key) {
-            self.lru.remove(position);
-        }
+    }
+
+    fn take_recency(&mut self) -> u64 {
+        let value = self.next_recency;
+        self.next_recency = self.next_recency.wrapping_add(1);
+        value
     }
 }
 

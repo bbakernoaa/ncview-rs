@@ -16,16 +16,22 @@ use crossterm::{
     event, execute,
     terminal::{LeaveAlternateScreen, disable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{
+    Terminal,
+    backend::{Backend, CrosstermBackend},
+    layout::Rect,
+};
 
 use ncview_rs::{
     analysis::mapping::screen_to_source_with_row_flip,
     app::{
-        AppState, AxisField, ColorScaleScope, Command, Generation, LimitField, Overlay, PlotSeries,
-        TimelinePoint,
+        AppState, AxisField, ColorScaleScope, Command, Effect, FixedDimension, Generation,
+        LimitField, Overlay, PlotSeries, TimelinePoint,
     },
     data::{
         self, AxisRole, DatasetFormat, DatasetMetadata, Variable,
+        bounds::{NumericBounds, resolve_source_bounds_with_feedback},
+        formula::FormulaDefinition,
         grib2_manifest::{self, ManifestFormat},
         slice::{Bounds, Slice2D, SliceRequest},
         virtual_dataset::VirtualDatasetManifest,
@@ -45,12 +51,227 @@ use ncview_rs::{
 struct Cli {
     #[command(subcommand)]
     command: Option<CliCommand>,
-    /// One or more NetCDF-3, NetCDF-4, or GRIB2 datasets to inspect. Shell globs are supported.
-    #[arg(value_name = "DATASET", num_args = 0..)]
-    dataset: Vec<String>,
+    /// Do not restore previous session state for the dataset(s).
+    #[arg(long)]
+    no_restore: bool,
+    /// Minimum x coordinate or zero-based x index for the initial view.
+    #[arg(long, value_name = "X")]
+    min_x: Option<f64>,
+    /// Maximum x coordinate or zero-based x index for the initial view.
+    #[arg(long, value_name = "X")]
+    max_x: Option<f64>,
+    /// Minimum y coordinate or zero-based y index for the initial view.
+    #[arg(long, value_name = "Y")]
+    min_y: Option<f64>,
+    /// Maximum y coordinate or zero-based y index for the initial view.
+    #[arg(long, value_name = "Y")]
+    max_y: Option<f64>,
+    /// Enable difference mode between two files or two sets of files.
+    #[arg(long)]
+    diff: bool,
+    /// First file or glob pattern for diff mode.
+    #[arg(long)]
+    first: Option<String>,
+    /// Second file or glob pattern for diff mode.
+    #[arg(long)]
+    second: Option<String>,
+    /// Derived variable to add, e.g. "O3[1] - O3[2]" or "avg = mean(T)". Repeatable.
+    /// `NAME[n]` refers to the n-th DATASET; `-formula` is accepted as a VERDI-style alias.
+    #[arg(long = "formula", value_name = "EXPR")]
+    formula: Vec<String>,
+    /// Evaluate every --formula and export PNG/SVG/JSON images without opening the terminal UI.
+    #[arg(long)]
+    batch: bool,
+    /// Output directory for --batch exports (defaults to NCVIEW_EXPORT_DIR or the current directory).
+    #[arg(long, value_name = "DIR")]
+    export_dir: Option<PathBuf>,
+    /// Zero-based time step exported by --batch.
+    #[arg(long, value_name = "INDEX", default_value_t = 0)]
+    time: usize,
+    /// Zero-based vertical level exported by --batch.
+    #[arg(long, value_name = "INDEX", default_value_t = 0)]
+    level: usize,
     /// MPAS mesh/coordinate file supplying latCell/lonCell or latVertex/lonVertex.
     #[arg(long, value_name = "GRID")]
     grid: Option<String>,
+    /// One or more NetCDF-3, NetCDF-4, or GRIB2 datasets to inspect. Shell globs are supported.
+    #[arg(value_name = "DATASET", num_args = 0..)]
+    dataset: Vec<String>,
+}
+
+fn requested_cli_bounds(cli: &Cli) -> Result<Option<NumericBounds>, String> {
+    let provided = [cli.min_x, cli.max_x, cli.min_y, cli.max_y];
+    let count = provided.iter().filter(|value| value.is_some()).count();
+    if count == 0 {
+        return Ok(None);
+    }
+    if count != provided.len() {
+        return Err("--min-x, --max-x, --min-y, and --max-y must be supplied together".into());
+    }
+    let bounds = NumericBounds {
+        min_x: cli.min_x.ok_or("missing --min-x")?,
+        max_x: cli.max_x.ok_or("missing --max-x")?,
+        min_y: cli.min_y.ok_or("missing --min-y")?,
+        max_y: cli.max_y.ok_or("missing --max-y")?,
+    };
+    bounds
+        .validate()
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn apply_requested_view_bounds(
+    state: &mut AppState,
+    source: &dyn data::DataSource,
+    requested: NumericBounds,
+) -> Result<(), String> {
+    let variable = state
+        .view
+        .selected_variable
+        .as_deref()
+        .ok_or("cannot apply CLI bounds: no variable is selected")?;
+    let (x_axis, y_axis) = state
+        .view
+        .x_axis
+        .as_deref()
+        .zip(state.view.y_axis.as_deref())
+        .ok_or("cannot apply CLI bounds: selected variable has no x/y axes")?;
+    let (bounds, approximate) =
+        resolve_source_bounds_with_feedback(source, variable, x_axis, y_axis, requested)
+            .map_err(|error| error.to_string())?;
+    state.view.zoom_bounds = Some(bounds);
+    state.view.zoom_approximation =
+        approximate.then(|| "curvilinear grid uses a row/column envelope".into());
+    Ok(())
+}
+
+fn wild_match(pattern: &str, s: &str) -> bool {
+    let p_chars: Vec<char> = pattern.chars().collect();
+    let s_chars: Vec<char> = s.chars().collect();
+    let mut px = 0;
+    let mut sx = 0;
+    let mut next_px = 0;
+    let mut next_sx = 0;
+
+    while px < p_chars.len() || sx < s_chars.len() {
+        if px < p_chars.len() {
+            let c = p_chars[px];
+            if c == '*' {
+                next_px = px + 1;
+                next_sx = sx + 1;
+                px += 1;
+                continue;
+            }
+            if sx < s_chars.len() && (c == '?' || c == s_chars[sx]) {
+                px += 1;
+                sx += 1;
+                continue;
+            }
+        }
+        if next_sx > 0 && next_sx <= s_chars.len() {
+            px = next_px;
+            sx = next_sx;
+            next_sx += 1;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn expand_glob_pattern(pattern: &str) -> Vec<String> {
+    let unquoted = pattern.trim_matches('"').trim_matches('\'');
+    if !unquoted.contains(['*', '?']) {
+        return vec![unquoted.to_string()];
+    }
+
+    let (dir_path, file_pattern) = if let Some((d, f)) = unquoted.rsplit_once('/') {
+        (if d.is_empty() { "/" } else { d }, f)
+    } else {
+        (".", unquoted)
+    };
+
+    let mut matches = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir_path) {
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string()
+                && wild_match(file_pattern, &file_name)
+            {
+                let full_path = if dir_path == "." {
+                    file_name
+                } else if dir_path == "/" {
+                    format!("/{file_name}")
+                } else {
+                    format!("{dir_path}/{file_name}")
+                };
+                matches.push(full_path);
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        vec![unquoted.to_string()]
+    } else {
+        matches.sort();
+        matches
+    }
+}
+
+fn resolve_diff_inputs(cli: &Cli) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut set1_raw = Vec::new();
+    let mut set2_raw = Vec::new();
+
+    if let Some(first) = &cli.first {
+        set1_raw.push(first.clone());
+    }
+    if let Some(second) = &cli.second {
+        set2_raw.push(second.clone());
+    }
+
+    for item in &cli.dataset {
+        if let Some(val) = item
+            .strip_prefix("first=")
+            .or_else(|| item.strip_prefix("1="))
+        {
+            set1_raw.push(val.to_string());
+        } else if let Some(val) = item
+            .strip_prefix("second=")
+            .or_else(|| item.strip_prefix("2="))
+        {
+            set2_raw.push(val.to_string());
+        } else if set1_raw.is_empty() {
+            set1_raw.push(item.clone());
+        } else {
+            set2_raw.push(item.clone());
+        }
+    }
+
+    if set1_raw.is_empty() || set2_raw.is_empty() {
+        return Err(
+            "diff mode requires two files or file sets (e.g. ncv --diff file1 file2 or ncv --diff first=\"files1*\" second=\"files2*\")"
+                .into(),
+        );
+    }
+
+    let mut set1_files = Vec::new();
+    for pat in set1_raw {
+        set1_files.extend(expand_glob_pattern(&pat));
+    }
+    let mut set2_files = Vec::new();
+    for pat in set2_raw {
+        set2_files.extend(expand_glob_pattern(&pat));
+    }
+
+    set1_files.sort();
+    set1_files.dedup();
+    set2_files.sort();
+    set2_files.dedup();
+
+    if set1_files.is_empty() || set2_files.is_empty() {
+        return Err("diff mode found no matching files for one or both file sets".into());
+    }
+
+    Ok((set1_files, set2_files))
 }
 
 #[derive(Debug, Subcommand)]
@@ -99,7 +320,14 @@ fn setup_panic_hook() {
 fn main() -> ExitCode {
     setup_panic_hook();
     ncview_rs::render::configure_thread_pool();
-    let cli = Cli::parse();
+    // VERDI batch scripts spell the flag with a single dash.
+    let cli = Cli::parse_from(env::args_os().map(|argument| {
+        if argument == "-formula" {
+            "--formula".into()
+        } else {
+            argument
+        }
+    }));
     if let Some(CliCommand::Manifest {
         format,
         input,
@@ -129,28 +357,72 @@ fn main() -> ExitCode {
             }
         };
     }
-    if cli.dataset.is_empty() {
+    if let Err(error) = requested_cli_bounds(&cli) {
+        eprintln!("ncv: {error}");
+        return ExitCode::from(2);
+    }
+    let is_diff = cli.diff || cli.first.is_some() || cli.second.is_some();
+    if let Err(error) = parse_formulas(&cli.formula) {
+        eprintln!("ncv: {error}");
+        return ExitCode::from(2);
+    }
+    if cli.batch {
+        return match run_batch(&cli) {
+            Ok(paths) => {
+                for path in paths {
+                    println!("{}", path.display());
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("ncv: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if !is_diff && cli.dataset.is_empty() {
         let mut command = Cli::command();
         let _ = command.print_help();
         println!();
         return ExitCode::SUCCESS;
     }
-    for dataset in &cli.dataset {
-        if let Err(error) = ncview_rs::storage::location::SourceLocation::parse(dataset) {
-            eprintln!("ncv: {dataset}: {error}");
+    if is_diff {
+        if let Err(error) = resolve_diff_inputs(&cli) {
+            eprintln!("ncv: {error}");
             return ExitCode::from(2);
         }
+    } else {
+        for dataset in &cli.dataset {
+            if let Err(error) = ncview_rs::storage::location::SourceLocation::parse(dataset) {
+                eprintln!("ncv: {dataset}: {error}");
+                return ExitCode::from(2);
+            }
+        }
     }
-    if let Err(error) = run(&cli.dataset, cli.grid.as_deref()) {
+    if let Err(error) = run(&cli) {
         eprintln!("ncv: {error}");
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
 }
 
-fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let datasets = datasets.to_vec();
-    let grid = grid.map(str::to_owned);
+fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let is_diff = cli.diff || cli.first.is_some() || cli.second.is_some();
+    let no_restore = cli.no_restore;
+    let cli_bounds = requested_cli_bounds(cli)?;
+
+    let (datasets, diff_mapping) = if is_diff {
+        let (set1_files, set2_files) = resolve_diff_inputs(cli)?;
+        let mut all_unique = Vec::new();
+        for f in set1_files.iter().chain(set2_files.iter()) {
+            if !all_unique.contains(f) {
+                all_unique.push(f.clone());
+            }
+        }
+        (all_unique, Some((set1_files, set2_files)))
+    } else {
+        (cli.dataset.clone(), None)
+    };
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         use std::io::Write;
@@ -204,7 +476,7 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
         }
         let load_tx = load_tx.clone();
         let worker_cancelled = Arc::clone(&cancelled);
-        let grid_for_worker = grid.clone();
+        let grid = cli.grid.clone();
         std::thread::spawn(move || {
             if worker_cancelled.load(Ordering::Relaxed) {
                 return;
@@ -218,27 +490,17 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
             let progress_tx = load_tx.clone();
             let progress_cancelled = Arc::clone(&worker_cancelled);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                if let Some(grid_path) = grid_for_worker.as_deref() {
-                    data::open_location_with_grid(&dataset, Some(grid_path))
-                } else {
-                    data::open_location_with_progress(&dataset, &|message| {
-                        if progress_cancelled.load(Ordering::Relaxed) {
-                            return false;
-                        }
-                        progress_tx
-                            .send(SourceLoadMessage::Progress(
-                                index,
-                                loading_phase(message),
-                                message.to_owned(),
-                            ))
-                            .is_ok()
-                    })
-                }
-                .and_then(|source| {
+                data::open_location_with_progress_and_grid(&dataset, grid.as_deref(), &|message| {
                     if progress_cancelled.load(Ordering::Relaxed) {
-                        return Err(ncview_rs::error::NcvError::WorkerStopped);
+                        return false;
                     }
-                    Ok(source)
+                    progress_tx
+                        .send(SourceLoadMessage::Progress(
+                            index,
+                            loading_phase(message),
+                            message.to_owned(),
+                        ))
+                        .is_ok()
                 })
             }))
             .map_err(|_| format!("{dataset}: loader panicked"))
@@ -328,7 +590,7 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
             .metadata()
             .variables
             .iter()
-            .find(|variable| variable.numeric && plottable_variable(variable))
+            .find(|variable| variable.numeric && variable.dimensions.len() >= 2)
             .map(|variable| variable.name.clone());
         let base_label = first_variable
             .as_deref()
@@ -352,13 +614,65 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
         loaded = datasets.len();
         finished = datasets.len();
     }
-    let mut sources = pending_sources
-        .into_iter()
-        .enumerate()
-        .map(|(index, source)| {
-            source.unwrap_or_else(|| placeholder_source(datasets[index].clone()))
-        })
-        .collect::<Vec<Arc<dyn data::DataSource>>>();
+    let (datasets, mut raw_sources) = if let Some((set1_files, set2_files)) = diff_mapping {
+        let count = if set1_files.len() == set2_files.len() || set2_files.len() == 1 {
+            set1_files.len()
+        } else if set1_files.len() == 1 {
+            set2_files.len()
+        } else {
+            set1_files.len().min(set2_files.len())
+        };
+
+        let mut diff_sources = Vec::new();
+        let mut diff_labels = Vec::new();
+
+        for i in 0..count {
+            let f1 = if set1_files.len() == 1 {
+                &set1_files[0]
+            } else {
+                &set1_files[i]
+            };
+            let f2 = if set2_files.len() == 1 {
+                &set2_files[0]
+            } else {
+                &set2_files[i]
+            };
+
+            let idx1 = datasets
+                .iter()
+                .position(|d| d == f1)
+                .ok_or_else(|| format!("source {f1} failed to load"))?;
+            let idx2 = datasets
+                .iter()
+                .position(|d| d == f2)
+                .ok_or_else(|| format!("source {f2} failed to load"))?;
+
+            let s1 = pending_sources[idx1]
+                .clone()
+                .ok_or_else(|| format!("source {f1} failed to load"))?;
+            let s2 = pending_sources[idx2]
+                .clone()
+                .ok_or_else(|| format!("source {f2} failed to load"))?;
+
+            let diff_source: Arc<dyn data::DataSource> =
+                Arc::new(data::diff::DiffSource::new(s1, s2));
+            diff_sources.push(diff_source);
+            diff_labels.push(format!("diff: {f1} vs {f2}"));
+        }
+
+        (diff_labels, diff_sources)
+    } else {
+        let sources = pending_sources
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                source.unwrap_or_else(|| placeholder_source(datasets[index].clone()))
+            })
+            .collect::<Vec<Arc<dyn data::DataSource>>>();
+        (datasets, sources)
+    };
+    let formula_texts = cli.formula.clone();
+    let (mut sources, formula_errors) = formula_sources(&raw_sources, &formula_texts);
     let source_refs = sources
         .iter()
         .map(|source| source.as_ref())
@@ -367,6 +681,10 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
     let mut active_file = earliest_source_index(&sources);
     let initial_source = sources[active_file].as_ref();
     let mut state = state_for_source(initial_source);
+    if is_diff {
+        state.view.is_diff = true;
+        state.view.palette = ncview_rs::render::colors::Palette::CoolWarm;
+    }
     state.view.collection_diagnostics = manifest.diagnostics().to_vec();
     state.view.collection_progress = Some((finished, datasets.len()));
     state.view.collection_diagnostics.extend(
@@ -387,12 +705,23 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
             datasets.len()
         ));
     }
+    if !no_restore && let Some(saved) = ncview_rs::storage::session::load_session(&datasets) {
+        let catalog = state.view.palette_catalog.clone();
+        let restored_active = saved.apply_to(&mut state, &catalog);
+        if restored_active < sources.len() {
+            active_file = restored_active;
+        }
+    }
     let (slice_tx, slice_rx) = std::sync::mpsc::channel::<RemoteSliceMessage>();
+    let (bounds_tx, bounds_rx) = std::sync::mpsc::channel::<BoundsResolutionMessage>();
     let mut slice_cancelled = Arc::new(AtomicBool::new(false));
     let (plot_tx, plot_rx) = std::sync::mpsc::channel::<RemotePlotMessage>();
     let mut plot_cancelled = Arc::new(AtomicBool::new(false));
-    select_initial_variable(&mut state, initial_source.metadata());
+    select_initial_variable(&mut state, sources[active_file].metadata());
     configure_timeline(&mut state, &sources, &manifest, active_file);
+    if let Some(requested) = cli_bounds {
+        apply_requested_view_bounds(&mut state, sources[active_file].as_ref(), requested)?;
+    }
     terminal.draw(|frame| {
         status::render_loading(
             frame,
@@ -416,10 +745,32 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
             state.variables.len()
         );
     }
+    state.view.formula_datasets = datasets.clone();
+    state.view.formula_request = parse_formulas(&formula_texts).ok().and_then(|definitions| {
+        definitions
+            .first()
+            .map(|definition| definition.name.clone())
+    });
+    state.view.formulas = formula_texts;
+    apply_formula_changes(
+        &mut state,
+        &raw_sources,
+        &mut sources,
+        &mut manifest,
+        &mut active_file,
+        &slice_tx,
+        &mut slice_cancelled,
+    );
+    if !formula_errors.is_empty() {
+        state.view.status = formula_errors.join("; ");
+    }
     let mut dirty = true;
     let mut last_render = Instant::now();
     let frame_budget = Duration::from_millis(33); // ~30 FPS throttle max
     let mut last_playback_tick = Instant::now();
+    // Holds a non-motion event discovered while collapsing a motion burst so
+    // it is processed on the next pass instead of being dropped.
+    let mut pending_event: Option<crossterm::event::Event> = None;
 
     loop {
         while let Ok(message) = load_rx.try_recv() {
@@ -427,7 +778,8 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
                 SourceLoadMessage::Started(_, _) | SourceLoadMessage::Progress(_, _, _) => {}
                 SourceLoadMessage::Finished(index, result) => match result {
                     Ok(source) => {
-                        sources[index] = Arc::from(source);
+                        raw_sources[index] = Arc::from(source);
+                        sources = formula_sources(&raw_sources, &state.view.formulas).0;
                         loaded += 1;
                         finished += 1;
                         state.view.collection_progress = Some((finished, datasets.len()));
@@ -478,6 +830,32 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
             apply_remote_slice(&mut state, &sources, message);
             dirty = true;
         }
+        while let Ok(message) = bounds_rx.try_recv() {
+            let approximate = message
+                .result
+                .as_ref()
+                .is_ok_and(|(_, approximate)| *approximate);
+            if state
+                .accept_view_bounds(message.generation, message.result.map(|(bounds, _)| bounds))
+            {
+                if state.view.zoom_bounds.is_some()
+                    && state.view.overlay != Some(Overlay::ViewBounds)
+                {
+                    if approximate {
+                        state.view.zoom_approximation =
+                            Some("curvilinear grid uses a row/column envelope".into());
+                    }
+                    load_selected(
+                        &mut state,
+                        &sources,
+                        active_file,
+                        &slice_tx,
+                        &mut slice_cancelled,
+                    );
+                }
+                dirty = true;
+            }
+        }
         while let Ok(message) = plot_rx.try_recv() {
             apply_remote_plot(&mut state, message);
             dirty = true;
@@ -516,6 +894,7 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
                     &state.view,
                     &display_dataset_name(&datasets[active_file], active_file, datasets.len()),
                     source.metadata(),
+                    &state.variables,
                     &state.variable_query,
                     state.view.variable_search_active,
                     Some(&mut graphics),
@@ -539,49 +918,119 @@ fn run(datasets: &[String], grid: Option<&str>) -> Result<(), Box<dyn std::error
             Duration::from_millis(100)
         };
 
-        if event::poll(poll_timeout)?
-            && let Some(command) =
-                input::command_from_event_with_mode(event::read()?, state.view.input_mode())
-        {
-            dirty = true;
-            let size = terminal.size()?;
-            let command = translate_mouse(
-                command,
-                Rect::new(0, 0, size.width, size.height),
-                source.metadata(),
-                &state.view,
-                &state.variable_query,
-                Some(&graphics),
-            );
-            if matches!(command, Command::Quit)
-                && state.view.overlay.is_none()
-                && !state.view.variable_search_active
-                && !state.view.help_visible
-            {
-                break;
+        // Take the next event, preferring one stashed by a previous motion
+        // coalescing pass over blocking on the input queue.
+        let next_event = match pending_event.take() {
+            Some(event) => Some(event),
+            None if event::poll(poll_timeout)? => Some(event::read()?),
+            None => None,
+        };
+        if let Some(event) = next_event {
+            // Collapse a burst of bare mouse-motion events down to the final
+            // position. The reticle only ever reflects the last cell touched,
+            // so replaying every intermediate cell makes the marker chase the
+            // pointer and re-extracts point values along a path nobody asked
+            // for. Any non-motion event surfacing mid-burst is stashed for the
+            // next pass so clicks, drags, and keys are never dropped.
+            let mut event = event;
+            if is_mouse_motion(&event) {
+                while event::poll(Duration::ZERO)? {
+                    let candidate = event::read()?;
+                    if is_mouse_motion(&candidate) {
+                        event = candidate;
+                    } else {
+                        pending_event = Some(candidate);
+                        break;
+                    }
+                }
             }
-            if handle_command(
-                command,
-                &mut state,
-                &sources,
-                &datasets,
-                &mut active_file,
-                &manifest,
-                finished,
-                &slice_tx,
-                &mut slice_cancelled,
-                &plot_tx,
-                &mut plot_cancelled,
-                &mut graphics,
-            ) {
-                continue;
+            if let Some(command) =
+                input::command_from_event_with_mode(event, state.view.input_mode())
+            {
+                dirty = true;
+                let size = terminal.size()?;
+                let command = translate_mouse(
+                    command,
+                    Rect::new(0, 0, size.width, size.height),
+                    &state.variables,
+                    &state.view,
+                    &state.variable_query,
+                    Some(&graphics),
+                );
+                if matches!(command, Command::Quit)
+                    && state.view.overlay.is_none()
+                    && !state.view.variable_search_active
+                    && !state.view.help_visible
+                {
+                    break;
+                }
+                let overlay_before_command = state.view.overlay;
+                let should_continue = handle_command(
+                    command,
+                    &mut state,
+                    &sources,
+                    &datasets,
+                    &mut active_file,
+                    &manifest,
+                    finished,
+                    &slice_tx,
+                    &bounds_tx,
+                    &mut slice_cancelled,
+                    &plot_tx,
+                    &mut plot_cancelled,
+                    &mut graphics,
+                );
+                clear_terminal_after_overlay_close(
+                    &mut terminal,
+                    overlay_before_command,
+                    state.view.overlay,
+                )?;
+                if should_continue {
+                    continue;
+                }
+                if state.view.formulas_changed || state.view.formula_request.is_some() {
+                    apply_formula_changes(
+                        &mut state,
+                        &raw_sources,
+                        &mut sources,
+                        &mut manifest,
+                        &mut active_file,
+                        &slice_tx,
+                        &mut slice_cancelled,
+                    );
+                }
             }
         }
     }
+    let _ = ncview_rs::storage::session::save_session(&datasets, &state, active_file);
     cancelled.store(true, Ordering::Release);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     session.restore()?;
+    Ok(())
+}
+
+/// True for a bare mouse-motion event (no button held). These flood in when
+/// the pointer sweeps across the map and are safe to collapse to the last one.
+fn is_mouse_motion(event: &crossterm::event::Event) -> bool {
+    matches!(
+        event,
+        crossterm::event::Event::Mouse(mouse)
+            if mouse.kind == crossterm::event::MouseEventKind::Moved
+    )
+}
+
+/// Graphics protocols can leave popup text in terminal cells that are skipped
+/// while an image is placed there. Clear the physical screen when an overlay
+/// closes so the next full dashboard draw starts from a clean terminal frame.
+fn clear_terminal_after_overlay_close<B: Backend>(
+    terminal: &mut Terminal<B>,
+    previous: Option<Overlay>,
+    current: Option<Overlay>,
+) -> Result<(), B::Error> {
+    if previous.is_some() && current.is_none() {
+        terminal.clear()?;
+    }
     Ok(())
 }
 
@@ -595,6 +1044,7 @@ fn handle_command(
     manifest: &VirtualDatasetManifest,
     finished: usize,
     slice_tx: &std::sync::mpsc::Sender<RemoteSliceMessage>,
+    bounds_tx: &std::sync::mpsc::Sender<BoundsResolutionMessage>,
     slice_cancelled: &mut Arc<AtomicBool>,
     plot_tx: &std::sync::mpsc::Sender<RemotePlotMessage>,
     plot_cancelled: &mut Arc<AtomicBool>,
@@ -613,10 +1063,17 @@ fn handle_command(
         let show_land_borders = state.view.show_land_borders;
         let playback_speed = state.view.playback_speed;
         let plot_generation = state.view.plot_generation;
+        let formulas = std::mem::take(&mut state.view.formulas);
+        let formula_datasets = std::mem::take(&mut state.view.formula_datasets);
+        let formula_draft = std::mem::take(&mut state.view.formula_draft);
 
         *active_file = bounded_file_index(*active_file, delta, sources.len());
         let source = sources[*active_file].as_ref();
+        let previous_point = state.view.timeline.get(state.view.time_index).cloned();
         *state = state_for_source(source);
+        state.view.formulas = formulas;
+        state.view.formula_datasets = formula_datasets;
+        state.view.formula_draft = formula_draft;
         state.view.collection_diagnostics = manifest.diagnostics().to_vec();
         state.view.collection_progress = Some((finished, datasets.len()));
         state.view.palette = palette;
@@ -629,6 +1086,13 @@ fn handle_command(
 
         select_initial_variable(state, source.metadata());
         configure_timeline(state, sources, manifest, *active_file);
+        state.view.time_index =
+            anchored_time_index(previous_point.as_ref(), &state.view.timeline, *active_file);
+        state.view.time_label = state
+            .view
+            .timeline
+            .get(state.view.time_index)
+            .map(|point| point.label.clone());
         load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
         state.view.status = format!(
             "opened file {}/{}: {}",
@@ -643,6 +1107,7 @@ fn handle_command(
     let dataset = &datasets[*active_file];
     let activate_point = matches!(command, Command::ActivatePoint);
     let cycle_image_filter = matches!(command, Command::CycleImageFilter);
+    let reset_variable_view = matches!(command, Command::ResetVariableView);
     let export_current = matches!(command, Command::ExportCurrent);
     let refresh_time_series = activate_point
         || matches!(command, Command::OpenPlot)
@@ -653,6 +1118,7 @@ fn handle_command(
                 | Command::MoveDepth(_)
                 | Command::SetDepth(_)
                 | Command::ApplyDepthCursor
+                | Command::MoveFixedDimension(_)
                 | Command::CyclePlotAxis(_)
                 | Command::SetPlotKind(_)
                 | Command::TogglePointSelection
@@ -671,9 +1137,11 @@ fn handle_command(
             | Command::MoveDepth(_)
             | Command::SetDepth(_)
             | Command::ApplyDepthCursor
+            | Command::MoveFixedDimension(_)
             | Command::TickPlayback
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
+            | Command::ResetVariableView
             | Command::Zoom(_)
             | Command::ResetZoom
             | Command::Pan { .. }
@@ -691,6 +1159,7 @@ fn handle_command(
             | Command::SubmitVariableSearch
             | Command::ExecuteCommandPalette
             | Command::SetAxes { .. }
+            | Command::ResetVariableView
     ) || axis_submit;
     let point_target = match &command {
         Command::HoverPoint { row, col, .. } | Command::SelectPoint { row, col } => {
@@ -704,7 +1173,45 @@ fn handle_command(
         Command::ActivatePoint => state.view.selected_point,
         _ => None,
     };
-    let _ = state.reduce(command);
+    let previous_variable = state.view.selected_variable.clone();
+    let effect = state.reduce(command);
+    if let Some(Effect::ResolveViewBounds {
+        generation,
+        variable,
+        x_axis,
+        y_axis,
+        bounds,
+    }) = effect
+        && let Some(source) = sources.get(*active_file).cloned()
+    {
+        let tx = bounds_tx.clone();
+        std::thread::spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                resolve_source_bounds_with_feedback(
+                    source.as_ref(),
+                    &variable,
+                    &x_axis,
+                    &y_axis,
+                    bounds,
+                )
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap_or_else(|_| Err("view bounds worker failed unexpectedly".into()));
+            let _ = tx.send(BoundsResolutionMessage { generation, result });
+        });
+    }
+    if state.view.selected_variable != previous_variable
+        && let Some(variable_name) = state.view.selected_variable.as_deref()
+        && let Some(variable) = source
+            .metadata()
+            .variables
+            .iter()
+            .find(|item| item.name == variable_name)
+    {
+        let (x, y) = default_display_axes(source.metadata(), variable);
+        state.view.x_axis = Some(x);
+        state.view.y_axis = Some(y);
+    }
     if cycle_image_filter {
         if graphics.cycle_filter() {
             state.view.status = format!("image interpolation: {}", graphics.filter_label());
@@ -713,6 +1220,9 @@ fn handle_command(
                 "scientific rendering locked; set NCVIEW_SCIENTIFIC_RENDERING=0 to enable interpolation"
                     .into();
         }
+    }
+    if reset_variable_view {
+        graphics.reset_filter();
     }
     if export_current {
         match export_current_slice(state, dataset, source.metadata()) {
@@ -761,6 +1271,184 @@ enum SourceLoadMessage {
     Finished(usize, Result<Box<dyn data::DataSource>, String>),
 }
 
+fn parse_formulas(texts: &[String]) -> Result<Vec<FormulaDefinition>, String> {
+    texts
+        .iter()
+        .map(|text| FormulaDefinition::parse(text).map_err(|error| format!("{text:?}: {error}")))
+        .collect()
+}
+
+/// Wrap opened datasets with the formulas that parse, reporting every failure.
+fn formula_sources(
+    raw_sources: &[Arc<dyn data::DataSource>],
+    texts: &[String],
+) -> (Vec<Arc<dyn data::DataSource>>, Vec<String>) {
+    let mut errors = Vec::new();
+    let definitions = texts
+        .iter()
+        .filter_map(|text| match FormulaDefinition::parse(text) {
+            Ok(definition) => Some(definition),
+            Err(error) => {
+                errors.push(format!("{text:?}: {error}"));
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let (sources, apply_errors) = data::formula::apply_formulas(raw_sources, &definitions);
+    errors.extend(apply_errors);
+    (sources, errors)
+}
+
+/// Rebuild formula-backed sources after the editor changed them and select
+/// the requested derived variable.
+fn apply_formula_changes(
+    state: &mut AppState,
+    raw_sources: &[Arc<dyn data::DataSource>],
+    sources: &mut Vec<Arc<dyn data::DataSource>>,
+    manifest: &mut VirtualDatasetManifest,
+    active_file: &mut usize,
+    slice_tx: &std::sync::mpsc::Sender<RemoteSliceMessage>,
+    slice_cancelled: &mut Arc<AtomicBool>,
+) {
+    let mut errors = Vec::new();
+    if std::mem::take(&mut state.view.formulas_changed) {
+        let (rebuilt, rebuild_errors) = formula_sources(raw_sources, &state.view.formulas);
+        *sources = rebuilt;
+        errors = rebuild_errors;
+        *manifest = VirtualDatasetManifest::from_sources(
+            &sources
+                .iter()
+                .map(|source| source.as_ref())
+                .collect::<Vec<_>>(),
+        );
+        state.view.collection_diagnostics = manifest.diagnostics().to_vec();
+        state.variables = collection_variables(sources);
+        let selected_exists = state
+            .view
+            .selected_variable
+            .as_deref()
+            .is_some_and(|name| state.variables.iter().any(|variable| variable.name == name));
+        if !selected_exists && state.view.formula_request.is_none() {
+            select_initial_variable(state, sources[*active_file].metadata());
+            configure_timeline(state, sources, manifest, *active_file);
+            load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
+        }
+    }
+    if let Some(name) = state.view.formula_request.take() {
+        let has_variable = |source: &Arc<dyn data::DataSource>| {
+            source
+                .metadata()
+                .variables
+                .iter()
+                .any(|variable| variable.name == name)
+        };
+        if let Some(owner) = sources.iter().position(has_variable) {
+            if !has_variable(&sources[*active_file]) {
+                *active_file = owner;
+            }
+            if !state.variables.iter().any(|variable| variable.name == name) {
+                state.variables = collection_variables(sources);
+            }
+            state.select_variable(name.clone());
+            configure_timeline(state, sources, manifest, *active_file);
+            load_selected(state, sources, *active_file, slice_tx, slice_cancelled);
+            state.view.status = format!("formula {name}: evaluating…");
+        } else if errors.is_empty() {
+            errors.push(format!("{name}: formula could not be evaluated"));
+        }
+    }
+    if !errors.is_empty() {
+        state.view.status = errors.join("; ");
+    }
+}
+
+/// Evaluate each --formula headlessly and export it like the `e` key does.
+fn run_batch(cli: &Cli) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    if cli.formula.is_empty() {
+        return Err("--batch requires at least one --formula expression".into());
+    }
+    if cli.dataset.is_empty() {
+        return Err("--batch requires at least one dataset".into());
+    }
+    let definitions = parse_formulas(&cli.formula)?;
+    let datasets = cli
+        .dataset
+        .iter()
+        .flat_map(|dataset| expand_glob_pattern(dataset))
+        .collect::<Vec<_>>();
+    let raw_sources = datasets
+        .iter()
+        .map(|dataset| {
+            data::open_location(dataset)
+                .map(Arc::from)
+                .map_err(|error| format!("{dataset}: {error}"))
+        })
+        .collect::<Result<Vec<Arc<dyn data::DataSource>>, String>>()?;
+    let (sources, errors) = data::formula::apply_formulas(&raw_sources, &definitions);
+    if !errors.is_empty() {
+        return Err(errors.join("; ").into());
+    }
+    let directory = cli
+        .export_dir
+        .clone()
+        .or_else(|| env::var_os("NCVIEW_EXPORT_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut written = Vec::new();
+    for definition in &definitions {
+        let (index, source) = sources
+            .iter()
+            .enumerate()
+            .find(|(_, source)| {
+                source
+                    .metadata()
+                    .variables
+                    .iter()
+                    .any(|variable| variable.name == definition.name)
+            })
+            .ok_or_else(|| format!("{}: formula could not be evaluated", definition.name))?;
+        let metadata = source.metadata();
+        let variable = metadata
+            .variables
+            .iter()
+            .find(|variable| variable.name == definition.name)
+            .ok_or("formula variable disappeared")?;
+        let (bounds, time_length, depth_length) = spatial_bounds(metadata, variable)
+            .ok_or_else(|| format!("{}: needs two spatial dimensions", definition.name))?;
+        if cli.time >= time_length {
+            return Err(format!(
+                "{}: --time {} is out of range ({time_length} step(s))",
+                definition.name, cli.time
+            )
+            .into());
+        }
+        if cli.level >= depth_length {
+            return Err(format!(
+                "{}: --level {} is out of range ({depth_length} level(s))",
+                definition.name, cli.level
+            )
+            .into());
+        }
+        let slice = source
+            .read_slice(&SliceRequest {
+                variable: definition.name.clone(),
+                time: cli.time,
+                depth: cli.level,
+                bounds,
+            })
+            .map_err(|error| format!("{}: {error}", definition.name))?;
+        let mut state = state_for_source(source.as_ref());
+        state.view.selected_variable = Some(definition.name.clone());
+        state.view.time_index = cli.time;
+        state.view.depth_index = cli.level;
+        state.view.time_label = source.time_label_for_variable(&definition.name, cli.time);
+        state.set_slice(slice);
+        let path = export_slice_to(&state, &datasets[index], metadata, &directory)
+            .map_err(|error| format!("{}: {error}", definition.name))?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
 struct PlaceholderSource {
     metadata: DatasetMetadata,
 }
@@ -796,7 +1484,7 @@ fn collection_variables(sources: &[Arc<dyn data::DataSource>]) -> Vec<Variable> 
             .metadata()
             .variables
             .iter()
-            .filter(|variable| variable.numeric && plottable_variable(variable))
+            .filter(|variable| variable.numeric)
         {
             if !variables
                 .iter()
@@ -929,7 +1617,7 @@ impl LazyRemoteGribSource {
             .metadata()
             .variables
             .get(ordinal)
-            .filter(|variable| variable.numeric && plottable_variable(variable))
+            .filter(|variable| variable.numeric)
             .map(|variable| variable.name.clone())
             .ok_or_else(|| {
                 format!(
@@ -1072,6 +1760,11 @@ struct RemoteSliceMessage {
     result: Result<(Slice2D, Option<(f64, f64)>), String>,
 }
 
+struct BoundsResolutionMessage {
+    generation: Generation,
+    result: Result<(Bounds, bool), String>,
+}
+
 struct RemotePlotMessage {
     generation: Generation,
     result: Result<RemotePlotResult, String>,
@@ -1090,7 +1783,7 @@ fn state_for_source(source: &dyn data::DataSource) -> AppState {
             .metadata()
             .variables
             .iter()
-            .filter(|variable| variable.numeric && plottable_variable(variable))
+            .filter(|variable| variable.numeric)
             .cloned()
             .collect(),
         ..AppState::default()
@@ -1118,6 +1811,18 @@ fn export_current_slice(
     dataset: &str,
     metadata: &DatasetMetadata,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let directory = env::var_os("NCVIEW_EXPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    export_slice_to(state, dataset, metadata, &directory)
+}
+
+fn export_slice_to(
+    state: &AppState,
+    dataset: &str,
+    metadata: &DatasetMetadata,
+    directory: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let slice = state
         .view
         .slice
@@ -1136,7 +1841,16 @@ fn export_current_slice(
         .view
         .limits
         .or_else(|| slice.statistics.map(|stats| (stats.min, stats.max)))
-        .filter(|(min, max)| min.is_finite() && max.is_finite() && max > min)
+        .filter(|(min, max)| min.is_finite() && max.is_finite() && max >= min)
+        .map(|(min, max)| {
+            // A constant field (e.g. a zero difference) still needs a drawable range.
+            if max > min {
+                (min, max)
+            } else {
+                let pad = min.abs().max(1.0) * 0.5;
+                (min - pad, max + pad)
+            }
+        })
         .ok_or("current slice has no finite color range")?;
     let raster = ncview_rs::render::raster::rgb_raster_with_options(
         slice,
@@ -1148,10 +1862,7 @@ fn export_current_slice(
         None,
         state.view.selected_point,
     );
-    let directory = env::var_os("NCVIEW_EXPORT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    fs::create_dir_all(&directory)?;
+    fs::create_dir_all(directory)?;
     let dataset_stem = Path::new(dataset)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1239,7 +1950,7 @@ fn depth_index_at(x: u16, area: Rect, depth_length: usize) -> usize {
 fn translate_mouse(
     command: Command,
     area: Rect,
-    metadata: &DatasetMetadata,
+    plottable: &[ncview_rs::data::Variable],
     view: &ncview_rs::app::ViewModel,
     variable_query: &str,
     graphics: Option<&GraphicsRenderer>,
@@ -1256,18 +1967,17 @@ fn translate_mouse(
             translate_update_drag(x, y, view)
         }
         Command::MouseRelease { x, y } => {
-            translate_mouse_release(x, y, area, metadata, view, variable_query, graphics)
+            translate_mouse_release(x, y, area, plottable, view, variable_query, graphics)
         }
         Command::PointerScroll { x, y, delta } => {
             let areas = dashboard_layout::dashboard(area, view.depth_length > 1);
             if view.depth_length > 1 && areas.level.contains((x, y).into()) {
                 return Command::MoveDepth(delta);
             }
-            translate_scroll(x, y, delta, areas.sidebar, metadata, view, variable_query)
-                .unwrap_or(Command::Pointer { x, y })
+            translate_scroll(x, y, delta, areas.sidebar, view).unwrap_or(Command::Pointer { x, y })
         }
         command => {
-            translate_mouse_position(command, area, metadata, view, variable_query, graphics)
+            translate_mouse_position(command, area, plottable, view, variable_query, graphics)
         }
     }
 }
@@ -1309,7 +2019,7 @@ fn translate_mouse_release(
     x: u16,
     y: u16,
     area: Rect,
-    metadata: &DatasetMetadata,
+    plottable: &[ncview_rs::data::Variable],
     view: &ncview_rs::app::ViewModel,
     variable_query: &str,
     graphics: Option<&GraphicsRenderer>,
@@ -1318,7 +2028,7 @@ fn translate_mouse_release(
         return translate_mouse_position(
             Command::MouseClick { x, y, right: false },
             area,
-            metadata,
+            plottable,
             view,
             variable_query,
             graphics,
@@ -1358,36 +2068,21 @@ fn translate_mouse_release(
         .unwrap_or(Command::CancelDrag)
 }
 
-/// Single source of truth for the sidebar Level section geometry used by the
-/// mouse hit-test. `variable_rows` must match the widget's `.take(8)` count in
-/// `sidebar.rs`, so the two agree on where the variable rows end.
+/// Single source of truth for the sidebar Level box geometry used by the mouse
+/// hit-test. The box is only present when the selected variable has levels, and
+/// its geometry is derived from the same `sidebar_boxes` split the renderer
+/// uses, so click targets cannot drift from what is drawn.
 fn level_geometry(
     sidebar: Rect,
     view: &ncview_rs::app::ViewModel,
-    metadata: &DatasetMetadata,
-    variable_query: &str,
 ) -> Option<ncview_rs::ui::level::LevelSection> {
-    let plottable_all: Vec<_> = metadata
-        .variables
-        .iter()
-        .filter(|variable| variable.numeric && plottable_variable(variable))
-        .cloned()
-        .collect();
-    let filtered = ncview_rs::ui::sidebar::filter_variables(&plottable_all, variable_query);
-    // The widget draws a single "no plottable fields" placeholder row when the
-    // list is empty; match that so the section heading stays aligned.
-    let variable_rows = if filtered.is_empty() {
-        1
-    } else {
-        filtered.len().min(8)
-    };
+    if view.depth_length <= 1 {
+        return None;
+    }
+    let boxes = ncview_rs::ui::sidebar::sidebar_boxes(sidebar, true);
     let stepper_span = (usize::from(sidebar.width.saturating_sub(2)) / 2) as u16;
-    let geometry = ncview_rs::ui::level::level_section(
-        sidebar,
-        variable_rows,
-        view.level_labels.len(),
-        stepper_span,
-    )?;
+    let geometry =
+        ncview_rs::ui::level::level_section(boxes.level, view.level_labels.len(), stepper_span)?;
     let (top, _) = ncview_rs::ui::level::level_window(
         view.level_labels.len(),
         geometry.list_rows,
@@ -1399,137 +2094,101 @@ fn level_geometry(
     })
 }
 
-/// Map a click inside the sidebar panel to the command its row represents, or
-/// `None` when the row carries no control. Sidebar rows: filename, colormap
-/// name/scale, a View actions heading, two view-action rows, a Navigation
-/// heading, two navigation rows, variables, the optional Level section,
-/// dimensions, then the limit/filter controls.
+/// Map a click inside the sidebar to the command its box/row represents, or
+/// `None` when the row carries no control. The sidebar is a stack of bordered
+/// boxes (File, Controls, Variables, optional Level, Scale); every hit-test is
+/// computed from the shared `sidebar_boxes` geometry.
 fn translate_sidebar_position(
     x: u16,
     y: u16,
     sidebar: Rect,
-    metadata: &DatasetMetadata,
     view: &ncview_rs::app::ViewModel,
-    variable_query: &str,
 ) -> Option<Command> {
     if !sidebar.contains((x, y).into()) {
         return None;
     }
-    let plottable_all: Vec<_> = metadata
-        .variables
-        .iter()
-        .filter(|variable| variable.numeric && plottable_variable(variable))
-        .cloned()
-        .collect();
-    let plottable = ncview_rs::ui::sidebar::filter_variables(&plottable_all, variable_query)
-        .into_iter()
-        .take(8)
-        .collect::<Vec<_>>();
-    let action_third = (sidebar.width / 3).max(1);
-    let action_row_one = sidebar.y.saturating_add(6);
-    let action_row_two = sidebar.y.saturating_add(7);
-    if y == action_row_one {
-        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
-            0 => Command::CyclePalette,
-            1 => Command::TogglePaletteReverse,
-            _ => Command::AutomaticLimits,
-        });
+    let show_level = view.depth_length > 1;
+    let boxes = ncview_rs::ui::sidebar::sidebar_boxes(sidebar, show_level);
+    let third = (sidebar.width / 3).max(1);
+    let column = (x.saturating_sub(sidebar.x)) / third;
+
+    // File box: filename, colormap, scale rows.
+    if y >= boxes.file.y && y < boxes.file.bottom() {
+        return match y.saturating_sub(boxes.file.y) {
+            2 => Some(Command::CyclePalette),
+            3 => Some(Command::ToggleScale),
+            _ => None,
+        };
     }
-    if y == action_row_two {
-        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
-            0 => Command::OpenLimits,
-            1 => Command::OpenFilter,
-            _ => Command::OpenAxisOverlay,
-        });
+    // Controls box: four action rows, each split into thirds.
+    if y >= boxes.controls.y && y < boxes.controls.bottom() {
+        return match y.saturating_sub(boxes.controls.y) {
+            1 => Some(match column {
+                0 => Command::CyclePalette,
+                1 => Command::TogglePaletteReverse,
+                _ => Command::AutomaticLimits,
+            }),
+            2 => Some(match column {
+                0 => Command::OpenLimits,
+                1 => Command::OpenFilter,
+                _ => Command::OpenAxisOverlay,
+            }),
+            3 => Some(match column {
+                0 => Command::ResetZoom,
+                1 => Command::MoveTime(-1),
+                _ => Command::MoveTime(1),
+            }),
+            4 => Some(match column {
+                0 => Command::DecreasePlaybackSpeed,
+                1 => Command::IncreasePlaybackSpeed,
+                _ => Command::ToggleColorScaleScope,
+            }),
+            _ => None,
+        };
     }
-    let date_row = sidebar.y.saturating_add(9);
-    if y == date_row {
-        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
-            0 => Command::ResetZoom,
-            1 => Command::MoveTime(-1),
-            _ => Command::MoveTime(1),
-        });
-    }
-    let speed_row = sidebar.y.saturating_add(10);
-    if y == speed_row {
-        return Some(match (x.saturating_sub(sidebar.x)) / action_third {
-            0 => Command::DecreasePlaybackSpeed,
-            1 => Command::IncreasePlaybackSpeed,
-            _ => Command::ToggleColorScaleScope,
-        });
-    }
-    let search_row = sidebar.y.saturating_add(12);
-    if y == search_row {
+    // Variables box: the compact view shows the selected field and the
+    // browse affordance; any click opens the variable browser.
+    if y >= boxes.variables.y && y < boxes.variables.bottom() {
         return Some(Command::OpenVariableSearch);
     }
-    let variable_start = search_row.saturating_add(1);
-    if y >= variable_start && usize::from(y - variable_start) < plottable.len() {
-        return Some(Command::SelectVariableAt(usize::from(y - variable_start)));
-    }
-    let section = level_geometry(sidebar, view, metadata, variable_query);
-    if let Some(section) = section.as_ref() {
+    // Level box: stepper and list rows.
+    if let Some(section) = level_geometry(sidebar, view) {
         if y == section.stepper {
-            return ncview_rs::ui::level::level_button(section, x).map(|button| match button {
+            return ncview_rs::ui::level::level_button(&section, x).map(|button| match button {
                 ncview_rs::ui::level::DepthButton::Prev => Command::MoveDepth(-1),
                 ncview_rs::ui::level::DepthButton::Next => Command::MoveDepth(1),
             });
         }
-        if let Some(index) = ncview_rs::ui::level::level_at(section, y) {
+        if let Some(index) = ncview_rs::ui::level::level_at(&section, y) {
             return Some(Command::SetDepth(index));
         }
     }
-    let dimensions = metadata.dimensions.iter().take(8).count();
-    let level_rows = section.map_or(0, |section| {
-        usize::from(section.list_top) + section.list_rows - usize::from(section.heading)
-    });
-    let dimensions_heading = variable_start
-        .saturating_add(u16::try_from(plottable.len()).unwrap_or(u16::MAX))
-        .saturating_add(1)
-        .saturating_add(u16::try_from(level_rows).unwrap_or(u16::MAX));
-    let dimensions_end = dimensions_heading
-        .saturating_add(1)
-        .saturating_add(u16::try_from(dimensions).unwrap_or(u16::MAX));
-    let colormap_heading = sidebar.y.saturating_add(2);
-    let palette_row = colormap_heading.saturating_add(1);
-    let scale_row = colormap_heading.saturating_add(2);
-    let limits_row = dimensions_end.saturating_add(1);
-    let filter_row = dimensions_end.saturating_add(2);
-    let scope_row = dimensions_end.saturating_add(4);
-    let reverse_row = dimensions_end.saturating_add(5);
-    let command = match y {
-        value if value == palette_row => Command::CyclePalette,
-        value if value == scale_row => Command::ToggleScale,
-        value if value == limits_row => Command::OpenLimits,
-        value if value == filter_row => Command::OpenFilter,
-        value if value == scope_row => Command::ToggleColorScaleScope,
-        value if value == reverse_row => {
-            if x >= sidebar.x.saturating_add(18) {
-                Command::ToggleLandBorders
-            } else {
-                Command::TogglePaletteReverse
-            }
-        }
-        _ => return None,
-    };
-    Some(command)
+    // Scale box: fixed rows — limits, mask, stats (4), scope.
+    if y >= boxes.scale.y && y < boxes.scale.bottom() {
+        return match y.saturating_sub(boxes.scale.y) {
+            1 => Some(Command::OpenLimits),
+            2 => Some(Command::OpenFilter),
+            7 => Some(Command::ToggleColorScaleScope),
+            _ => None,
+        };
+    }
+    None
 }
 
-/// Route a wheel scroll over the sidebar: the Level section steps depth, the
-/// variable list cycles the selected variable. Outside the sidebar returns
-/// `None` so the event stays a no-op.
+/// Route a wheel scroll over the sidebar: the Level box steps depth, anywhere
+/// else cycles the selected variable. Outside the sidebar returns `None` so the
+/// event stays a no-op.
 fn translate_scroll(
     x: u16,
     y: u16,
     delta: isize,
     sidebar: Rect,
-    metadata: &DatasetMetadata,
     view: &ncview_rs::app::ViewModel,
-    variable_query: &str,
 ) -> Option<Command> {
     if !sidebar.contains((x, y).into()) {
         return None;
     }
-    if let Some(section) = level_geometry(sidebar, view, metadata, variable_query) {
+    if let Some(section) = level_geometry(sidebar, view) {
         let list_bottom = section
             .list_top
             .saturating_add(u16::try_from(section.list_rows.saturating_sub(1)).unwrap_or(u16::MAX));
@@ -1543,7 +2202,7 @@ fn translate_scroll(
 fn translate_mouse_position(
     command: Command,
     area: Rect,
-    metadata: &DatasetMetadata,
+    plottable: &[ncview_rs::data::Variable],
     view: &ncview_rs::app::ViewModel,
     variable_query: &str,
     graphics: Option<&GraphicsRenderer>,
@@ -1557,7 +2216,7 @@ fn translate_mouse_position(
         return Command::ToggleHelp;
     }
     if view.variable_search_active {
-        return translate_variable_browser_click(x, y, clicked, area, metadata, variable_query);
+        return translate_variable_browser_click(x, y, clicked, area, plottable, variable_query);
     }
     if view.help_visible {
         return translate_help_click(x, y, clicked, area);
@@ -1624,8 +2283,7 @@ fn translate_mouse_position(
     if !areas.sidebar.contains((x, y).into()) {
         return Command::Pointer { x, y };
     }
-    translate_sidebar_position(x, y, areas.sidebar, metadata, view, variable_query)
-        .unwrap_or(Command::Pointer { x, y })
+    translate_sidebar_position(x, y, areas.sidebar, view).unwrap_or(Command::Pointer { x, y })
 }
 
 fn translate_variable_browser_click(
@@ -1633,7 +2291,7 @@ fn translate_variable_browser_click(
     y: u16,
     clicked: bool,
     area: Rect,
-    metadata: &DatasetMetadata,
+    plottable: &[ncview_rs::data::Variable],
     variable_query: &str,
 ) -> Command {
     let popup = variable_browser_rect(area);
@@ -1644,13 +2302,7 @@ fn translate_variable_browser_click(
         let inner_top = popup.y.saturating_add(3);
         if y >= inner_top {
             let index = usize::from(y - inner_top);
-            let plottable = metadata
-                .variables
-                .iter()
-                .filter(|variable| variable.numeric && plottable_variable(variable))
-                .cloned()
-                .collect::<Vec<_>>();
-            let visible = ncview_rs::ui::sidebar::filter_variables(&plottable, variable_query);
+            let visible = ncview_rs::ui::sidebar::filter_variables(plottable, variable_query);
             if index < visible.len() {
                 return Command::SelectVariableAt(index);
             }
@@ -1682,10 +2334,12 @@ fn translate_overlay_mouse(
     }
     match overlay {
         Overlay::CommandPalette => translate_command_palette_click(x, y, clicked, popup, view),
+        Overlay::PalettePicker => Command::Pointer { x, y },
         Overlay::Limits | Overlay::Filter => translate_limit_overlay_click(x, y, clicked, popup),
         Overlay::Axis => translate_axis_overlay_click(x, y, clicked, popup),
+        Overlay::ViewBounds => Command::Pointer { x, y },
         Overlay::Plot => translate_plot_overlay_click(x, y, clicked, popup),
-        Overlay::TimeSeries => Command::Pointer { x, y },
+        Overlay::TimeSeries | Overlay::Formula => Command::Pointer { x, y },
     }
 }
 
@@ -1798,7 +2452,13 @@ fn help_rect(area: Rect) -> Rect {
 }
 
 fn overlay_rect(area: Rect, overlay: Overlay) -> Rect {
-    let large = matches!(overlay, Overlay::CommandPalette | Overlay::Plot);
+    if overlay == Overlay::PalettePicker {
+        return ncview_rs::ui::popup::picker_popup_rect(area);
+    }
+    let large = matches!(
+        overlay,
+        Overlay::CommandPalette | Overlay::Plot | Overlay::Formula
+    );
     let width = if large {
         area.width.saturating_mul(3) / 4
     } else {
@@ -1875,29 +2535,56 @@ fn map_drawable(
     }
 }
 
+/// Choose the timeline slot to display after switching files. The time
+/// position is anchored to the newly selected file (keeping the local time
+/// index where that file has one) rather than the collection's earliest
+/// frame. Without this, a file switch resets the index to 0, and because the
+/// active file is derived from `timeline[time_index].source_index`, the viewer
+/// silently snaps back to the first source and the displayed data never
+/// changes.
+fn anchored_time_index(
+    previous_point: Option<&TimelinePoint>,
+    timeline: &[TimelinePoint],
+    source_index: usize,
+) -> usize {
+    let slots: Vec<usize> = timeline
+        .iter()
+        .enumerate()
+        .filter(|(_, point)| point.source_index == source_index)
+        .map(|(index, _)| index)
+        .collect();
+    let offset = previous_point.map_or(0, |point| point.local_index);
+    slots
+        .get(offset)
+        .copied()
+        .or_else(|| slots.first().copied())
+        .unwrap_or(0)
+}
+
 fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
     let selected = state
         .variables
         .iter()
-        .filter(|variable| variable.numeric && plottable_variable(variable))
+        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
         .max_by_key(|variable| {
             let area_penalty = variable.name.to_ascii_lowercase().contains("area");
             (variable.dimensions.len(), !area_penalty)
         })
+        .or_else(|| state.variables.iter().find(|variable| variable.numeric))
         .map(|variable| variable.name.clone());
     state.view.selected_variable = selected;
     if let Some(variable) = state.view.selected_variable.clone()
         && let Some(metadata_variable) =
             metadata.variables.iter().find(|item| item.name == variable)
     {
-        state.view.axis_options = if data::is_mesh_variable(metadata_variable) {
-            vec!["latitude".into(), "longitude".into()]
+        state.view.axis_options = metadata_variable.dimensions.clone();
+        if metadata_variable.dimensions.len() >= 2 {
+            let (x, y) = default_display_axes(metadata, metadata_variable);
+            state.view.x_axis = Some(x);
+            state.view.y_axis = Some(y);
         } else {
-            metadata_variable.dimensions.clone()
-        };
-        if data::is_mesh_variable(metadata_variable) {
-            state.view.x_axis = Some("longitude".into());
-            state.view.y_axis = Some("latitude".into());
+            state.view.x_axis = None;
+            state.view.y_axis = None;
         }
         let (time_length, depth_length) = leading_lengths(metadata, metadata_variable);
         state.view.time_length = time_length;
@@ -1907,10 +2594,6 @@ fn select_initial_variable(state: &mut AppState, metadata: &DatasetMetadata) {
             state.variables.len()
         );
     }
-}
-
-fn plottable_variable(variable: &Variable) -> bool {
-    variable.dimensions.len() >= 2 || data::is_mesh_variable(variable)
 }
 
 fn earliest_source_index(sources: &[Arc<dyn data::DataSource>]) -> usize {
@@ -1938,7 +2621,7 @@ fn source_earliest_time(source: &dyn data::DataSource) -> Option<DateTime<Utc>> 
         .metadata()
         .variables
         .iter()
-        .filter(|variable| variable.numeric && plottable_variable(variable))
+        .filter(|variable| variable.numeric && variable.dimensions.len() >= 2)
         .flat_map(|variable| {
             let time_length = leading_lengths(source.metadata(), variable).0.max(1);
             (0..time_length).filter_map(|index| {
@@ -2088,15 +2771,37 @@ fn load_selected(
     else {
         return;
     };
-    let Some((full_bounds, _time_length, depth_length)) = plane_bounds(
+    let Some((full_bounds, _time_length, mut depth_length)) = plane_bounds(
         metadata,
         variable,
         state.view.x_axis.as_deref(),
         state.view.y_axis.as_deref(),
     ) else {
-        state.view.status = format!("{variable_name}: needs at least two dimensions");
+        let axes = state.view.x_axis.clone().zip(state.view.y_axis.clone());
+        report_unavailable_plane(
+            &mut state.view,
+            variable,
+            metadata,
+            axes.as_ref().map(|(x, y)| (x.as_str(), y.as_str())),
+        );
         return;
     };
+    if state
+        .view
+        .x_axis
+        .as_deref()
+        .into_iter()
+        .chain(state.view.y_axis.as_deref())
+        .any(|axis| {
+            metadata
+                .dimensions
+                .iter()
+                .find(|dimension| dimension.name.eq_ignore_ascii_case(axis))
+                .is_some_and(|dimension| dimension.role == AxisRole::Depth)
+        })
+    {
+        depth_length = 1;
+    }
     state.view.time_length = state.view.timeline.len().max(1);
     state.view.depth_length = depth_length;
     state.view.depth_index = state.view.depth_index.min(depth_length.saturating_sub(1));
@@ -2104,6 +2809,43 @@ fn load_selected(
     state.view.level_label = source.vertical_label(&variable_name, state.view.depth_index);
     state.view.level_labels = source.vertical_labels(&variable_name);
     state.view.depth_cursor = state.view.depth_index;
+    let plane_axes = state
+        .view
+        .x_axis
+        .as_deref()
+        .zip(state.view.y_axis.as_deref());
+    let previous = state.view.fixed_dimensions.clone();
+    state.view.fixed_dimensions = variable
+        .dimensions
+        .iter()
+        .filter_map(|name| {
+            if plane_axes
+                .is_some_and(|(x, y)| name.eq_ignore_ascii_case(x) || name.eq_ignore_ascii_case(y))
+            {
+                return None;
+            }
+            let dimension = metadata
+                .dimensions
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(name))?;
+            if matches!(dimension.role, AxisRole::Time | AxisRole::Depth) || dimension.length == 0 {
+                return None;
+            }
+            let index = previous
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(name))
+                .map_or(0, |item| item.index.min(dimension.length - 1));
+            Some(FixedDimension {
+                name: name.clone(),
+                index,
+                length: dimension.length,
+            })
+        })
+        .collect();
+    state.view.focused_fixed_dimension = state
+        .view
+        .focused_fixed_dimension
+        .min(state.view.fixed_dimensions.len().saturating_sub(1));
     state.view.full_bounds = Some(full_bounds);
     let bounds = state.view.zoom_bounds.unwrap_or(full_bounds);
     let fixed_axes = fixed_axes_for_plane(
@@ -2113,6 +2855,7 @@ fn load_selected(
         state.view.y_axis.as_deref(),
         timeline_point.local_index,
         state.view.depth_index,
+        &state.view.fixed_dimensions,
     );
     let request = SliceRequest {
         variable: variable_name.clone(),
@@ -2248,8 +2991,15 @@ fn apply_remote_slice(
                 .level_label
                 .as_deref()
                 .map_or_else(String::new, |label| format!("  level={label}"));
-            state.view.status =
-                format!("{}  time={time_text}{level_text}  ready", message.variable);
+            state.view.status = format!(
+                "{}  time={time_text}{level_text}  ready{}",
+                message.variable,
+                state
+                    .view
+                    .zoom_approximation
+                    .as_deref()
+                    .map_or_else(String::new, |text| format!("  ({text})")),
+            );
         }
         Err(error) => {
             // Keep the last valid slice visible while the remote request fails.
@@ -2287,7 +3037,11 @@ fn slice_limits(
     scale: ncview_rs::app::ScaleMode,
 ) -> Option<(f64, f64)> {
     if scale == ncview_rs::app::ScaleMode::Log {
-        ncview_rs::app::positive_slice_limits(slice)
+        if slice.is_diff {
+            ncview_rs::app::absolute_slice_limits(slice)
+        } else {
+            ncview_rs::app::positive_slice_limits(slice)
+        }
     } else {
         slice.statistics.map(|stats| (stats.min, stats.max))
     }
@@ -3050,10 +3804,6 @@ fn plane_bounds(
     x_axis: Option<&str>,
     y_axis: Option<&str>,
 ) -> Option<(Bounds, usize, usize)> {
-    if data::is_mesh_variable(variable) {
-        let (time, depth) = axis_lengths(metadata, variable);
-        return Some((Bounds::new(0, 180, 0, 360).ok()?, time, depth));
-    }
     let (Some(x_axis), Some(y_axis)) = (x_axis, y_axis) else {
         return spatial_bounds(metadata, variable);
     };
@@ -3117,6 +3867,7 @@ fn fixed_axes_for_plane(
     y_axis: Option<&str>,
     time_index: usize,
     depth_index: usize,
+    selected: &[FixedDimension],
 ) -> Vec<(String, usize)> {
     let Some((x_axis, y_axis)) = x_axis.zip(y_axis) else {
         return Vec::new();
@@ -3136,11 +3887,132 @@ fn fixed_axes_for_plane(
             let index = match dimension.map(|dimension| dimension.role) {
                 Some(AxisRole::Time) => time_index,
                 Some(AxisRole::Depth) => depth_index,
-                _ => 0,
+                _ => selected
+                    .iter()
+                    .find(|item| item.name.eq_ignore_ascii_case(name))
+                    .map_or(0, |item| item.index),
             };
             Some((name.clone(), index.min(length.saturating_sub(1))))
         })
         .collect()
+}
+
+fn default_display_axes(metadata: &DatasetMetadata, variable: &Variable) -> (String, String) {
+    let dimensions = &variable.dimensions;
+    let role_axis = |role| {
+        dimensions
+            .iter()
+            .find(|name| {
+                metadata
+                    .dimensions
+                    .iter()
+                    .find(|dimension| dimension.name.eq_ignore_ascii_case(name))
+                    .is_some_and(|dimension| dimension.role == role)
+            })
+            .cloned()
+    };
+    if let (Some(x), Some(y)) = (
+        role_axis(AxisRole::Longitude),
+        role_axis(AxisRole::Latitude),
+    ) {
+        return (x, y);
+    }
+    let find = |tokens: &[&str]| {
+        dimensions
+            .iter()
+            .find(|name| {
+                let lower = name.to_ascii_lowercase();
+                tokens.iter().any(|token| lower.contains(token))
+            })
+            .cloned()
+    };
+    let x = find(&["longitude", "lon", "width", "column", "cols"]);
+    let y = find(&["latitude", "lat", "height", "row", "rows"]);
+    if let (Some(x), Some(y)) = (x, y) {
+        return (x, y);
+    }
+    let eligible = dimensions
+        .iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            !["time", "date", "depth", "level"]
+                .iter()
+                .any(|token| lower.contains(token))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let x = eligible
+        .last()
+        .cloned()
+        .or_else(|| dimensions.last().cloned())
+        .unwrap_or_default();
+    let y = eligible
+        .iter()
+        .rev()
+        .nth(1)
+        .cloned()
+        .or_else(|| dimensions.iter().rev().nth(1).cloned())
+        .unwrap_or_default();
+    (x, y)
+}
+
+fn unavailable_plane_message(
+    variable: &Variable,
+    metadata: &DatasetMetadata,
+    axes: Option<(&str, &str)>,
+) -> String {
+    let shapes = variable
+        .dimensions
+        .iter()
+        .map(|name| {
+            let length =
+                dimension_length(metadata, name).map_or_else(|| "?".into(), |n| n.to_string());
+            format!("{name}={length}")
+        })
+        .collect::<Vec<_>>();
+    if let Some(empty) = variable
+        .dimensions
+        .iter()
+        .find(|name| dimension_length(metadata, name) == Some(0))
+    {
+        return format!(
+            "{}: dimension {empty}=0 is empty; cannot display a 2D plane",
+            variable.name
+        );
+    }
+    if variable.dimensions.len() < 2 {
+        let dimensions = if shapes.is_empty() {
+            "no dimensions".into()
+        } else {
+            shapes.join(", ")
+        };
+        return format!(
+            "{} ({dimensions}): needs at least two dimensions to display a 2D plane",
+            variable.name
+        );
+    }
+    if let Some((x, y)) = axes {
+        return format!(
+            "{} ({}): selected axes {y} × {x} do not form a valid plane; choose two distinct dimensions present in the variable",
+            variable.name,
+            shapes.join(", ")
+        );
+    }
+    format!(
+        "{} ({}): cannot form a valid 2D plane from these dimensions",
+        variable.name,
+        shapes.join(", ")
+    )
+}
+
+fn report_unavailable_plane(
+    view: &mut ncview_rs::app::ViewModel,
+    variable: &Variable,
+    metadata: &DatasetMetadata,
+    axes: Option<(&str, &str)>,
+) {
+    view.loading = ncview_rs::app::LoadingState::Error;
+    view.status = unavailable_plane_message(variable, metadata, axes);
 }
 
 #[cfg(test)]
@@ -3161,45 +4033,349 @@ mod timeline_order_tests {
 }
 
 #[cfg(test)]
+mod overlay_dismissal_tests {
+    use super::clear_terminal_after_overlay_close;
+    use ncview_rs::app::Overlay;
+    use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+
+    #[test]
+    fn closing_palette_picker_clears_stale_terminal_cells() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal builds");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("Choose a colormap"), frame.area());
+            })
+            .expect("popup frame renders");
+
+        clear_terminal_after_overlay_close(&mut terminal, Some(Overlay::PalettePicker), None)
+            .expect("terminal clears after the popup closes");
+
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| cell.symbol() == " ")
+        );
+    }
+
+    #[test]
+    fn keeping_an_overlay_open_does_not_clear_the_terminal() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal builds");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("Choose a colormap"), frame.area());
+            })
+            .expect("popup frame renders");
+
+        clear_terminal_after_overlay_close(
+            &mut terminal,
+            Some(Overlay::PalettePicker),
+            Some(Overlay::PalettePicker),
+        )
+        .expect("no clear is needed while the popup stays open");
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Choose a colormap"));
+    }
+}
+
+#[cfg(test)]
+mod cli_bounds_startup_tests {
+    use super::*;
+
+    struct CoordinateSource {
+        metadata: DatasetMetadata,
+    }
+
+    impl data::DataSource for CoordinateSource {
+        fn metadata(&self) -> &DatasetMetadata {
+            &self.metadata
+        }
+
+        fn read_slice(&self, _request: &SliceRequest) -> ncview_rs::error::Result<Slice2D> {
+            Err(ncview_rs::error::NcvError::WorkerStopped)
+        }
+
+        fn dimension_values(&self, _variable: &str, dimension: &str) -> Option<Vec<f64>> {
+            match dimension {
+                "longitude_dim" => Some(vec![0.0, 90.0, 180.0, 270.0]),
+                "latitude_dim" => Some(vec![-30.0, 0.0, 30.0]),
+                _ => None,
+            }
+        }
+    }
+
+    fn coordinate_source() -> CoordinateSource {
+        CoordinateSource {
+            metadata: DatasetMetadata {
+                path: "test-coordinate-source".into(),
+                format: DatasetFormat::NetCdf4,
+                dimensions: vec![
+                    data::Dimension {
+                        name: "latitude_dim".into(),
+                        length: 3,
+                        role: AxisRole::Latitude,
+                    },
+                    data::Dimension {
+                        name: "longitude_dim".into(),
+                        length: 4,
+                        role: AxisRole::Longitude,
+                    },
+                ],
+                variables: vec![Variable {
+                    name: "field".into(),
+                    dimensions: vec!["latitude_dim".into(), "longitude_dim".into()],
+                    numeric: true,
+                    units: None,
+                    long_name: None,
+                    standard_name: None,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn explicit_cli_bounds_override_restored_zoom_after_axis_selection() {
+        let source = coordinate_source();
+        let mut state = AppState::default();
+        state.view.selected_variable = Some("field".into());
+        state.view.x_axis = Some("longitude_dim".into());
+        state.view.y_axis = Some("latitude_dim".into());
+        state.view.zoom_bounds = Some(Bounds::new(1, 2, 1, 2).unwrap());
+
+        apply_requested_view_bounds(
+            &mut state,
+            &source,
+            NumericBounds {
+                min_x: 90.0,
+                max_x: 180.0,
+                min_y: -30.0,
+                max_y: 0.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.view.zoom_bounds,
+            Some(Bounds::new(0, 2, 1, 3).unwrap())
+        );
+    }
+
+    #[test]
+    fn invalid_source_bounds_do_not_replace_a_restored_zoom() {
+        let source = coordinate_source();
+        let mut state = AppState::default();
+        state.view.selected_variable = Some("field".into());
+        state.view.x_axis = Some("longitude_dim".into());
+        state.view.y_axis = Some("latitude_dim".into());
+        let restored = Bounds::new(1, 2, 1, 2).unwrap();
+        state.view.zoom_bounds = Some(restored);
+
+        let result = apply_requested_view_bounds(
+            &mut state,
+            &source,
+            NumericBounds {
+                min_x: 90.0,
+                max_x: 180.0,
+                min_y: 100.0,
+                max_y: 110.0,
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(state.view.zoom_bounds, Some(restored));
+    }
+}
+
+#[cfg(test)]
+mod unavailable_plane_message_tests {
+    use super::{default_display_axes, report_unavailable_plane, unavailable_plane_message};
+    use ncview_rs::app::{AppState, LoadingState};
+    use ncview_rs::data::{AxisRole, DatasetFormat, DatasetMetadata, Dimension, Variable};
+
+    fn variable(name: &str, dimensions: &[&str]) -> Variable {
+        Variable {
+            name: name.into(),
+            dimensions: dimensions
+                .iter()
+                .map(|dimension| (*dimension).into())
+                .collect(),
+            numeric: true,
+            units: None,
+            long_name: None,
+            standard_name: None,
+        }
+    }
+
+    fn metadata(dimensions: Vec<Dimension>) -> DatasetMetadata {
+        DatasetMetadata {
+            path: "test.nc4".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions,
+            variables: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explains_scalar_and_one_dimensional_variables_with_their_dimensions() {
+        let scalar = unavailable_plane_message(&variable("scalar", &[]), &metadata(vec![]), None);
+        assert!(scalar.contains("scalar"));
+        assert!(scalar.contains("no dimensions"));
+        let one_dimensional = unavailable_plane_message(
+            &variable("profile", &["pressure"]),
+            &metadata(vec![Dimension {
+                name: "pressure".into(),
+                length: 8,
+                role: AxisRole::Depth,
+            }]),
+            None,
+        );
+        assert!(one_dimensional.contains("profile"));
+        assert!(one_dimensional.contains("pressure=8"));
+        assert!(one_dimensional.contains("at least two"));
+    }
+
+    #[test]
+    fn explains_empty_dimensions_and_invalid_selected_axes() {
+        let variable = variable("field", &["Row", "Column"]);
+        let empty_metadata = metadata(vec![
+            Dimension {
+                name: "Row".into(),
+                length: 0,
+                role: AxisRole::Other,
+            },
+            Dimension {
+                name: "Column".into(),
+                length: 5,
+                role: AxisRole::Other,
+            },
+        ]);
+        assert!(unavailable_plane_message(&variable, &empty_metadata, None).contains("Row=0"));
+        let valid_metadata = metadata(vec![
+            Dimension {
+                name: "Row".into(),
+                length: 2,
+                role: AxisRole::Other,
+            },
+            Dimension {
+                name: "Column".into(),
+                length: 5,
+                role: AxisRole::Other,
+            },
+        ]);
+        assert!(
+            unavailable_plane_message(&variable, &valid_metadata, Some(("Missing", "Column")))
+                .contains("Missing")
+        );
+    }
+
+    #[test]
+    fn coordinate_roles_take_precedence_over_raw_axis_name_fallbacks() {
+        let dimensions = vec![
+            Dimension {
+                name: "y_index".into(),
+                length: 2,
+                role: AxisRole::Latitude,
+            },
+            Dimension {
+                name: "x_index".into(),
+                length: 3,
+                role: AxisRole::Longitude,
+            },
+            Dimension {
+                name: "sample".into(),
+                length: 4,
+                role: AxisRole::Other,
+            },
+        ];
+        let variable = variable("field", &["y_index", "x_index", "sample"]);
+        assert_eq!(
+            default_display_axes(&metadata(dimensions), &variable),
+            ("x_index".into(), "y_index".into())
+        );
+    }
+
+    #[test]
+    fn unavailable_plane_is_reported_as_finished_error_not_perpetual_loading() {
+        let mut state = AppState::default();
+        state.view.loading = LoadingState::Loading;
+        let variable = variable("scalar", &[]);
+        report_unavailable_plane(&mut state.view, &variable, &metadata(vec![]), None);
+        assert_eq!(state.view.loading, LoadingState::Error);
+        assert!(state.view.status.contains("scalar"));
+        assert!(state.view.status.contains("no dimensions"));
+    }
+}
+
+#[cfg(test)]
+mod file_switch_timeline_tests {
+    use super::anchored_time_index;
+    use ncview_rs::app::TimelinePoint;
+
+    fn point(source_index: usize, local_index: usize, label: &str) -> TimelinePoint {
+        TimelinePoint {
+            source_index,
+            local_index,
+            label: label.to_owned(),
+        }
+    }
+
+    #[test]
+    fn switching_files_anchors_to_the_new_files_frame_not_the_earliest() {
+        // One frame per file sorted by time: the GEFS collection case. After
+        // switching files the view must show the newly selected file's frame;
+        // resetting to the global frame 0 snaps the active file back to 1/3
+        // and the displayed data never changes.
+        let timeline = vec![point(0, 0, "t0"), point(1, 0, "t1"), point(2, 0, "t2")];
+        let previous = point(0, 0, "t0");
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 2), 2);
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 1), 1);
+    }
+
+    #[test]
+    fn switching_files_preserves_the_local_time_position() {
+        let timeline = vec![
+            point(0, 0, "a0"),
+            point(0, 1, "a1"),
+            point(0, 2, "a2"),
+            point(1, 0, "b0"),
+            point(1, 1, "b1"),
+            point(1, 2, "b2"),
+        ];
+        let previous = point(0, 2, "a2");
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 1), 5);
+        let previous = point(0, 0, "a0");
+        assert_eq!(anchored_time_index(Some(&previous), &timeline, 1), 3);
+    }
+
+    #[test]
+    fn missing_frames_fall_back_to_the_first_slot() {
+        let timeline = vec![point(0, 0, "a0"), point(1, 0, "b0")];
+        assert_eq!(anchored_time_index(None, &timeline, 1), 1);
+        assert_eq!(
+            anchored_time_index(Some(&point(2, 0, "x")), &timeline, 2),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
 mod sidebar_hit_tests {
     use super::{level_geometry, translate_scroll, translate_sidebar_position};
     use ncview_rs::app::{AppState, Command};
-    use ncview_rs::data::{AxisRole, DatasetFormat, DatasetMetadata, Dimension, Variable};
     use ratatui::layout::Rect;
 
-    const SIDEBAR: Rect = Rect::new(0, 0, 32, 30);
-
-    fn metadata_with_variable() -> DatasetMetadata {
-        DatasetMetadata {
-            path: "f.nc".into(),
-            format: DatasetFormat::NetCdf4,
-            dimensions: vec![
-                Dimension {
-                    name: "lev".into(),
-                    length: 12,
-                    role: AxisRole::Depth,
-                },
-                Dimension {
-                    name: "lat".into(),
-                    length: 4,
-                    role: AxisRole::Latitude,
-                },
-                Dimension {
-                    name: "lon".into(),
-                    length: 5,
-                    role: AxisRole::Longitude,
-                },
-            ],
-            variables: vec![Variable {
-                name: "temp".into(),
-                dimensions: vec!["lev".into(), "lat".into(), "lon".into()],
-                numeric: true,
-                units: None,
-                long_name: None,
-                standard_name: None,
-            }],
-        }
-    }
+    // Tall enough that all six boxes keep their natural height; ratatui
+    // squeezes every Length box down when their total exceeds the area.
+    const SIDEBAR: Rect = Rect::new(0, 0, 32, 46);
 
     fn state_with_levels() -> AppState {
         let mut state = AppState::default();
@@ -3211,17 +4387,14 @@ mod sidebar_hit_tests {
     #[test]
     fn stepper_and_level_rows_dispatch_depth_commands() {
         let state = state_with_levels();
-        let metadata = metadata_with_variable();
-        let section = level_geometry(SIDEBAR, &state.view, &metadata, "").unwrap();
+        let section = level_geometry(SIDEBAR, &state.view).unwrap();
 
         assert_eq!(
             translate_sidebar_position(
                 section.stepper_prev.x + 1,
                 section.stepper,
                 SIDEBAR,
-                &metadata,
                 &state.view,
-                "",
             ),
             Some(Command::MoveDepth(-1))
         );
@@ -3230,9 +4403,7 @@ mod sidebar_hit_tests {
                 section.stepper_next.x + 1,
                 section.stepper,
                 SIDEBAR,
-                &metadata,
                 &state.view,
-                "",
             ),
             Some(Command::MoveDepth(1))
         );
@@ -3242,9 +4413,7 @@ mod sidebar_hit_tests {
                 section.list_rect.x + 1,
                 section.list_top + 1,
                 SIDEBAR,
-                &metadata,
                 &state.view,
-                "",
             ),
             Some(Command::SetDepth(index))
         );
@@ -3253,57 +4422,57 @@ mod sidebar_hit_tests {
     #[test]
     fn scroll_over_the_level_list_steps_depth_else_moves_variables() {
         let state = state_with_levels();
-        let metadata = metadata_with_variable();
-        let section = level_geometry(SIDEBAR, &state.view, &metadata, "").unwrap();
+        let section = level_geometry(SIDEBAR, &state.view).unwrap();
         assert_eq!(
-            translate_scroll(
-                SIDEBAR.x + 1,
-                section.list_top,
-                1,
-                SIDEBAR,
-                &metadata,
-                &state.view,
-                "",
-            ),
+            translate_scroll(SIDEBAR.x + 1, section.list_top, 1, SIDEBAR, &state.view),
             Some(Command::MoveDepth(1))
         );
-        // Over the variable list (row 13): previous variable (index arg 0 = up).
+        // Over the variables box: previous variable (index arg 0 = up).
+        let boxes = ncview_rs::ui::sidebar::sidebar_boxes(SIDEBAR, true);
         assert_eq!(
             translate_scroll(
                 SIDEBAR.x + 1,
-                SIDEBAR.y + 13,
+                boxes.variables.y + 1,
                 -1,
                 SIDEBAR,
-                &metadata,
                 &state.view,
-                "",
             ),
             Some(Command::SelectVariable(0))
         );
         // Outside the sidebar: ignored.
         assert_eq!(
-            translate_scroll(
-                SIDEBAR.x + 120,
-                SIDEBAR.y + 13,
-                -1,
-                SIDEBAR,
-                &metadata,
-                &state.view,
-                "",
-            ),
+            translate_scroll(SIDEBAR.x + 120, SIDEBAR.y + 13, -1, SIDEBAR, &state.view,),
             None
         );
     }
 
     #[test]
-    fn hit_test_rows_match_the_rendered_widget() {
+    fn click_in_the_variables_box_opens_the_browser() {
         let state = state_with_levels();
-        let metadata = metadata_with_variable();
-        let section = level_geometry(SIDEBAR, &state.view, &metadata, "").unwrap();
-        // One plottable variable -> variable_rows = 1.
-        // heading = first_variable_row(13) + 1 + separator(1) = 15.
-        assert_eq!(section.heading, 15);
-        assert_eq!(section.list_top, 18);
+        let boxes = ncview_rs::ui::sidebar::sidebar_boxes(SIDEBAR, true);
+        assert_eq!(
+            translate_sidebar_position(
+                boxes.variables.x + 1,
+                boxes.variables.y + 1,
+                SIDEBAR,
+                &state.view,
+            ),
+            Some(Command::OpenVariableSearch)
+        );
+    }
+
+    #[test]
+    fn level_box_geometry_agrees_with_the_renderer() {
+        let state = state_with_levels();
+        let boxes = ncview_rs::ui::sidebar::sidebar_boxes(SIDEBAR, true);
+        let section = level_geometry(SIDEBAR, &state.view).unwrap();
+        // The Level hit-test must live inside the box the renderer draws.
+        assert_eq!(section.heading, boxes.level.y);
+        assert!(section.list_top > boxes.level.y);
+        assert!(
+            usize::from(section.list_top) + section.list_rows
+                <= usize::from(boxes.level.y + boxes.level.height)
+        );
     }
 }
 
@@ -3311,21 +4480,11 @@ mod sidebar_hit_tests {
 mod level_bar_tests {
     use super::{depth_index_at, translate_mouse, translate_mouse_position};
     use ncview_rs::app::{AppState, Command};
-    use ncview_rs::data::{DatasetFormat, DatasetMetadata};
     use ratatui::layout::Rect;
 
     const TERM: Rect = Rect::new(0, 0, 100, 30);
     // With show_level, the level band occupies rows 23..=25 (Task 1 test).
     const BAR_ROW: u16 = 24;
-
-    fn empty_metadata() -> DatasetMetadata {
-        DatasetMetadata {
-            path: "f.nc".into(),
-            format: DatasetFormat::NetCdf4,
-            dimensions: Vec::new(),
-            variables: Vec::new(),
-        }
-    }
 
     fn view_with_levels() -> AppState {
         let mut state = AppState::default();
@@ -3346,7 +4505,6 @@ mod level_bar_tests {
     #[test]
     fn click_on_the_bar_seeks_depth() {
         let state = view_with_levels();
-        let metadata = empty_metadata();
         assert_eq!(
             translate_mouse_position(
                 Command::MouseClick {
@@ -3355,7 +4513,7 @@ mod level_bar_tests {
                     right: false
                 },
                 TERM,
-                &metadata,
+                &[],
                 &state.view,
                 "",
                 None,
@@ -3370,7 +4528,7 @@ mod level_bar_tests {
                     right: false
                 },
                 TERM,
-                &metadata,
+                &[],
                 &state.view,
                 "",
                 None,
@@ -3390,7 +4548,7 @@ mod level_bar_tests {
                     zoom: false
                 },
                 TERM,
-                &empty_metadata(),
+                &[],
                 &state.view,
                 "",
                 None,
@@ -3406,7 +4564,7 @@ mod level_bar_tests {
             translate_mouse(
                 Command::UpdateDrag { x: 98, y: BAR_ROW },
                 TERM,
-                &empty_metadata(),
+                &[],
                 &state.view,
                 "",
                 None,
@@ -3426,7 +4584,7 @@ mod level_bar_tests {
                     delta: 1
                 },
                 TERM,
-                &empty_metadata(),
+                &[],
                 &state.view,
                 "",
                 None,
@@ -3446,7 +4604,7 @@ mod level_bar_tests {
                     right: false
                 },
                 TERM,
-                &empty_metadata(),
+                &[],
                 &state.view,
                 "",
                 None,
@@ -3461,7 +4619,7 @@ mod level_bar_tests {
                     delta: 1
                 },
                 TERM,
-                &empty_metadata(),
+                &[],
                 &state.view,
                 "",
                 None,

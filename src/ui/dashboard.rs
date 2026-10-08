@@ -30,16 +30,19 @@ pub fn render(
     view: &ViewModel,
     filename: &str,
     metadata: &DatasetMetadata,
+    plottable: &[crate::data::Variable],
 ) {
-    render_with_search(frame, area, view, filename, metadata, "", false);
+    render_with_search(frame, area, view, filename, metadata, plottable, "", false);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_with_search(
     frame: &mut Frame,
     area: Rect,
     view: &ViewModel,
     filename: &str,
     metadata: &DatasetMetadata,
+    plottable: &[crate::data::Variable],
     variable_query: &str,
     variable_search_active: bool,
 ) {
@@ -49,6 +52,7 @@ pub fn render_with_search(
         view,
         filename,
         metadata,
+        plottable,
         variable_query,
         variable_search_active,
         None,
@@ -63,10 +67,11 @@ pub fn render_with_search_and_image(
     view: &ViewModel,
     filename: &str,
     metadata: &DatasetMetadata,
+    plottable: &[crate::data::Variable],
     variable_query: &str,
     variable_search_active: bool,
     graphics: Option<&mut GraphicsRenderer>,
-    chart_graphics: Option<&mut GraphicsRenderer>,
+    mut chart_graphics: Option<&mut GraphicsRenderer>,
 ) {
     let graphics_label = graphics
         .as_ref()
@@ -85,7 +90,10 @@ pub fn render_with_search_and_image(
     frame.render_widget(header, areas.header);
     let header_line = Line::from(vec![
         Span::styled(" ncv ", theme::title_style(theme::MAUVE)),
-        Span::styled("v0.1.0", Style::default().fg(theme::SUBTEXT)),
+        Span::styled(
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(theme::SUBTEXT),
+        ),
         Span::styled("  ", Style::default()),
         Span::styled(theme::ICON_FILE, theme::title_style(theme::BLUE)),
         Span::styled(format!(" {filename}"), Style::default().fg(theme::TEXT)),
@@ -122,12 +130,16 @@ pub fn render_with_search_and_image(
         view.color_scale_scope,
         variable_query,
         variable_search_active,
+        plottable,
+        view.slice.as_ref(),
         (view.depth_length > 1).then(|| crate::ui::level::LevelPanel {
             labels: &view.level_labels,
             selected: view.depth_index,
             cursor: view.depth_cursor,
             focused: view.sidebar_focused,
         }),
+        &view.fixed_dimensions,
+        view.focused_fixed_dimension,
     );
     canvas::render_with_points_and_image(
         frame,
@@ -206,6 +218,7 @@ pub fn render_with_search_and_image(
     } else if (view.variable_search_active || view.overlay.is_some()) && !view.status.is_empty() {
         view.status.clone()
     } else if let Some(point) = view.hover_point.as_ref() {
+        let (row_dimension, column_dimension) = plane_dimension_names(view, selected_metadata);
         let value = view
             .slice
             .as_ref()
@@ -217,27 +230,26 @@ pub fn render_with_search_and_image(
         } else {
             ""
         };
-        let latitude = point.latitude.map_or_else(
-            || format!("lat index {}", point.row),
-            |value| format!("lat {value:.5}"),
-        );
-        let longitude = point.longitude.map_or_else(
-            || format!("lon index {}", point.col),
-            |value| format!("lon {value:.5}"),
-        );
+        let latitude = point_axis_label("lat", row_dimension, point.latitude, point.row);
+        let longitude = point_axis_label("lon", column_dimension, point.longitude, point.col);
         let statistics = slice_statistics(view);
         format!(
             "hover  {latitude}  {longitude}  value {:>14}{}  |  {statistics}  (click to pin)",
             value, selected,
         )
     } else if let Some((row, col)) = view.selected_point {
-        let latitude = view.selected_coordinates.latitude.map_or_else(
-            || format!("lat index {row}"),
-            |value| format!("lat {value:.5}"),
+        let (row_dimension, column_dimension) = plane_dimension_names(view, selected_metadata);
+        let latitude = point_axis_label(
+            "lat",
+            row_dimension,
+            view.selected_coordinates.latitude,
+            row,
         );
-        let longitude = view.selected_coordinates.longitude.map_or_else(
-            || format!("lon index {col}"),
-            |value| format!("lon {value:.5}"),
+        let longitude = point_axis_label(
+            "lon",
+            column_dimension,
+            view.selected_coordinates.longitude,
+            col,
         );
         let value = view
             .slice
@@ -263,7 +275,24 @@ pub fn render_with_search_and_image(
         status
     };
     status::render(frame, areas.status, &status);
-    popup::render(frame, area, view, metadata, variable_query, chart_graphics);
+    if let Some(renderer) = chart_graphics.as_deref_mut()
+        && (view.variable_search_active
+            || !matches!(
+                view.overlay,
+                Some(crate::app::Overlay::Plot | crate::app::Overlay::TimeSeries)
+            ))
+    {
+        renderer.retire_overlay();
+    }
+    popup::render(
+        frame,
+        area,
+        view,
+        metadata,
+        plottable,
+        variable_query,
+        chart_graphics,
+    );
     if view.help_visible {
         help::render(frame, area);
     }
@@ -293,6 +322,42 @@ fn selected_level_label(
             view.depth_length.saturating_sub(1)
         )
     })
+}
+
+fn plane_dimension_names<'a>(
+    view: &'a ViewModel,
+    variable: Option<&'a crate::data::Variable>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let dimensions = variable.map(|variable| variable.dimensions.as_slice());
+    let row = view.y_axis.as_deref().or_else(|| {
+        dimensions.and_then(|dimensions| {
+            dimensions
+                .get(dimensions.len().checked_sub(2)?)
+                .map(String::as_str)
+        })
+    });
+    let column = view
+        .x_axis
+        .as_deref()
+        .or_else(|| dimensions.and_then(|dimensions| dimensions.last().map(String::as_str)));
+    (row, column)
+}
+
+fn point_axis_label(
+    coordinate_name: &str,
+    dimension_name: Option<&str>,
+    coordinate: Option<f64>,
+    index: usize,
+) -> String {
+    coordinate.map_or_else(
+        || {
+            format!(
+                "{} index {index}",
+                dimension_name.unwrap_or(coordinate_name)
+            )
+        },
+        |value| format!("{coordinate_name} {value:.5}"),
+    )
 }
 
 fn slice_statistics(view: &ViewModel) -> String {
@@ -334,7 +399,13 @@ fn spatial_axes_selected(view: &ViewModel, metadata: &DatasetMetadata) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::format_point_value;
+    use super::{format_point_value, point_axis_label};
+    use crate::{
+        app::AppState,
+        data::{DatasetFormat, DatasetMetadata},
+        render::protocol::GraphicsRenderer,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn point_values_switch_to_scientific_notation_when_needed() {
@@ -342,5 +413,60 @@ mod tests {
         assert_eq!(format_point_value(0.125), "0.125000");
         assert_eq!(format_point_value(1.23456789e-7), "1.23456789e-7");
         assert_eq!(format_point_value(1.23456789e8), "1.23456789e8");
+    }
+
+    #[test]
+    fn index_only_axis_labels_use_the_source_dimension_name() {
+        assert_eq!(
+            point_axis_label("lat", Some("SAT_Tile_Height"), None, 17),
+            "SAT_Tile_Height index 17"
+        );
+        assert_eq!(
+            point_axis_label("lon", Some("SAT_Tile_Width"), None, 23),
+            "SAT_Tile_Width index 23"
+        );
+    }
+
+    #[test]
+    fn geographic_axis_labels_use_coordinate_values_when_available() {
+        assert_eq!(
+            point_axis_label("lat", Some("lat"), Some(12.5), 3),
+            "lat 12.50000"
+        );
+    }
+
+    #[test]
+    fn closing_chart_overlay_retires_pending_secondary_image() {
+        let mut state = AppState::default();
+        state.view.overlay = None;
+        let metadata = DatasetMetadata {
+            path: "test.nc".into(),
+            format: DatasetFormat::NetCdf4,
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+        };
+        let mut chart_graphics = GraphicsRenderer::probe();
+        chart_graphics.stage_test_overlay_state();
+        assert!(chart_graphics.has_pending_image());
+        assert!(chart_graphics.working_set_bytes() > 0);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_with_search_and_image(
+                    frame,
+                    frame.area(),
+                    &state.view,
+                    "fixture",
+                    &metadata,
+                    &[],
+                    "",
+                    false,
+                    None,
+                    Some(&mut chart_graphics),
+                );
+            })
+            .unwrap();
+        assert!(!chart_graphics.has_pending_image());
+        assert_eq!(chart_graphics.working_set_bytes(), 0);
     }
 }

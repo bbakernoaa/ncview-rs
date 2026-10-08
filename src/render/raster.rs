@@ -31,8 +31,13 @@ pub fn rgb_raster_with_limits(
         mean: 0.5,
         finite_count: 0,
     });
-    let mapper =
-        crate::render::colors::ColorMapper::new(&palette, stats, limits, ScaleMode::Linear);
+    let mapper = crate::render::colors::ColorMapper::new(
+        &palette,
+        stats,
+        limits,
+        ScaleMode::Linear,
+        slice.is_diff,
+    );
     if let (Some(v_slice), Some(m_slice)) = (slice.values.as_slice(), slice.validity.as_slice()) {
         let (chunks, _) = image.as_mut().as_chunks_mut::<3>();
         chunks
@@ -145,7 +150,7 @@ fn rasterize(
         .coordinates
         .as_ref()
         .is_some_and(|grid| grid.latitude_increases_with_source_row());
-    let land_detail = landmask::detail_for_grid(slice.coordinates.as_ref());
+    let land_detail = landmask::detail_for_grid(slice.coordinates.as_deref());
     let output_rows = output_rows.max(1).min(rows.max(1));
     let output_cols = output_cols.max(1).min(cols.max(1));
     let statistics = slice.statistics.unwrap_or(crate::data::slice::Statistics {
@@ -154,13 +159,14 @@ fn rasterize(
         mean: 0.5,
         finite_count: 0,
     });
-    let mapper = crate::render::colors::ColorMapper::new(&palette, statistics, limits, scale);
+    let mapper =
+        crate::render::colors::ColorMapper::new(&palette, statistics, limits, scale, slice.is_diff);
     let mut image = RgbImage::new(output_cols as u32, output_rows as u32);
     let background = show_land_borders.then(|| {
         map_background::render_with_palette_cached(
             output_cols,
             output_rows,
-            slice.coordinates.as_ref(),
+            slice.coordinates.as_deref(),
             land_detail,
             &palette,
         )
