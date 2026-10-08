@@ -118,6 +118,8 @@ pub fn rgb_raster_with_options_for_view(
     selected_point: Option<(usize, usize)>,
 ) -> RgbImage {
     let (rows, cols) = slice.values.dim();
+    let (output_rows, output_cols) =
+        fit_within(rows, cols, target_height.max(1), target_width.max(1));
     rasterize(
         slice,
         palette,
@@ -125,11 +127,21 @@ pub fn rgb_raster_with_options_for_view(
         filter,
         show_land_borders,
         scale,
-        rows.min(target_height.max(1)),
-        cols.min(target_width.max(1)),
+        output_rows,
+        output_cols,
         None,
         selected_point,
     )
+}
+
+/// Largest size with the source's aspect ratio that fits the target box; never upsamples.
+fn fit_within(rows: usize, cols: usize, max_rows: usize, max_cols: usize) -> (usize, usize) {
+    let scale = (max_rows as f64 / rows as f64)
+        .min(max_cols as f64 / cols as f64)
+        .min(1.0);
+    let output_rows = ((rows as f64 * scale).round() as usize).clamp(1, rows.max(1));
+    let output_cols = ((cols as f64 * scale).round() as usize).clamp(1, cols.max(1));
+    (output_rows, output_cols)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -435,6 +447,26 @@ mod tests {
             None,
         );
         assert_eq!(image.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn viewport_raster_keeps_the_source_aspect_ratio() {
+        // A 2:1 source fitted into a 100x30 box keeps its shape: 60 wide, 30 tall.
+        let values = Array2::from_shape_fn((40, 80), |(row, col)| (row * 80 + col) as f64);
+        let validity = Array2::from_elem((40, 80), Validity::Finite);
+        let slice = Slice2D::new(values, validity, Bounds::new(0, 40, 0, 80).unwrap()).unwrap();
+        let image = rgb_raster_with_options_for_view(
+            &slice,
+            Palette::Viridis,
+            None,
+            None,
+            false,
+            ScaleMode::Linear,
+            100,
+            30,
+            None,
+        );
+        assert_eq!(image.dimensions(), (60, 30));
     }
 
     #[test]
