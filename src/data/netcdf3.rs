@@ -215,7 +215,10 @@ impl DataSource for NetCdf3Source {
         if !metadata.dimensions.iter().any(|name| name == dimension) {
             return None;
         }
-        self.read_variable_values(variable).ok()
+        let coordinate = self.metadata.variables.iter().find(|item| {
+            item.name == dimension && item.numeric && item.dimensions == [dimension]
+        })?;
+        self.read_variable_values(&coordinate.name).ok()
     }
 
     fn point_coordinates(&self, _variable: &str, _row: usize, _col: usize) -> PointCoordinates {

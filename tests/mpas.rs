@@ -9,6 +9,16 @@ use oxinetcdf::{NcFileWriter, NcType};
 use tempfile::tempdir;
 
 #[test]
+fn netcdf3_dimension_values_never_return_the_data_field() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");
+    let source = data::netcdf3::NetCdf3Source::open(&path).expect("open NetCDF-3 fixture");
+    assert_eq!(
+        data::DataSource::dimension_values(&source, "temperature", "nCells"),
+        None
+    );
+}
+
+#[test]
 fn opens_committed_netcdf3_mpas_fixture_and_resamples() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");
     let source = data::open(&path).expect("open committed MPAS NetCDF-3 fixture");
