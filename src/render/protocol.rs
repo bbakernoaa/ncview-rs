@@ -500,19 +500,46 @@ fn downgrade_unsupported(requested: ProtocolType, is_wezterm: bool) -> ProtocolT
 }
 
 fn picker_with_terminal_cell_size() -> Picker {
-    let font_size = crossterm::terminal::window_size().ok().and_then(|size| {
-        let width = size.width.checked_div(size.columns)?;
-        let height = size.height.checked_div(size.rows)?;
-        (width > 0 && height > 0).then_some(FontSize::new(width, height))
-    });
-    match font_size {
+    let override_value = env::var(CELL_PIXEL_SIZE_ENV).ok();
+    let window = crossterm::terminal::window_size()
+        .ok()
+        .map(|size| (size.columns, size.rows, size.width, size.height));
+    match cell_pixel_size(override_value.as_deref(), window) {
         // This constructor is deprecated in favor of an active terminal
         // query. The query can hang at startup; window_size provides the same
         // geometry without terminal I/O.
         #[allow(deprecated)]
-        Some(font_size) => Picker::from_fontsize(font_size),
+        Some((width, height)) => Picker::from_fontsize(FontSize::new(width, height)),
         None => Picker::halfblocks(),
     }
+}
+
+pub const CELL_PIXEL_SIZE_ENV: &str = "NCVIEW_CELL_PIXEL_SIZE";
+
+/// Cell size in pixels from a `WxH` override, else from plausible terminal geometry.
+fn cell_pixel_size(
+    override_value: Option<&str>,
+    window: Option<(u16, u16, u16, u16)>,
+) -> Option<(u16, u16)> {
+    let parsed_override = override_value.and_then(|value| {
+        let (width, height) = value
+            .trim()
+            .to_ascii_lowercase()
+            .split_once('x')
+            .map(|(width, height)| (width.trim().parse::<u16>(), height.trim().parse::<u16>()))?;
+        match (width, height) {
+            (Ok(width), Ok(height)) if width > 0 && height > 0 => Some((width, height)),
+            _ => None,
+        }
+    });
+    if parsed_override.is_some() {
+        return parsed_override;
+    }
+    let (columns, rows, pixel_width, pixel_height) = window?;
+    let width = pixel_width.checked_div(columns)?;
+    let height = pixel_height.checked_div(rows)?;
+    // Terminals that cannot report pixels often send a 640x480 placeholder.
+    (width >= 4 && height >= 8).then_some((width, height))
 }
 
 fn iterm2_hint() -> bool {
@@ -571,5 +598,41 @@ mod tests {
             Some(ProtocolType::Halfblocks)
         );
         assert_eq!(parse_protocol_override("bogus"), None);
+    }
+
+    #[test]
+    fn cell_size_override_wins_over_terminal_geometry() {
+        let window = Some((292, 72, 2920, 1440));
+        assert_eq!(cell_pixel_size(Some("9x19"), window), Some((9, 19)));
+        assert_eq!(cell_pixel_size(Some(" 9X19 "), None), Some((9, 19)));
+    }
+
+    #[test]
+    fn malformed_cell_size_override_falls_back_to_the_terminal() {
+        let window = Some((100, 50, 1000, 1000));
+        for value in ["", "9", "0x19", "9x", "axb", "-1x19"] {
+            assert_eq!(
+                cell_pixel_size(Some(value), window),
+                Some((10, 20)),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn placeholder_terminal_geometry_is_rejected() {
+        // 640x480 for 292x72 cells reports about 2x6 pixels per cell.
+        assert_eq!(cell_pixel_size(None, Some((292, 72, 640, 480))), None);
+        assert_eq!(cell_pixel_size(None, Some((80, 24, 0, 0))), None);
+        assert_eq!(cell_pixel_size(None, Some((0, 0, 640, 480))), None);
+        assert_eq!(cell_pixel_size(None, None), None);
+    }
+
+    #[test]
+    fn plausible_terminal_geometry_is_used() {
+        assert_eq!(
+            cell_pixel_size(None, Some((292, 72, 2920, 1440))),
+            Some((10, 20))
+        );
     }
 }
