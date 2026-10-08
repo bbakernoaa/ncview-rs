@@ -213,7 +213,7 @@ pub fn open_with_grid(
     } else if netcdf3::is_netcdf3(path) {
         let source = netcdf3::NetCdf3Source::open(path)?;
         if mpas::detect(source.metadata()).is_some() {
-            return mpas::MpasSource::open(path, grid_path);
+            return mpas::MpasSource::from_netcdf3(path, source, grid_path);
         }
         Ok(Box::new(source) as Box<dyn DataSource>)
     } else if manifest::is_manifest_file(path) {
@@ -221,7 +221,7 @@ pub fn open_with_grid(
     } else {
         let source = netcdf4::NetCdf4Source::open(path)?;
         if mpas::detect(source.metadata()).is_some() {
-            return mpas::MpasSource::open(path, grid_path.or(Some(path)));
+            return mpas::MpasSource::from_netcdf4(path, source, grid_path.or(Some(path)));
         }
         Ok(Box::new(source) as Box<dyn DataSource>)
     }

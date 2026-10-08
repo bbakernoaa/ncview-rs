@@ -5,6 +5,7 @@ use std::{
 };
 
 use ndarray::Array2;
+use rayon::prelude::*;
 
 use crate::error::{NcvError, Result};
 
@@ -123,6 +124,14 @@ fn to_degrees(values: Vec<f64>, units: Option<&str>) -> Vec<f64> {
     }
 }
 
+fn intermediate_spacing() -> Result<f64> {
+    unstructured::parse_intermediate_spacing(
+        std::env::var(unstructured::INTERMEDIATE_SPACING_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
     (
         (180.0 / resolution_deg).round() as usize,
@@ -132,13 +141,24 @@ fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
 
 impl MpasSource {
     pub fn open(path: &Path, grid_path: Option<&Path>) -> Result<Box<dyn DataSource>> {
-        let spacing = unstructured::parse_intermediate_spacing(
-            std::env::var(unstructured::INTERMEDIATE_SPACING_ENV)
-                .ok()
-                .as_deref(),
-        )?;
         let source = open_mesh_source(path)?;
-        Self::from_source(path, source, grid_path, spacing)
+        Self::from_source(path, source, grid_path, intermediate_spacing()?)
+    }
+
+    pub(crate) fn from_netcdf3(
+        path: &Path,
+        source: NetCdf3Source,
+        grid_path: Option<&Path>,
+    ) -> Result<Box<dyn DataSource>> {
+        Self::from_source(path, Box::new(source), grid_path, intermediate_spacing()?)
+    }
+
+    pub(crate) fn from_netcdf4(
+        path: &Path,
+        source: NetCdf4Source,
+        grid_path: Option<&Path>,
+    ) -> Result<Box<dyn DataSource>> {
+        Self::from_source(path, Box::new(source), grid_path, intermediate_spacing()?)
     }
 
     fn from_source(
@@ -296,13 +316,18 @@ impl MpasSource {
         }
         let rows = bounds.row_end - bounds.row_start;
         let cols = bounds.col_end - bounds.col_start;
-        let values = Array2::from_shape_fn((rows, cols), |(row, col)| {
-            let latitude = self.grid_latitude(bounds.row_start + row);
-            let longitude = self.grid_longitude(bounds.col_start + col);
-            index
-                .nearest(latitude, longitude)
-                .map_or(f64::NAN, |source| mesh_values[source])
-        });
+        let samples = (0..rows * cols)
+            .into_par_iter()
+            .map(|flat| {
+                let latitude = self.grid_latitude(bounds.row_start + flat / cols);
+                let longitude = self.grid_longitude(bounds.col_start + flat % cols);
+                index
+                    .nearest(latitude, longitude)
+                    .map_or(f64::NAN, |source| mesh_values[source])
+            })
+            .collect::<Vec<_>>();
+        let values = Array2::from_shape_vec((rows, cols), samples)
+            .map_err(|error| NcvError::InvalidSlice(error.to_string()))?;
         let validity = Array2::from_shape_fn((rows, cols), |(row, col)| {
             if values[(row, col)].is_finite() {
                 Validity::Finite

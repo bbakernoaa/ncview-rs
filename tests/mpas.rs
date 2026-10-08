@@ -2,6 +2,7 @@ use std::path::Path;
 
 use ncview_rs::data::{
     self, AxisRole,
+    bounds::{NumericBounds, resolve_source_bounds_with_feedback},
     slice::{Bounds, SliceRequest},
 };
 use oxinetcdf::{NcFileWriter, NcType};
@@ -116,4 +117,121 @@ fn opens_real_mpas_mesh_and_resamples_coordinate_field() {
     assert_eq!(coordinates.longitude_axis.as_ref().unwrap().len(), 6);
     assert!(slice.values.iter().all(|value| value.is_finite()));
     assert!(slice.values.iter().any(|value| *value != 0.0));
+}
+
+#[test]
+fn offset_window_reports_the_cell_centres_it_samples() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");
+    let source = data::open(&path).expect("open committed MPAS NetCDF-3 fixture");
+    let slice = source
+        .read_slice(&SliceRequest {
+            variable: "temperature".into(),
+            time: 0,
+            depth: 0,
+            bounds: Bounds::new(10, 13, 20, 24).unwrap(),
+        })
+        .expect("read offset window");
+    let coordinates = slice.coordinates.expect("grid coordinates");
+    let latitudes = coordinates.latitude_axis.as_ref().expect("latitude axis");
+    let longitudes = coordinates.longitude_axis.as_ref().expect("longitude axis");
+    assert_eq!((latitudes.len(), longitudes.len()), (3, 4));
+    assert!((latitudes[0] + 87.375).abs() < 1e-9);
+    assert!((longitudes[0] + 174.875).abs() < 1e-9);
+}
+
+#[test]
+fn point_coordinates_name_the_cell_centre_of_a_row_and_column() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");
+    let source = data::open(&path).expect("open committed MPAS NetCDF-3 fixture");
+    let corner = source.point_coordinates("temperature", 0, 0);
+    assert!((corner.latitude.unwrap() + 89.875).abs() < 1e-9);
+    assert!((corner.longitude.unwrap() + 179.875).abs() < 1e-9);
+}
+
+#[test]
+fn bounds_menu_resolves_a_lat_lon_box_to_grid_indices() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");
+    let source = data::open(&path).expect("open committed MPAS NetCDF-3 fixture");
+    let (bounds, approximate) = resolve_source_bounds_with_feedback(
+        source.as_ref(),
+        "temperature",
+        "longitude",
+        "latitude",
+        NumericBounds {
+            min_x: 10.0,
+            max_x: 20.0,
+            min_y: -10.0,
+            max_y: 10.0,
+        },
+    )
+    .expect("resolve lat/lon box");
+    assert!(!approximate);
+    assert_eq!(
+        (
+            bounds.row_start,
+            bounds.row_end,
+            bounds.col_start,
+            bounds.col_end
+        ),
+        (320, 400, 760, 800)
+    );
+}
+
+#[test]
+fn fixed_axis_selects_one_plane_of_an_extra_dimension() {
+    let temp_dir = tempdir().unwrap();
+    let grid_path = temp_dir.path().join("grid.nc4");
+    let field_path = temp_dir.path().join("field.nc4");
+    let cells = 6;
+
+    let mut grid = NcFileWriter::new();
+    let grid_cells = grid.def_dim("nCells", cells).unwrap();
+    let lat = grid
+        .def_var("latCell", &[grid_cells], NcType::Float64)
+        .unwrap();
+    let lon = grid
+        .def_var("lonCell", &[grid_cells], NcType::Float64)
+        .unwrap();
+    let latitudes = (0..cells)
+        .map(|cell| (-60.0 + 30.0 * cell as f64).to_radians())
+        .collect::<Vec<_>>();
+    let longitudes = (0..cells)
+        .map(|cell| (60.0 * cell as f64).to_radians())
+        .collect::<Vec<_>>();
+    grid.put_var_f64(lat, &latitudes).unwrap();
+    grid.put_var_f64(lon, &longitudes).unwrap();
+    grid.close(&grid_path).unwrap();
+
+    let mut field = NcFileWriter::new();
+    let kernel = field.def_dim("kernel", 3).unwrap();
+    let field_cells = field.def_dim("nCells", cells).unwrap();
+    let field_var = field
+        .def_var("field", &[kernel, field_cells], NcType::Float64)
+        .unwrap();
+    let values = (0..3)
+        .flat_map(|plane| (0..cells).map(move |cell| 100.0 * plane as f64 + cell as f64))
+        .collect::<Vec<_>>();
+    field.put_var_f64(field_var, &values).unwrap();
+    field.close(&field_path).unwrap();
+
+    let source = data::open_with_grid(&field_path, Some(&grid_path))
+        .expect("open field with external mesh coordinates");
+    let request = SliceRequest {
+        variable: "field".into(),
+        time: 0,
+        depth: 0,
+        bounds: Bounds::new(0, 4, 0, 6).unwrap(),
+    };
+    assert!(source.read_slice(&request).is_err());
+    let slice = source
+        .read_slice_on_axes(&request, None, None, &[("kernel".into(), 2)])
+        .expect("read the fixed kernel plane");
+    let finite = slice
+        .values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    assert!(!finite.is_empty());
+    assert!(finite.iter().all(|value| (200.0..=205.0).contains(value)));
 }
