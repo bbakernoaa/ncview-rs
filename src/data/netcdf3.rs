@@ -56,6 +56,19 @@ impl NetCdf3Source {
         Ok(values.into_iter().collect())
     }
 
+    pub(crate) fn read_variable_strings(&self, variable: &str) -> Result<Vec<String>> {
+        let reader = self.reader.lock().map_err(|_| NcvError::Adapter {
+            path: self.path.clone(),
+            reason: "NetCDF-3 reader lock was poisoned".into(),
+        })?;
+        reader
+            .read_variable_as_strings(variable)
+            .map_err(|error| NcvError::Adapter {
+                path: self.path.clone(),
+                reason: error.to_string(),
+            })
+    }
+
     pub(crate) fn read_mesh_values(
         &self,
         variable: &str,

@@ -18,6 +18,199 @@ fn netcdf3_dimension_values_never_return_the_data_field() {
     );
 }
 
+struct ClassicVar {
+    name: &'static str,
+    dimids: Vec<u32>,
+    nc_type: u32,
+    units: Option<&'static str>,
+    vsize: u32,
+    record: bool,
+}
+
+fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_padded(out: &mut Vec<u8>, bytes: &[u8]) {
+    put_u32(out, bytes.len() as u32);
+    out.extend_from_slice(bytes);
+    while !out.len().is_multiple_of(4) {
+        out.push(0);
+    }
+}
+
+fn classic_header(vars: &[ClassicVar], begins: &[u32], numrecs: u32) -> Vec<u8> {
+    let mut out = b"CDF\x01".to_vec();
+    put_u32(&mut out, numrecs);
+    put_u32(&mut out, 0x0A);
+    put_u32(&mut out, 3);
+    for (name, length) in [("Time", 0), ("StrLen", 20), ("nCells", 4)] {
+        put_padded(&mut out, name.as_bytes());
+        put_u32(&mut out, length);
+    }
+    put_u32(&mut out, 0);
+    put_u32(&mut out, 0);
+    put_u32(&mut out, 0x0B);
+    put_u32(&mut out, vars.len() as u32);
+    for (var, begin) in vars.iter().zip(begins) {
+        put_padded(&mut out, var.name.as_bytes());
+        put_u32(&mut out, var.dimids.len() as u32);
+        for dimid in &var.dimids {
+            put_u32(&mut out, *dimid);
+        }
+        if let Some(units) = var.units {
+            put_u32(&mut out, 0x0C);
+            put_u32(&mut out, 1);
+            put_padded(&mut out, b"units");
+            put_u32(&mut out, 2);
+            put_padded(&mut out, units.as_bytes());
+        } else {
+            put_u32(&mut out, 0);
+            put_u32(&mut out, 0);
+        }
+        put_u32(&mut out, var.nc_type);
+        put_u32(&mut out, var.vsize);
+        put_u32(&mut out, *begin);
+    }
+    out
+}
+
+/// Two-record CDF-1 MPAS file laid out like MPAS diag output (`xtime`, CF `Time`, `q2`).
+fn classic_mpas_file(with_time: bool, with_xtime: bool) -> Vec<u8> {
+    const CHAR: u32 = 2;
+    const FLOAT: u32 = 5;
+    const DOUBLE: u32 = 6;
+    let mut vars = vec![
+        ClassicVar {
+            name: "latCell",
+            dimids: vec![2],
+            nc_type: DOUBLE,
+            units: Some("rad"),
+            vsize: 32,
+            record: false,
+        },
+        ClassicVar {
+            name: "lonCell",
+            dimids: vec![2],
+            nc_type: DOUBLE,
+            units: Some("rad"),
+            vsize: 32,
+            record: false,
+        },
+    ];
+    if with_xtime {
+        vars.push(ClassicVar {
+            name: "xtime",
+            dimids: vec![0, 1],
+            nc_type: CHAR,
+            units: Some("YYYY-MM-DD_hh:mm:ss"),
+            vsize: 20,
+            record: true,
+        });
+    }
+    if with_time {
+        vars.push(ClassicVar {
+            name: "Time",
+            dimids: vec![0],
+            nc_type: FLOAT,
+            units: Some("seconds since 2010-05-01 00:00:00"),
+            vsize: 4,
+            record: true,
+        });
+    }
+    vars.push(ClassicVar {
+        name: "q2",
+        dimids: vec![0, 2],
+        nc_type: DOUBLE,
+        units: None,
+        vsize: 32,
+        record: true,
+    });
+
+    let mut offset = classic_header(&vars, &vec![0; vars.len()], 2).len() as u32;
+    let mut begins = Vec::new();
+    for var in vars.iter().filter(|var| !var.record) {
+        begins.push(offset);
+        offset += var.vsize;
+    }
+    for var in vars.iter().filter(|var| var.record) {
+        begins.push(offset);
+        offset += var.vsize;
+    }
+
+    let mut out = classic_header(&vars, &begins, 2);
+    for value in [-0.5_f64, -0.2, 0.2, 0.5, 0.0, 1.5, 3.0, 4.5] {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+    for record in 0..2_u32 {
+        if with_xtime {
+            // xtime is three hours apart so tests can tell it from the CF Time labels.
+            let mut text = format!("2010-06-01_{:02}:00:00", record * 3).into_bytes();
+            text.resize(20, 0);
+            out.extend(text);
+        }
+        if with_time {
+            let seconds = 2_678_400.0_f32 + 21_600.0 * record as f32;
+            out.extend_from_slice(&seconds.to_be_bytes());
+        }
+        for cell in 0..4_u32 {
+            out.extend_from_slice(&f64::from(record * 4 + cell).to_be_bytes());
+        }
+    }
+    out
+}
+
+fn open_classic_mpas(with_time: bool, with_xtime: bool) -> Box<dyn data::DataSource> {
+    let temp_dir = tempdir().unwrap();
+    let path = temp_dir.path().join("diag.nc");
+    std::fs::write(&path, classic_mpas_file(with_time, with_xtime)).unwrap();
+    data::open(&path).expect("open classic MPAS diag file")
+}
+
+#[test]
+fn classic_fixture_reads_the_selected_record() {
+    let source = open_classic_mpas(false, false);
+    let slice = source
+        .read_slice(&SliceRequest {
+            variable: "q2".into(),
+            time: 1,
+            depth: 0,
+            bounds: Bounds::new(0, 720, 0, 1440).unwrap(),
+        })
+        .expect("read second record");
+    let statistics = slice.statistics.expect("finite values");
+    assert_eq!((statistics.min, statistics.max), (4.0, 7.0));
+}
+
+#[test]
+fn cf_time_variable_labels_mpas_time_steps_before_xtime() {
+    let source = open_classic_mpas(true, true);
+    assert_eq!(
+        source.time_label(0).as_deref(),
+        Some("2010-06-01T00:00:00Z")
+    );
+    assert_eq!(
+        source.time_label_for_variable("q2", 1).as_deref(),
+        Some("2010-06-01T06:00:00Z")
+    );
+    assert_eq!(source.time_label(2), None);
+}
+
+#[test]
+fn xtime_labels_mpas_time_steps_without_cf_time() {
+    let source = open_classic_mpas(false, true);
+    assert_eq!(
+        source.time_label(1).as_deref(),
+        Some("2010-06-01T03:00:00Z")
+    );
+}
+
+#[test]
+fn mpas_time_steps_without_time_variables_have_no_label() {
+    let source = open_classic_mpas(false, false);
+    assert_eq!(source.time_label(0), None);
+}
+
 #[test]
 fn opens_committed_netcdf3_mpas_fixture_and_resamples() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");

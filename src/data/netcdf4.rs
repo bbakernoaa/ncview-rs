@@ -1630,7 +1630,7 @@ fn compact_coordinate_value(value: f64) -> String {
     text
 }
 
-fn format_time_coordinate(value: f64, units: Option<&str>) -> String {
+pub(crate) fn format_time_coordinate(value: f64, units: Option<&str>) -> String {
     let Some(units) = units else {
         return format!("t={value}");
     };

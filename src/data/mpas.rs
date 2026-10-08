@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use ndarray::Array2;
@@ -58,10 +58,14 @@ pub struct MpasSource {
     path: PathBuf,
     resolution_deg: f64,
     indices: Mutex<HashMap<MeshLocation, Arc<SphereIndex>>>,
+    time_labels: OnceLock<Vec<Option<String>>>,
 }
 
 trait MeshValueSource: DataSource {
     fn read_variable_values(&self, variable: &str) -> Result<Vec<f64>>;
+
+    /// One string per leading index of a character variable.
+    fn read_strings(&self, variable: &str) -> Result<Vec<String>>;
 
     /// Values along `mesh_dimension`, with every other dimension fixed by `selection`.
     fn read_mesh_values(
@@ -75,6 +79,13 @@ trait MeshValueSource: DataSource {
 impl MeshValueSource for NetCdf4Source {
     fn read_variable_values(&self, variable: &str) -> Result<Vec<f64>> {
         NetCdf4Source::read_variable_values(self, variable)
+    }
+
+    fn read_strings(&self, variable: &str) -> Result<Vec<String>> {
+        Err(NcvError::UnsupportedVariable {
+            variable: variable.to_owned(),
+            reason: "character variables are not read from NetCDF-4 MPAS files".into(),
+        })
     }
 
     fn read_mesh_values(
@@ -97,6 +108,10 @@ impl MeshValueSource for NetCdf4Source {
 impl MeshValueSource for NetCdf3Source {
     fn read_variable_values(&self, variable: &str) -> Result<Vec<f64>> {
         NetCdf3Source::read_variable_values(self, variable)
+    }
+
+    fn read_strings(&self, variable: &str) -> Result<Vec<String>> {
+        NetCdf3Source::read_variable_strings(self, variable)
     }
 
     fn read_mesh_values(
@@ -197,6 +212,7 @@ impl MpasSource {
             path: path.to_path_buf(),
             resolution_deg: spacing_deg,
             indices: Mutex::new(HashMap::new()),
+            time_labels: OnceLock::new(),
         }) as Box<dyn DataSource>)
     }
 
@@ -521,6 +537,101 @@ fn virtual_metadata(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeLabelSource {
+    CfTime,
+    Xtime,
+}
+
+/// Which variable supplies time labels: CF `Time` first, then MPAS `xtime`.
+fn time_label_source(metadata: &DatasetMetadata) -> Option<TimeLabelSource> {
+    let has = |predicate: &dyn Fn(&Variable) -> bool| metadata.variables.iter().any(predicate);
+    if has(&|variable| {
+        variable.name == "Time"
+            && variable.numeric
+            && variable.dimensions == ["Time"]
+            && variable
+                .units
+                .as_deref()
+                .is_some_and(|units| units.contains(" since "))
+    }) {
+        Some(TimeLabelSource::CfTime)
+    } else if has(&|variable| {
+        variable.name == "xtime"
+            && !variable.numeric
+            && variable
+                .dimensions
+                .first()
+                .is_some_and(|name| name == "Time")
+    }) {
+        Some(TimeLabelSource::Xtime)
+    } else {
+        None
+    }
+}
+
+/// Convert MPAS `YYYY-MM-DD_hh:mm:ss` text to an RFC 3339 UTC label.
+fn xtime_label(text: &str) -> Option<String> {
+    let text = text.trim_matches(|character: char| character == '\0' || character.is_whitespace());
+    let (date, time) = text.split_once('_')?;
+    let matches_layout = |value: &str, layout: &str| {
+        value.len() == layout.len()
+            && value
+                .chars()
+                .zip(layout.chars())
+                .all(|(character, expected)| {
+                    if expected == '9' {
+                        character.is_ascii_digit()
+                    } else {
+                        character == expected
+                    }
+                })
+    };
+    if !matches_layout(date, "9999-99-99") || !matches_layout(time, "99:99:99") {
+        return None;
+    }
+    let label = format!("{date}T{time}Z");
+    chrono::DateTime::parse_from_rfc3339(&label).ok()?;
+    Some(label)
+}
+
+impl MpasSource {
+    fn time_labels(&self) -> &[Option<String>] {
+        self.time_labels
+            .get_or_init(|| self.read_time_labels().unwrap_or_default())
+    }
+
+    fn read_time_labels(&self) -> Result<Vec<Option<String>>> {
+        let metadata = self.inner.metadata();
+        match time_label_source(metadata) {
+            Some(TimeLabelSource::CfTime) => {
+                let units = metadata
+                    .variables
+                    .iter()
+                    .find(|variable| variable.name == "Time")
+                    .and_then(|variable| variable.units.clone());
+                Ok(self
+                    .inner
+                    .read_variable_values("Time")?
+                    .into_iter()
+                    .map(|value| {
+                        value.is_finite().then(|| {
+                            super::netcdf4::format_time_coordinate(value, units.as_deref())
+                        })
+                    })
+                    .collect())
+            }
+            Some(TimeLabelSource::Xtime) => Ok(self
+                .inner
+                .read_strings("xtime")?
+                .iter()
+                .map(|text| xtime_label(text))
+                .collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
 impl DataSource for MpasSource {
     fn metadata(&self) -> &DatasetMetadata {
         &self.metadata
@@ -541,7 +652,11 @@ impl DataSource for MpasSource {
     }
 
     fn time_label(&self, index: usize) -> Option<String> {
-        self.inner.time_label(index)
+        self.time_labels()
+            .get(index)
+            .cloned()
+            .flatten()
+            .or_else(|| self.inner.time_label(index))
     }
 
     fn vertical_label(&self, variable: &str, index: usize) -> Option<String> {
@@ -714,6 +829,58 @@ mod tests {
             (longitude.length, longitude.role),
             (1440, AxisRole::Longitude)
         );
+    }
+
+    #[test]
+    fn xtime_text_becomes_an_rfc3339_label() {
+        assert_eq!(
+            xtime_label("2010-06-01_00:00:00").as_deref(),
+            Some("2010-06-01T00:00:00Z")
+        );
+        assert_eq!(
+            xtime_label("  2010-06-01_06:30:15\0\0").as_deref(),
+            Some("2010-06-01T06:30:15Z")
+        );
+        for text in ["", "   ", "2010-06-01", "not a time"] {
+            assert_eq!(xtime_label(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn time_label_source_prefers_cf_time_over_xtime() {
+        let mut metadata = field_metadata();
+        metadata.variables.push(Variable {
+            name: "xtime".into(),
+            dimensions: vec!["Time".into(), "StrLen".into()],
+            numeric: false,
+            units: Some("YYYY-MM-DD_hh:mm:ss".into()),
+            long_name: None,
+            standard_name: None,
+        });
+        assert_eq!(time_label_source(&metadata), Some(TimeLabelSource::Xtime));
+        metadata.variables.push(Variable {
+            name: "Time".into(),
+            dimensions: vec!["Time".into()],
+            numeric: true,
+            units: Some("seconds since 2010-05-01 00:00:00".into()),
+            long_name: None,
+            standard_name: Some("time".into()),
+        });
+        assert_eq!(time_label_source(&metadata), Some(TimeLabelSource::CfTime));
+    }
+
+    #[test]
+    fn time_variable_without_since_units_is_not_a_cf_time() {
+        let mut metadata = field_metadata();
+        metadata.variables.push(Variable {
+            name: "Time".into(),
+            dimensions: vec!["Time".into()],
+            numeric: true,
+            units: Some("s".into()),
+            long_name: None,
+            standard_name: None,
+        });
+        assert_eq!(time_label_source(&metadata), None);
     }
 
     #[test]
