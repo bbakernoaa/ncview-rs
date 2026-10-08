@@ -59,9 +59,8 @@ impl NetCdf3Source {
     pub(crate) fn read_mesh_values(
         &self,
         variable: &str,
-        time: usize,
-        depth: usize,
         mesh_dimension: &str,
+        indices: &super::mpas::Selection,
     ) -> Result<Vec<f64>> {
         let reader = self.reader.lock().map_err(|_| NcvError::Adapter {
             path: self.path.clone(),
@@ -88,39 +87,20 @@ impl NetCdf3Source {
                         end: dimension.size,
                         step: 1,
                     })
-                } else if super::mpas::is_time_dimension(&dimension.name) {
-                    Ok(NcSliceInfoElem::Index(time as u64))
-                } else if super::mpas::is_vertical_dimension(&dimension.name) {
-                    Ok(NcSliceInfoElem::Index(depth as u64))
-                } else if dimension.size == 1 {
-                    Ok(NcSliceInfoElem::Index(0))
                 } else {
-                    Err(NcvError::UnsupportedVariable {
-                        variable: variable.to_owned(),
-                        reason: format!(
-                            "non-spatial dimension '{}' needs a time/depth role",
-                            dimension.name
-                        ),
-                    })
+                    let length = usize::try_from(dimension.size).unwrap_or(usize::MAX);
+                    super::mpas::dimension_index(variable, &dimension.name, length, indices)
+                        .map(|index| NcSliceInfoElem::Index(index as u64))
                 }
             })
             .collect::<Result<Vec<_>>>()?;
         let selection = NcSliceInfo { selections };
-        let values =
-            read_selected_f64(&reader, variable, &selected.dtype, &selection).map_err(|error| {
-                NcvError::Adapter {
-                    path: self.path.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
-        super::mpas::select_mesh_values(
-            &values,
-            &self.metadata,
-            variable,
-            mesh_dimension,
-            time,
-            depth,
-        )
+        read_selected_f64(&reader, variable, &selected.dtype, &selection).map_err(|error| {
+            NcvError::Adapter {
+                path: self.path.clone(),
+                reason: error.to_string(),
+            }
+        })
     }
 }
 

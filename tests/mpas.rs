@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use ncview_rs::data::{
-    self,
+    self, AxisRole,
     slice::{Bounds, SliceRequest},
 };
 use oxinetcdf::{NcFileWriter, NcType};
@@ -36,13 +36,20 @@ fn opens_real_mpas_mesh_and_resamples_coordinate_field() {
     let mesh_source = data::open(&path).expect("open MPAS mesh");
     let metadata = mesh_source.metadata();
 
-    let n_cells = metadata
+    // The x1.2562 mesh has 2562 cells; the raw nCells dimension is hidden behind the regular grid.
+    let n_cells = 2562;
+    let latitude = metadata
         .dimensions
         .iter()
-        .find(|dimension| dimension.name == "nCells")
-        .map(|dimension| dimension.length)
-        .expect("MPAS mesh nCells dimension");
-    assert!(n_cells > 4);
+        .find(|dimension| dimension.name == "latitude")
+        .expect("virtual latitude dimension");
+    assert_eq!((latitude.length, latitude.role), (720, AxisRole::Latitude));
+    assert!(
+        metadata
+            .dimensions
+            .iter()
+            .all(|dimension| dimension.name != "nCells")
+    );
     assert!(
         metadata
             .variables
@@ -81,13 +88,16 @@ fn opens_real_mpas_mesh_and_resamples_coordinate_field() {
 
     let source = data::open_with_grid(&field_path, Some(Path::new(&path)))
         .expect("open MPAS field with external mesh coordinates");
-    assert!(
-        source
-            .metadata()
-            .dimensions
-            .iter()
-            .any(|dimension| { dimension.name == "nCells" && dimension.length > 4 })
-    );
+    let field = source.metadata();
+    let temperature = field
+        .variables
+        .iter()
+        .find(|variable| variable.name == "temperature")
+        .expect("temperature variable");
+    assert_eq!(temperature.dimensions, ["latitude", "longitude"]);
+    let corner = source.point_coordinates("temperature", 0, 0);
+    assert!((corner.latitude.unwrap() + 89.875).abs() < 1e-9);
+    assert!((corner.longitude.unwrap() + 179.875).abs() < 1e-9);
 
     let bounds = Bounds::new(0, 4, 0, 6).unwrap();
     let slice = source
