@@ -1,11 +1,9 @@
 use std::{
     collections::HashMap,
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use kiddo::{ImmutableKdTree, SquaredEuclidean};
 use ndarray::Array2;
 
 use crate::error::{NcvError, Result};
@@ -16,10 +14,8 @@ use super::{
     netcdf4::NetCdf4Source,
     normalize_longitude,
     slice::{CoordinateGrid, Slice2D, SliceRequest, Validity},
+    unstructured::{self, SphereIndex},
 };
-
-/// Spacing of the regular latitude/longitude grid that mesh fields are sampled onto.
-pub const DEFAULT_RESOLUTION_DEG: f64 = 0.25;
 
 const LATITUDE_DIMENSION: &str = "latitude";
 const LONGITUDE_DIMENSION: &str = "longitude";
@@ -60,13 +56,7 @@ pub struct MpasSource {
     metadata: DatasetMetadata,
     path: PathBuf,
     resolution_deg: f64,
-    nearest: Mutex<HashMap<MeshLocation, Arc<NearestMap>>>,
-}
-
-/// For each regular-grid cell, the flat index of the nearest mesh point (`usize::MAX` if none).
-struct NearestMap {
-    mesh_length: usize,
-    nearest: Vec<usize>,
+    indices: Mutex<HashMap<MeshLocation, Arc<SphereIndex>>>,
 }
 
 trait MeshValueSource: DataSource {
@@ -133,51 +123,6 @@ fn to_degrees(values: Vec<f64>, units: Option<&str>) -> Vec<f64> {
     }
 }
 
-fn unit_vector(latitude_deg: f64, longitude_deg: f64) -> [f64; 3] {
-    let latitude = latitude_deg.to_radians();
-    let longitude = longitude_deg.to_radians();
-    [
-        latitude.cos() * longitude.cos(),
-        latitude.cos() * longitude.sin(),
-        latitude.sin(),
-    ]
-}
-
-/// Nearest-point lookup on the unit sphere, so distances stay true near the poles.
-struct SphereIndex {
-    tree: ImmutableKdTree<f64, 3>,
-    sources: Vec<usize>,
-}
-
-impl SphereIndex {
-    fn build(lat: &[f64], lon: &[f64]) -> Self {
-        let mut points = Vec::new();
-        let mut sources = Vec::new();
-        for (index, (&latitude, &longitude)) in lat.iter().zip(lon).enumerate() {
-            if latitude.is_finite() && longitude.is_finite() {
-                points.push(unit_vector(latitude, longitude));
-                sources.push(index);
-            }
-        }
-        let tree = ImmutableKdTree::new_from_slice(&points).unwrap_or_else(|_| {
-            ImmutableKdTree::new_from_slice(&[[0.0, 0.0, 1.0]]).expect("non-empty fallback")
-        });
-        Self { tree, sources }
-    }
-
-    fn nearest(&self, latitude: f64, longitude: f64) -> Option<usize> {
-        let query = unit_vector(latitude, longitude);
-        let count = NonZeroUsize::new(1)?;
-        self.tree
-            .query(&query)
-            .nearest_n::<SquaredEuclidean<f64>>(count)
-            .execute()
-            .into_iter()
-            .next()
-            .and_then(|candidate| self.sources.get(candidate.item as usize).copied())
-    }
-}
-
 fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
     (
         (180.0 / resolution_deg).round() as usize,
@@ -187,14 +132,20 @@ fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
 
 impl MpasSource {
     pub fn open(path: &Path, grid_path: Option<&Path>) -> Result<Box<dyn DataSource>> {
+        let spacing = unstructured::parse_intermediate_spacing(
+            std::env::var(unstructured::INTERMEDIATE_SPACING_ENV)
+                .ok()
+                .as_deref(),
+        )?;
         let source = open_mesh_source(path)?;
-        Self::from_source(path, source, grid_path)
+        Self::from_source(path, source, grid_path, spacing)
     }
 
     fn from_source(
         path: &Path,
         source: Box<dyn MeshValueSource>,
         grid_path: Option<&Path>,
+        spacing_deg: f64,
     ) -> Result<Box<dyn DataSource>> {
         let inner_metadata = source.metadata().clone();
         let mesh = detect(&inner_metadata).ok_or_else(|| NcvError::InvalidDataset {
@@ -218,14 +169,14 @@ impl MpasSource {
             Some(open_mesh_source(grid_path)?)
         };
 
-        let (latitude_length, longitude_length) = shape_for_resolution(DEFAULT_RESOLUTION_DEG);
+        let (latitude_length, longitude_length) = shape_for_resolution(spacing_deg);
         Ok(Box::new(Self {
             metadata: virtual_metadata(&inner_metadata, latitude_length, longitude_length),
             inner: source,
             grid,
             path: path.to_path_buf(),
-            resolution_deg: DEFAULT_RESOLUTION_DEG,
-            nearest: Mutex::new(HashMap::new()),
+            resolution_deg: spacing_deg,
+            indices: Mutex::new(HashMap::new()),
         }) as Box<dyn DataSource>)
     }
 
@@ -275,31 +226,18 @@ impl MpasSource {
         Ok((lat, lon))
     }
 
-    fn nearest_map(&self, mesh: MeshLocation) -> Result<Arc<NearestMap>> {
-        let mut cache = self.nearest.lock().map_err(|_| NcvError::Adapter {
+    fn sphere_index(&self, mesh: MeshLocation) -> Result<Arc<SphereIndex>> {
+        let mut cache = self.indices.lock().map_err(|_| NcvError::Adapter {
             path: self.path.clone(),
-            reason: "MPAS nearest-point cache lock was poisoned".into(),
+            reason: "MPAS point-index cache lock was poisoned".into(),
         })?;
-        if let Some(map) = cache.get(&mesh) {
-            return Ok(Arc::clone(map));
+        if let Some(index) = cache.get(&mesh) {
+            return Ok(Arc::clone(index));
         }
         let (lat, lon) = self.read_mesh_coordinates(mesh)?;
-        let index = SphereIndex::build(&lat, &lon);
-        let (rows, grid_cols) = self.grid_shape();
-        let mut nearest = Vec::with_capacity(rows * grid_cols);
-        for row in 0..rows {
-            let latitude = self.grid_latitude(row);
-            for col in 0..grid_cols {
-                let longitude = self.grid_longitude(col);
-                nearest.push(index.nearest(latitude, longitude).unwrap_or(usize::MAX));
-            }
-        }
-        let map = Arc::new(NearestMap {
-            mesh_length: lat.len(),
-            nearest,
-        });
-        cache.insert(mesh, Arc::clone(&map));
-        Ok(map)
+        let index = Arc::new(SphereIndex::build(&lat, &lon));
+        cache.insert(mesh, Arc::clone(&index));
+        Ok(index)
     }
 
     fn mesh_for_variable(&self, variable: &str) -> Option<MeshLocation> {
@@ -336,14 +274,14 @@ impl MpasSource {
         let mesh_values =
             self.inner
                 .read_mesh_values(&request.variable, mesh.dimension_name(), &selection)?;
-        let map = self.nearest_map(mesh)?;
-        if mesh_values.len() != map.mesh_length {
+        let index = self.sphere_index(mesh)?;
+        if mesh_values.len() != index.mesh_length() {
             return Err(NcvError::InvalidDataset {
                 path: self.path.clone(),
                 reason: format!(
                     "MPAS mesh length mismatch for {}: {} coordinate values, {} data values",
                     request.variable,
-                    map.mesh_length,
+                    index.mesh_length(),
                     mesh_values.len()
                 ),
             });
@@ -359,13 +297,11 @@ impl MpasSource {
         let rows = bounds.row_end - bounds.row_start;
         let cols = bounds.col_end - bounds.col_start;
         let values = Array2::from_shape_fn((rows, cols), |(row, col)| {
-            let cell = (bounds.row_start + row) * grid_cols + bounds.col_start + col;
-            let index = map.nearest[cell];
-            if index == usize::MAX {
-                f64::NAN
-            } else {
-                mesh_values[index]
-            }
+            let latitude = self.grid_latitude(bounds.row_start + row);
+            let longitude = self.grid_longitude(bounds.col_start + col);
+            index
+                .nearest(latitude, longitude)
+                .map_or(f64::NAN, |source| mesh_values[source])
         });
         let validity = Array2::from_shape_fn((rows, cols), |(row, col)| {
             if values[(row, col)].is_finite() {
@@ -758,22 +694,11 @@ mod tests {
 
     #[test]
     fn quarter_degree_grid_has_era5_shape_and_cell_centres() {
-        assert_eq!(shape_for_resolution(DEFAULT_RESOLUTION_DEG), (720, 1440));
-        let latitude = -90.0 + 0.5 * DEFAULT_RESOLUTION_DEG;
+        assert_eq!(
+            shape_for_resolution(unstructured::DEFAULT_INTERMEDIATE_SPACING_DEG),
+            (720, 1440)
+        );
+        let latitude = -90.0 + 0.5 * unstructured::DEFAULT_INTERMEDIATE_SPACING_DEG;
         assert!((latitude + 89.875).abs() < 1e-12);
-    }
-
-    #[test]
-    fn sphere_nearest_prefers_the_close_point_across_the_pole() {
-        // Degree distance picks (80, 90), but on the sphere (89, 0) is about 1.4 degrees away.
-        let index = SphereIndex::build(&[80.0, 89.0], &[90.0, 0.0]);
-        assert_eq!(index.nearest(89.0, 90.0), Some(1));
-    }
-
-    #[test]
-    fn sphere_nearest_skips_non_finite_mesh_points() {
-        let index = SphereIndex::build(&[f64::NAN, 10.0], &[0.0, 0.0]);
-        assert_eq!(index.nearest(10.0, 0.0), Some(1));
-        assert_eq!(SphereIndex::build(&[], &[]).nearest(0.0, 0.0), None);
     }
 }

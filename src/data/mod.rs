@@ -20,6 +20,7 @@ pub mod remote_grib2;
 pub mod remote_hdf5;
 pub mod remote_netcdf4;
 pub mod slice;
+pub mod unstructured;
 pub mod virtual_dataset;
 
 use std::{
