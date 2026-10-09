@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.21](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.20...v0.5.21) - 2026-10-09
+
+### Added
+
+- update terminal protocol handling and documentation
+
 ## [0.5.20](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.19...v0.5.20) - 2026-10-09
 
 ### Added
