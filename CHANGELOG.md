@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.20](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.19...v0.5.20) - 2026-10-09
+
+### Added
+
+- MPAS unstructured-mesh support (NetCDF-3 / CDF-5) ([#64](https://github.com/bbakernoaa/ncview-rs/pull/64))
+
 ## [0.5.19](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.18...v0.5.19) - 2026-10-07
 
 ### Added
