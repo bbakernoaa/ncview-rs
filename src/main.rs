@@ -91,7 +91,10 @@ struct Cli {
     /// Zero-based vertical level exported by --batch.
     #[arg(long, value_name = "INDEX", default_value_t = 0)]
     level: usize,
-    /// One or more NetCDF-4 or GRIB2 datasets to inspect. Shell globs are supported.
+    /// MPAS mesh/coordinate file supplying latCell/lonCell or latVertex/lonVertex.
+    #[arg(long, value_name = "GRID")]
+    grid: Option<String>,
+    /// One or more NetCDF-3, NetCDF-4, or GRIB2 datasets to inspect. Shell globs are supported.
     #[arg(value_name = "DATASET", num_args = 0..)]
     dataset: Vec<String>,
 }
@@ -473,6 +476,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         let load_tx = load_tx.clone();
         let worker_cancelled = Arc::clone(&cancelled);
+        let grid = cli.grid.clone();
         std::thread::spawn(move || {
             if worker_cancelled.load(Ordering::Relaxed) {
                 return;
@@ -486,7 +490,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             let progress_tx = load_tx.clone();
             let progress_cancelled = Arc::clone(&worker_cancelled);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                data::open_location_with_progress(&dataset, &|message| {
+                data::open_location_with_progress_and_grid(&dataset, grid.as_deref(), &|message| {
                     if progress_cancelled.load(Ordering::Relaxed) {
                         return false;
                     }

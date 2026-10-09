@@ -21,6 +21,7 @@ tags: [cli, commands, flags, subcommands, cheatsheet]
 | `--time <INDEX>` | integer | Zero-based time step exported by `--batch` (default 0) |
 | `--level <INDEX>` | integer | Zero-based vertical level exported by `--batch` (default 0) |
 | `--no-restore` | — | Do not restore previous session state for the dataset(s) |
+| `--grid <PATH>` | path | MPAS mesh/coordinate file supplying `latCell`/`lonCell` or `latVertex`/`lonVertex` when the dataset has none |
 | `--min-x <X>` | number | Minimum x coordinate or zero-based x index for the initial view |
 | `--max-x <X>` | number | Maximum x coordinate or zero-based x index for the initial view |
 | `--min-y <Y>` | number | Minimum y coordinate or zero-based y index for the initial view |

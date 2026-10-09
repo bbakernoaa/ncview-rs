@@ -550,7 +550,7 @@ fn render_variables_box(
         if let Some(first) = shape_lines.next() {
             lines.push(labeled_row("shape", &first, content_width));
         }
-        for chunk in shape_lines.take(1) {
+        for chunk in shape_lines.take(3) {
             lines.push(muted(format!("{}{chunk}", " ".repeat(14))));
         }
     } else if plottable.is_empty() {
@@ -564,22 +564,22 @@ fn render_variables_box(
             theme::muted_style(),
         )));
     }
-    // Separate the current field from the dataset-wide shape summary so the
-    // two don't visually run together.
-    lines.push(Line::from(""));
-    // Explicit per-rank counts. Ranks 2..=4 are always listed (even when
-    // empty) so the breakdown reads unambiguously; higher ranks appear only
-    // when the dataset actually has them.
+    // Per-rank counts on one compact line; ranks 0..=4 are always listed.
     let mut counts: std::collections::BTreeMap<usize, usize> = Default::default();
     for variable in plottable {
         *counts.entry(variable.dimensions.len()).or_default() += 1;
     }
     let max_rank = counts.keys().next_back().copied().unwrap_or(0).max(4);
-    for rank in 0..=max_rank {
-        lines.push(muted(format!(
-            "  {rank}D variables: {}",
-            counts.get(&rank).copied().unwrap_or(0)
-        )));
+    let summary = (0..=max_rank)
+        .map(|rank| format!("{rank}D:{}", counts.get(&rank).copied().unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut summary_lines = wrap_text(&summary, content_width.saturating_sub(15)).into_iter();
+    if let Some(first) = summary_lines.next() {
+        lines.push(labeled_row("ranks", &first, content_width));
+    }
+    for chunk in summary_lines {
+        lines.push(muted(format!("{}{chunk}", " ".repeat(14))));
     }
     lines.push(Line::from(vec![
         Span::styled(
@@ -935,6 +935,81 @@ mod tests {
         assert!(rendered.contains("L2 [3 / 6]"), "{rendered}");
         assert!(rendered.contains("Prev"), "{rendered}");
         assert!(rendered.contains("Next"), "{rendered}");
+    }
+
+    #[test]
+    fn variables_box_shows_a_full_four_dimension_shape_and_rank_summary() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dimension = |name: &str, length, role| crate::data::Dimension {
+            name: name.into(),
+            length,
+            role,
+        };
+        let field = crate::data::Variable {
+            name: "temperature_isobaric".into(),
+            dimensions: vec![
+                "Time".into(),
+                "nIsoLevelsT".into(),
+                "latitude".into(),
+                "longitude".into(),
+            ],
+            numeric: true,
+            units: Some("K".into()),
+            long_name: Some("Temperature interpolated to isobaric surfaces".into()),
+            standard_name: None,
+        };
+        let metadata = crate::data::DatasetMetadata {
+            path: "f.nc".into(),
+            format: crate::data::DatasetFormat::NetCdf3,
+            dimensions: vec![
+                dimension("Time", 1, crate::data::AxisRole::Time),
+                dimension("nIsoLevelsT", 27, crate::data::AxisRole::Depth),
+                dimension("latitude", 720, crate::data::AxisRole::Latitude),
+                dimension("longitude", 1440, crate::data::AxisRole::Longitude),
+            ],
+            variables: vec![field.clone()],
+        };
+        let mut terminal = Terminal::new(TestBackend::new(32, 46)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_with_search(
+                    frame,
+                    frame.area(),
+                    "f.nc",
+                    &metadata,
+                    Some("temperature_isobaric"),
+                    &crate::render::colors::Palette::Viridis,
+                    None,
+                    None,
+                    crate::render::colors::ScaleMode::Linear,
+                    crate::app::ColorScaleScope::CurrentView,
+                    "",
+                    false,
+                    std::slice::from_ref(&field),
+                    None,
+                    None,
+                    &[],
+                    0,
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for text in [
+            "Time(1)",
+            "nIsoLevelsT(27)",
+            "latitude(720)",
+            "longitude(1440)",
+            "4D:1",
+            "browse",
+        ] {
+            assert!(rendered.contains(text), "missing {text}: {rendered}");
+        }
     }
 
     #[test]

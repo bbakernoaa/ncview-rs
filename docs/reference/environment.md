@@ -15,8 +15,10 @@ launching `ncv`.
 | `NCVIEW_IMAGE_PROTOCOL` | `kitty`, `sixel`, `iterm2`, `cells` | auto-detected | Override graphics capability detection. Auto-detection identifies iTerm2 from environment hints; Kitty and Sixel are selected only through this override or a positive capability match. Kitty requests on WezTerm are automatically downgraded to Sixel. |
 | `NCVIEW_SCIENTIFIC_RENDERING` | `1` / `0` | `1` (locked) | Keep nearest-neighbor scientific rendering, or allow interpolation (`0`). |
 | `NCVIEW_IMAGE_FILTER` | `nearest`, `lanczos3`, `catmull-rom`, `triangle`, `gaussian` | `nearest` | Image filter when scientific rendering is unlocked. |
+| `NCVIEW_CELL_PIXEL_SIZE` | `WxH` pixels, e.g. `10x20` | from the terminal | Terminal cell size used to size graphics images and map mouse clicks. Set it when the terminal reports a placeholder size (common over SSH), which shows as a shrunken map; reports under 4x8 pixels per cell are ignored and `10x20` is assumed. |
 | `NCVIEW_ANONYMOUS_ACCESS` | truthy (`1`, `true`, `yes`, `on`, `y`) | auto | Force credential-free access for public S3/GCS/Azure objects. Any other value, including `0`, leaves the automatic decision in charge rather than forcing signed access. Auto mode uses ambient credentials if present, otherwise a cached metadata-endpoint probe, and selects anonymous access when neither yields credentials. |
 | `NCVIEW_LAND_DETAIL` | `110m`, `50m`, `10m`, `auto` | `110m` | Coastline resolution after enabling the `b` backdrop; `auto` selects by zoom level. |
+| `NCVIEW_UG_INTERMEDIATE_SPACING_DEG` | degrees, `0 < x <= 90` | `0.25` | Cell size of the regular latitude/longitude grid that unstructured-grid fields (currently MPAS) are regridded onto. Smaller values sharpen the map but cost more per read. |
 | `NCVIEW_COLORMAPS` | directory | — | Extra directory of `.ncmap` files for the palette catalog. |
 | `NCVIEW_LIB_DIR` | directory | — | Also searched for colormaps, including `share/ncview/colormaps`. |
 | `NCVIEWBASE` | directory | — | Also searched for colormaps, including `share/ncview/colormaps`. |

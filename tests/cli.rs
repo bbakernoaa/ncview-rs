@@ -36,6 +36,14 @@ fn manifest_subcommand_describes_both_profiles() {
 }
 
 #[test]
+fn grid_flag_appears_in_help() {
+    let output = ncv().arg("--help").output().unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(help.contains("--grid"));
+}
+
+#[test]
 fn bounded_view_options_are_all_required_before_terminal_startup() {
     let options = [
         "--min-x", "1", "--max-x", "2", "--min-y", "3", "--max-y", "4",
