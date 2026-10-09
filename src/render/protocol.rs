@@ -456,17 +456,6 @@ impl ProtocolState {
         {
             picker.set_protocol_type(protocol_type);
         }
-        // Some terminals advertise themselves through the environment but do
-        // not implement every graphics protocol. WezTerm, for example, has no
-        // Kitty support: the unicode placeholder code points that carry the
-        // image render as literal glyphs, producing a field of garbage. Apply
-        // the downgrade after the override so an explicit (and unsupported)
-        // request still yields a working render instead of silently printing
-        // escape payloads.
-        let resolved = downgrade_unsupported(picker.protocol_type(), wezterm_hint());
-        if resolved != picker.protocol_type() {
-            picker.set_protocol_type(resolved);
-        }
         let protocol = match picker.protocol_type() {
             ProtocolType::Kitty => ImageProtocol::Kitty,
             ProtocolType::Sixel => ImageProtocol::Sixel,
@@ -484,18 +473,6 @@ fn parse_protocol_override(forced: &str) -> Option<ProtocolType> {
         "iterm2" | "iterm" => Some(ProtocolType::Iterm2),
         "cells" | "halfblocks" => Some(ProtocolType::Halfblocks),
         _ => None,
-    }
-}
-
-/// Map a requested protocol to one the detected terminal can actually render.
-/// Kitty is the only protocol with a known-bad terminal here: WezTerm lacks the
-/// graphics protocol entirely, so fall back to Sixel (a truecolor raster path
-/// it does implement). Pure over the terminal hint so it is unit-testable.
-fn downgrade_unsupported(requested: ProtocolType, is_wezterm: bool) -> ProtocolType {
-    if requested == ProtocolType::Kitty && is_wezterm {
-        ProtocolType::Sixel
-    } else {
-        requested
     }
 }
 
@@ -536,6 +513,13 @@ fn cell_pixel_size(
         return parsed_override;
     }
     let (columns, rows, pixel_width, pixel_height) = window?;
+    // ConPTY and SSH PTYs commonly report this legacy placeholder instead of
+    // the real terminal pixel dimensions. Dividing it by the current grid can
+    // produce plausible values such as 4x8, which then makes Sixel images a
+    // fraction of their expected display size.
+    if (pixel_width, pixel_height) == (640, 480) {
+        return None;
+    }
     let width = pixel_width.checked_div(columns)?;
     let height = pixel_height.checked_div(rows)?;
     // Terminals that cannot report pixels often send a 640x480 placeholder.
@@ -548,45 +532,9 @@ fn iterm2_hint() -> bool {
         || env::var("LC_TERMINAL").is_ok_and(|value| value.to_ascii_lowercase().contains("iterm"))
 }
 
-/// WezTerm sets `TERM_PROGRAM=WezTerm` and exports `WEZTERM_EXECUTABLE` to
-/// every child process, so either marker is reliable even through shells that
-/// rewrite TERM.
-fn wezterm_hint() -> bool {
-    env::var("TERM_PROGRAM").is_ok_and(|value| value.to_ascii_lowercase().contains("wezterm"))
-        || env::var("WEZTERM_EXECUTABLE").is_ok_and(|value| !value.is_empty())
-        || env::var("WEZTERM_PANE").is_ok_and(|value| !value.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wezterm_downgrades_kitty_to_sixel() {
-        assert_eq!(
-            downgrade_unsupported(ProtocolType::Kitty, true),
-            ProtocolType::Sixel
-        );
-    }
-
-    #[test]
-    fn other_terminals_keep_kitty() {
-        assert_eq!(
-            downgrade_unsupported(ProtocolType::Kitty, false),
-            ProtocolType::Kitty
-        );
-    }
-
-    #[test]
-    fn wezterm_keeps_protocols_it_implements() {
-        for protocol in [
-            ProtocolType::Sixel,
-            ProtocolType::Iterm2,
-            ProtocolType::Halfblocks,
-        ] {
-            assert_eq!(downgrade_unsupported(protocol, true), protocol);
-        }
-    }
 
     #[test]
     fn override_names_parse_case_insensitively() {

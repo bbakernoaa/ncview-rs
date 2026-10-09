@@ -35,13 +35,11 @@ works: hover readouts, clicking, zoom, export. The project rule is **capability
 enhancement must never become capability lockout**: the fanciest protocol is
 never required for any workflow.
 
-## Known protocol quirks
+## Explicit protocol selection
 
-- **WezTerm does not implement the Kitty protocol.** Kitty's placeholder
-  encoding prints as literal glyph garbage there without returning an error,
-  so `ncv` recognizes WezTerm and downgrades a Kitty request (even an explicit
-  `NCVIEW_IMAGE_PROTOCOL=kitty`) to Sixel. Sixel and iTerm2 work normally in
-  WezTerm.
+`NCVIEW_IMAGE_PROTOCOL` is honored as given, even when the terminal may not
+support that protocol correctly. To force the portable renderer, set
+`NCVIEW_IMAGE_PROTOCOL=cells`.
 - **iTerm2 uses its own protocol** rather than Kitty/Sixel.
 - **tmux and other multiplexers** may swallow capability queries; set
   `NCVIEW_IMAGE_PROTOCOL` explicitly to bypass capability detection for the

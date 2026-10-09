@@ -45,7 +45,7 @@ NetCDF/HDF5 runtime dependency.
   overridable with `NCVIEW_IMAGE_PROTOCOL`).
 - Portable fallback: `ncv`'s own cell rasterizer — one truecolor background
   block per terminal cell — always functional, including over OpenSSH and tmux.
-- WezTerm: no Kitty support; Kitty requests are auto-downgraded to Sixel.
+- Explicit `NCVIEW_IMAGE_PROTOCOL` settings are honored as given on all terminals; the portable cell renderer remains available with `NCVIEW_IMAGE_PROTOCOL=cells`.
 - No X11 forwarding required.
 
 ## Data safety

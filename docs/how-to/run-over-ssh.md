@@ -62,11 +62,12 @@ the command palette provides the same entry fields alongside the existing box
 zoom. Invalid or non-overlapping bounds keep the current view intact. See the
 [CLI reference](../reference/cli.md) for coordinate and error behavior.
 
-## WezTerm note
+## Terminal-specific protocols
 
-WezTerm does **not** implement the Kitty graphics protocol. A Kitty request
-there is automatically downgraded to Sixel so the map renders instead of
-printing escape-sequence garbage. Sixel and iTerm2 both work in WezTerm.
+Some terminals or terminal versions have protocol-specific limitations. Set
+`NCVIEW_IMAGE_PROTOCOL` to the protocol you want to use; `ncv` honors an
+explicit setting as given. Use `NCVIEW_IMAGE_PROTOCOL=cells` for the portable
+fallback.
 
 ## Keep scientific cells crisp
 
