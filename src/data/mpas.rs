@@ -1011,4 +1011,28 @@ mod tests {
         let slice = source.read_slice(&request).expect("plain read");
         assert_eq!(slice.values.dim(), (60, 120));
     }
+
+    #[test]
+    fn zoomed_diff_of_two_mpas_fields_on_the_same_grid_refines_both_sides() {
+        let left: Arc<dyn DataSource> = Arc::from(refine_source(true));
+        let right: Arc<dyn DataSource> = Arc::from(refine_source(true));
+        let diff = crate::data::diff::DiffSource::new(left, right);
+        let bounds = crate::data::slice::Bounds::new(60, 120, 120, 240).unwrap();
+        let slice = display_read(&diff, bounds);
+
+        assert_eq!(slice.values.dim(), (180, 360));
+        assert_eq!(slice.source_bounds, bounds);
+        let finite = slice
+            .values
+            .iter()
+            .filter(|value| value.is_finite())
+            .count();
+        assert!(finite > 0, "fixture window has no finite values");
+        assert!(
+            slice
+                .values
+                .iter()
+                .all(|value| !value.is_finite() || *value == 0.0)
+        );
+    }
 }
