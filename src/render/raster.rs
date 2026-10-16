@@ -338,10 +338,7 @@ fn bin_range(index: usize, source_len: usize, output_len: usize) -> (usize, usiz
 }
 
 fn mark_point(image: &mut RgbImage, slice: &Slice2D, point: (usize, usize), color: [u8; 3]) {
-    let Some(row) = point.0.checked_sub(slice.source_bounds.row_start) else {
-        return;
-    };
-    let Some(col) = point.1.checked_sub(slice.source_bounds.col_start) else {
+    let Some((row, col)) = slice.centre_sample_for_source(point.0, point.1) else {
         return;
     };
     let (source_rows, source_cols) = slice.values.dim();

@@ -163,7 +163,12 @@ impl DataSource for DiffSource {
             }
         }
 
-        let mut diff_slice = Slice2D::new(diff_values, diff_validity, request.bounds)?;
+        let mut diff_slice = Slice2D::new_subdivided(
+            diff_values,
+            diff_validity,
+            request.bounds,
+            slice1.subdivision(),
+        )?;
         diff_slice.is_diff = true;
         let coords = slice1.coordinates.or(slice2.coordinates);
         Ok(if let Some(c) = coords {
