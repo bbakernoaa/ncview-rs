@@ -109,7 +109,19 @@ jobs:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
+          command: check bans licenses sources
+
+  # A newly published advisory must not fail unrelated PRs, so it only warns.
+  advisories:
+    name: Dependency advisories (non-blocking)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
 
   musl:
     name: Build static Linux x86_64
