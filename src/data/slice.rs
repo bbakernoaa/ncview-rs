@@ -322,7 +322,7 @@ impl Slice2D {
         statistics: Option<Statistics>,
     ) -> Result<Self> {
         if values.raw_dim() != validity.raw_dim()
-            || values.raw_dim() != ndarray::Ix2(source_bounds.shape().0, source_bounds.shape().1)
+            || subdivision_of(values.dim(), source_bounds).is_none()
         {
             return Err(NcvError::InvalidSlice(
                 "values, mask, and bounds shapes differ".into(),
@@ -343,13 +343,6 @@ impl Slice2D {
         validity: Array2<Validity>,
         source_bounds: Bounds,
     ) -> Result<Self> {
-        if values.raw_dim() != validity.raw_dim()
-            || values.raw_dim() != ndarray::Ix2(source_bounds.shape().0, source_bounds.shape().1)
-        {
-            return Err(NcvError::InvalidSlice(
-                "values, mask, and bounds shapes differ".into(),
-            ));
-        }
         let mut min = f64::INFINITY;
         let mut max = f64::NEG_INFINITY;
         let mut sum = 0.0;
@@ -442,18 +435,93 @@ impl Slice2D {
         })
     }
 
-    pub fn value_at_source(&self, row: usize, col: usize) -> Option<f64> {
-        if row < self.source_bounds.row_start
-            || row >= self.source_bounds.row_end
-            || col < self.source_bounds.col_start
-            || col >= self.source_bounds.col_end
+    /// Samples per source cell along each axis; 1 unless the values are refined.
+    pub fn subdivision(&self) -> usize {
+        subdivision_of(self.values.dim(), self.source_bounds).unwrap_or(1)
+    }
+
+    /// Sample index standing for source cell `(row, col)`: its centre sample when refined.
+    pub fn centre_sample_for_source(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let bounds = self.source_bounds;
+        if row < bounds.row_start
+            || row >= bounds.row_end
+            || col < bounds.col_start
+            || col >= bounds.col_end
         {
             return None;
         }
-        let local_row = row - self.source_bounds.row_start;
-        let local_col = col - self.source_bounds.col_start;
-        (self.validity[(local_row, local_col)] == Validity::Finite)
-            .then_some(self.values[(local_row, local_col)])
+        let factor = self.subdivision();
+        Some((
+            (row - bounds.row_start) * factor + factor / 2,
+            (col - bounds.col_start) * factor + factor / 2,
+        ))
+    }
+
+    /// Source cell represented by a sample index, or `None` for a non-centre sample.
+    pub fn source_point_at_sample(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let factor = self.subdivision();
+        (row % factor == factor / 2 && col % factor == factor / 2).then(|| {
+            (
+                self.source_bounds.row_start + row / factor,
+                self.source_bounds.col_start + col / factor,
+            )
+        })
+    }
+
+    pub fn value_at_source(&self, row: usize, col: usize) -> Option<f64> {
+        let (row, col) = self.centre_sample_for_source(row, col)?;
+        (self.validity[(row, col)] == Validity::Finite)
+            .then_some(self.values[(row, col)])
             .filter(|value| value.is_finite())
+    }
+}
+
+/// Uniform per-axis factor by which `values` subdivides `bounds`, if any.
+fn subdivision_of(values: (usize, usize), bounds: Bounds) -> Option<usize> {
+    let (rows, cols) = bounds.shape();
+    if rows == 0 || cols == 0 || !values.0.is_multiple_of(rows) || !values.1.is_multiple_of(cols) {
+        return None;
+    }
+    let factor = values.0 / rows;
+    (factor >= 1 && factor == values.1 / cols).then_some(factor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refined(factor: usize) -> Slice2D {
+        let bounds = Bounds::new(2, 4, 6, 9).unwrap();
+        let (rows, cols) = (2 * factor, 3 * factor);
+        let values = Array2::from_shape_fn((rows, cols), |(row, col)| (row * 100 + col) as f64);
+        let validity = Array2::from_elem((rows, cols), Validity::Finite);
+        Slice2D::new(values, validity, bounds).unwrap()
+    }
+
+    #[test]
+    fn values_may_subdivide_the_source_window_by_a_whole_factor() {
+        assert_eq!(refined(1).subdivision(), 1);
+        assert_eq!(refined(3).subdivision(), 3);
+        let values = Array2::zeros((4, 5));
+        let validity = Array2::from_elem((4, 5), Validity::Finite);
+        assert!(Slice2D::new(values, validity, Bounds::new(0, 2, 0, 3).unwrap()).is_err());
+    }
+
+    #[test]
+    fn source_cells_map_to_their_centre_samples_and_back() {
+        let slice = refined(3);
+        assert_eq!(slice.centre_sample_for_source(2, 6), Some((1, 1)));
+        assert_eq!(slice.centre_sample_for_source(3, 8), Some((4, 7)));
+        assert_eq!(slice.centre_sample_for_source(4, 6), None);
+        assert_eq!(slice.source_point_at_sample(1, 1), Some((2, 6)));
+        assert_eq!(slice.source_point_at_sample(4, 7), Some((3, 8)));
+        assert_eq!(slice.source_point_at_sample(0, 1), None);
+    }
+
+    #[test]
+    fn value_at_source_reads_the_centre_sample() {
+        let slice = refined(3);
+        assert_eq!(slice.value_at_source(2, 6), Some(101.0));
+        assert_eq!(slice.value_at_source(3, 8), Some(407.0));
     }
 }

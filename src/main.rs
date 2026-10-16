@@ -2050,7 +2050,7 @@ fn translate_mouse_release(
     {
         return Command::Pan { rows, cols };
     }
-    let (rows, cols) = slice.values.dim();
+    let (rows, cols) = slice.source_bounds.shape();
     let flip_rows = slice
         .coordinates
         .as_ref()
