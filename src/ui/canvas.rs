@@ -329,7 +329,7 @@ fn render_content(
                                     land_detail,
                                 )
                             });
-                    let source_point = slice.source_point_at_sample(source_row, source_col);
+                    let source_point = slice.source_cell_of_sample(source_row, source_col);
                     let selected = selected_point.is_some() && source_point == selected_point;
                     let hovered = hover_point.is_some() && source_point == hover_point;
                     Span::styled(

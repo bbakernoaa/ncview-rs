@@ -402,7 +402,7 @@ impl MpasSource {
         let longitude_axis = (fine_col_start..fine_col_start + fine_cols)
             .map(|col| cell_longitude(col, step))
             .collect();
-        Slice2D::new(values, validity, bounds).map(|slice| {
+        Slice2D::new_subdivided(values, validity, bounds, factor).map(|slice| {
             slice.with_coordinates(CoordinateGrid {
                 latitude: None,
                 longitude: None,

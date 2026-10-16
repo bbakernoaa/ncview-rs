@@ -321,8 +321,21 @@ impl Slice2D {
         source_bounds: Bounds,
         statistics: Option<Statistics>,
     ) -> Result<Self> {
-        if values.raw_dim() != validity.raw_dim()
-            || subdivision_of(values.dim(), source_bounds).is_none()
+        Self::with_statistics_subdivided(values, validity, source_bounds, 1, statistics)
+    }
+
+    /// Like [`Self::with_statistics`] for values sampled `subdivision` times finer than the window.
+    pub fn with_statistics_subdivided(
+        values: Array2<f64>,
+        validity: Array2<Validity>,
+        source_bounds: Bounds,
+        subdivision: usize,
+        statistics: Option<Statistics>,
+    ) -> Result<Self> {
+        let (rows, cols) = source_bounds.shape();
+        if subdivision == 0
+            || values.raw_dim() != validity.raw_dim()
+            || values.dim() != (rows * subdivision, cols * subdivision)
         {
             return Err(NcvError::InvalidSlice(
                 "values, mask, and bounds shapes differ".into(),
@@ -342,6 +355,16 @@ impl Slice2D {
         values: Array2<f64>,
         validity: Array2<Validity>,
         source_bounds: Bounds,
+    ) -> Result<Self> {
+        Self::new_subdivided(values, validity, source_bounds, 1)
+    }
+
+    /// Like [`Self::new`] for values sampled `subdivision` times finer than the window.
+    pub fn new_subdivided(
+        values: Array2<f64>,
+        validity: Array2<Validity>,
+        source_bounds: Bounds,
+        subdivision: usize,
     ) -> Result<Self> {
         let mut min = f64::INFINITY;
         let mut max = f64::NEG_INFINITY;
@@ -372,7 +395,7 @@ impl Slice2D {
             mean: sum / finite_count as f64,
             finite_count,
         });
-        Self::with_statistics(values, validity, source_bounds, statistics)
+        Self::with_statistics_subdivided(values, validity, source_bounds, subdivision, statistics)
     }
 
     pub fn with_coordinates(self, coordinates: CoordinateGrid) -> Self {
@@ -412,7 +435,14 @@ impl Slice2D {
             self.source_bounds.row_start,
             self.source_bounds.row_end,
         )?;
-        Self::with_statistics(values, validity, bounds, self.statistics).map(|mut slice| {
+        Self::with_statistics_subdivided(
+            values,
+            validity,
+            bounds,
+            self.subdivision(),
+            self.statistics,
+        )
+        .map(|mut slice| {
             if let Some(coordinates) = &self.coordinates {
                 slice.coordinates = Some(Arc::new(CoordinateGrid {
                     latitude: coordinates
@@ -457,15 +487,17 @@ impl Slice2D {
         ))
     }
 
-    /// Source cell represented by a sample index, or `None` for a non-centre sample.
-    pub fn source_point_at_sample(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+    /// Source cell containing the sample at `(row, col)`.
+    pub fn source_cell_of_sample(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let (rows, cols) = self.values.dim();
+        if row >= rows || col >= cols {
+            return None;
+        }
         let factor = self.subdivision();
-        (row % factor == factor / 2 && col % factor == factor / 2).then(|| {
-            (
-                self.source_bounds.row_start + row / factor,
-                self.source_bounds.col_start + col / factor,
-            )
-        })
+        Some((
+            self.source_bounds.row_start + row / factor,
+            self.source_bounds.col_start + col / factor,
+        ))
     }
 
     pub fn value_at_source(&self, row: usize, col: usize) -> Option<f64> {
@@ -495,27 +527,38 @@ mod tests {
         let (rows, cols) = (2 * factor, 3 * factor);
         let values = Array2::from_shape_fn((rows, cols), |(row, col)| (row * 100 + col) as f64);
         let validity = Array2::from_elem((rows, cols), Validity::Finite);
-        Slice2D::new(values, validity, bounds).unwrap()
+        Slice2D::new_subdivided(values, validity, bounds, factor).unwrap()
     }
 
     #[test]
-    fn values_may_subdivide_the_source_window_by_a_whole_factor() {
+    fn values_may_subdivide_the_source_window_only_when_declared() {
         assert_eq!(refined(1).subdivision(), 1);
         assert_eq!(refined(3).subdivision(), 3);
-        let values = Array2::zeros((4, 5));
-        let validity = Array2::from_elem((4, 5), Validity::Finite);
-        assert!(Slice2D::new(values, validity, Bounds::new(0, 2, 0, 3).unwrap()).is_err());
+        let values = Array2::zeros((6, 9));
+        let validity = Array2::from_elem((6, 9), Validity::Finite);
+        let bounds = Bounds::new(0, 2, 0, 3).unwrap();
+        assert!(Slice2D::new(values.clone(), validity.clone(), bounds).is_err());
+        assert!(Slice2D::new_subdivided(values.clone(), validity.clone(), bounds, 2).is_err());
+        assert!(Slice2D::new_subdivided(values, validity, bounds, 0).is_err());
     }
 
     #[test]
-    fn source_cells_map_to_their_centre_samples_and_back() {
+    fn source_cells_map_to_their_centre_samples() {
         let slice = refined(3);
         assert_eq!(slice.centre_sample_for_source(2, 6), Some((1, 1)));
         assert_eq!(slice.centre_sample_for_source(3, 8), Some((4, 7)));
         assert_eq!(slice.centre_sample_for_source(4, 6), None);
-        assert_eq!(slice.source_point_at_sample(1, 1), Some((2, 6)));
-        assert_eq!(slice.source_point_at_sample(4, 7), Some((3, 8)));
-        assert_eq!(slice.source_point_at_sample(0, 1), None);
+    }
+
+    #[test]
+    fn every_sample_maps_to_the_source_cell_containing_it() {
+        let slice = refined(3);
+        assert_eq!(slice.source_cell_of_sample(0, 0), Some((2, 6)));
+        assert_eq!(slice.source_cell_of_sample(2, 2), Some((2, 6)));
+        assert_eq!(slice.source_cell_of_sample(3, 3), Some((3, 7)));
+        assert_eq!(slice.source_cell_of_sample(5, 8), Some((3, 8)));
+        assert_eq!(slice.source_cell_of_sample(6, 0), None);
+        assert_eq!(slice.source_cell_of_sample(0, 9), None);
     }
 
     #[test]
@@ -523,5 +566,13 @@ mod tests {
         let slice = refined(3);
         assert_eq!(slice.value_at_source(2, 6), Some(101.0));
         assert_eq!(slice.value_at_source(3, 8), Some(407.0));
+    }
+
+    #[test]
+    fn transposing_keeps_the_subdivision() {
+        let slice = refined(3).permuted_axes().unwrap();
+        assert_eq!(slice.values.dim(), (9, 6));
+        assert_eq!(slice.source_bounds, Bounds::new(6, 9, 2, 4).unwrap());
+        assert_eq!(slice.subdivision(), 3);
     }
 }
