@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.23](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.22...v0.5.23) - 2026-10-20
+
+### Added
+
+- refine MPAS zoomed views on an opt-in finer grid ([#67](https://github.com/bbakernoaa/ncview-rs/pull/67))
+
 ## [0.5.22](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.21...v0.5.22) - 2026-10-16
 
 ### Fixed
