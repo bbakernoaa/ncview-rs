@@ -160,7 +160,8 @@ fn cell_latitude(row: usize, step_deg: f64) -> f64 {
 
 /// Centre of `col` in a regular longitude grid with `step_deg` cells.
 fn cell_longitude(col: usize, step_deg: f64) -> f64 {
-    normalize_longitude(-180.0 + (col as f64 + 0.5) * step_deg)
+    // Clip, not wrap: a wrapped overhang would reappear at -180 and span the whole map.
+    (-180.0 + (col as f64 + 0.5) * step_deg).min(180.0)
 }
 
 fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
@@ -1053,6 +1054,38 @@ mod tests {
     fn sample_latitudes_never_pass_the_poles() {
         assert_eq!(cell_latitude(0, 0.25), -89.875);
         assert_eq!(cell_latitude(545, 7.0 / 21.0), 90.0);
+    }
+
+    #[test]
+    fn sample_longitudes_never_wrap_past_the_antimeridian() {
+        assert_eq!(cell_longitude(0, 0.25), -179.875);
+        assert_eq!(cell_longitude(3272 * 11 + 10, 0.01), 180.0);
+    }
+
+    #[test]
+    fn refined_eastern_cell_stays_east_of_the_window_when_spacing_does_not_divide_360() {
+        // 0.11 degrees gives 3273 columns spanning 360.03 degrees, so the last column overhangs.
+        let source = refine_source_at(0.11, true);
+        let bounds = crate::data::slice::Bounds::new(800, 805, 3268, 3273).unwrap();
+        let slice = display_read(source.as_ref(), bounds);
+
+        assert_eq!(slice.subdivision(), 11);
+        let coordinates = slice.coordinates.as_ref().expect("axes");
+        let longitudes = coordinates.longitude_axis.as_ref().expect("longitude axis");
+        assert!(longitudes.iter().all(|longitude| *longitude <= 180.0));
+        assert!(longitudes.is_sorted());
+        let span = longitudes[longitudes.len() - 1] - longitudes[0];
+        assert!(span < 1.0, "window spans {span} degrees");
+
+        // Overhanging samples sit on the seam, so each row repeats one value across them.
+        let (rows, cols) = slice.values.dim();
+        for row in 0..rows {
+            let seam = (0..cols)
+                .filter(|col| longitudes[*col] == 180.0)
+                .map(|col| slice.values[(row, col)].to_bits())
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(seam.len(), 1, "row {row}");
+        }
     }
 
     #[test]
