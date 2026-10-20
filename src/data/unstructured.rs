@@ -24,6 +24,31 @@ pub fn parse_intermediate_spacing(value: Option<&str>) -> Result<f64> {
     }
 }
 
+/// Opt-in flag: zoomed views sample a finer grid than the global spacing.
+pub const ZOOM_REFINE_ENV: &str = "NCVIEW_UG_ZOOM_REFINE";
+/// Finest sample spacing a zoomed view may request, in degrees.
+pub const MIN_REFINED_SPACING_DEG: f64 = 0.01;
+
+/// Only truthy values enable zoom refinement; unset or other values leave it off.
+pub fn parse_zoom_refine(value: Option<&str>) -> bool {
+    value.is_some_and(|text| {
+        matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "y"
+        )
+    })
+}
+
+/// Largest per-axis subdivision whose samples fit the global grid's cell budget.
+pub fn refinement_factor(window_cells: usize, global_cells: usize, spacing_deg: f64) -> usize {
+    if window_cells == 0 {
+        return 1;
+    }
+    let budget = (global_cells / window_cells).isqrt();
+    let floor = (spacing_deg / MIN_REFINED_SPACING_DEG + 1e-9).floor() as usize;
+    budget.min(floor).max(1)
+}
+
 fn unit_vector(latitude_deg: f64, longitude_deg: f64) -> [f64; 3] {
     let latitude = latitude_deg.to_radians();
     let longitude = longitude_deg.to_radians();
@@ -131,6 +156,34 @@ mod tests {
                 "{value} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn zoom_refinement_is_off_unless_explicitly_truthy() {
+        assert!(!parse_zoom_refine(None));
+        assert!(!parse_zoom_refine(Some("")));
+        assert!(!parse_zoom_refine(Some("0")));
+        for value in ["1", "true", "YES", " on ", "y"] {
+            assert!(parse_zoom_refine(Some(value)), "{value} should enable");
+        }
+    }
+
+    #[test]
+    fn refinement_factor_keeps_the_window_within_the_global_cell_budget() {
+        let global = 720 * 1440;
+        assert_eq!(refinement_factor(global, global, 0.25), 1);
+        assert_eq!(refinement_factor(global / 4, global, 0.25), 2);
+        assert_eq!(refinement_factor(global / 9, global, 0.25), 3);
+        assert_eq!(refinement_factor(global / 16, global, 0.25), 4);
+        assert_eq!(refinement_factor(0, global, 0.25), 1);
+    }
+
+    #[test]
+    fn refinement_factor_never_samples_finer_than_the_floor() {
+        let global = 720 * 1440;
+        assert_eq!(refinement_factor(1, global, 0.25), 25);
+        assert_eq!(refinement_factor(1, global, 0.1), 10);
+        assert_eq!(refinement_factor(1, global, 0.005), 1);
     }
 
     #[test]

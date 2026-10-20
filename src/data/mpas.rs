@@ -57,6 +57,7 @@ pub struct MpasSource {
     metadata: DatasetMetadata,
     path: PathBuf,
     resolution_deg: f64,
+    zoom_refine: bool,
     indices: Mutex<HashMap<MeshLocation, Arc<SphereIndex>>>,
     time_labels: OnceLock<Vec<Option<String>>>,
 }
@@ -147,6 +148,22 @@ fn intermediate_spacing() -> Result<f64> {
     )
 }
 
+fn zoom_refine_enabled() -> bool {
+    unstructured::parse_zoom_refine(std::env::var(unstructured::ZOOM_REFINE_ENV).ok().as_deref())
+}
+
+/// Centre of `row` in a regular latitude grid with `step_deg` cells.
+fn cell_latitude(row: usize, step_deg: f64) -> f64 {
+    // A spacing that does not divide 180 leaves the polar cell partly past the pole.
+    (-90.0 + (row as f64 + 0.5) * step_deg).min(90.0)
+}
+
+/// Centre of `col` in a regular longitude grid with `step_deg` cells.
+fn cell_longitude(col: usize, step_deg: f64) -> f64 {
+    // Clip, not wrap: a wrapped overhang would reappear at -180 and span the whole map.
+    (-180.0 + (col as f64 + 0.5) * step_deg).min(180.0)
+}
+
 fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
     (
         (180.0 / resolution_deg).round() as usize,
@@ -157,7 +174,13 @@ fn shape_for_resolution(resolution_deg: f64) -> (usize, usize) {
 impl MpasSource {
     pub fn open(path: &Path, grid_path: Option<&Path>) -> Result<Box<dyn DataSource>> {
         let source = open_mesh_source(path)?;
-        Self::from_source(path, source, grid_path, intermediate_spacing()?)
+        Self::from_source(
+            path,
+            source,
+            grid_path,
+            intermediate_spacing()?,
+            zoom_refine_enabled(),
+        )
     }
 
     pub(crate) fn from_netcdf3(
@@ -165,7 +188,13 @@ impl MpasSource {
         source: NetCdf3Source,
         grid_path: Option<&Path>,
     ) -> Result<Box<dyn DataSource>> {
-        Self::from_source(path, Box::new(source), grid_path, intermediate_spacing()?)
+        Self::from_source(
+            path,
+            Box::new(source),
+            grid_path,
+            intermediate_spacing()?,
+            zoom_refine_enabled(),
+        )
     }
 
     pub(crate) fn from_netcdf4(
@@ -173,7 +202,13 @@ impl MpasSource {
         source: NetCdf4Source,
         grid_path: Option<&Path>,
     ) -> Result<Box<dyn DataSource>> {
-        Self::from_source(path, Box::new(source), grid_path, intermediate_spacing()?)
+        Self::from_source(
+            path,
+            Box::new(source),
+            grid_path,
+            intermediate_spacing()?,
+            zoom_refine_enabled(),
+        )
     }
 
     fn from_source(
@@ -181,6 +216,7 @@ impl MpasSource {
         source: Box<dyn MeshValueSource>,
         grid_path: Option<&Path>,
         spacing_deg: f64,
+        zoom_refine: bool,
     ) -> Result<Box<dyn DataSource>> {
         let inner_metadata = source.metadata().clone();
         let mesh = detect(&inner_metadata).ok_or_else(|| NcvError::InvalidDataset {
@@ -211,6 +247,7 @@ impl MpasSource {
             grid,
             path: path.to_path_buf(),
             resolution_deg: spacing_deg,
+            zoom_refine,
             indices: Mutex::new(HashMap::new()),
             time_labels: OnceLock::new(),
         }) as Box<dyn DataSource>)
@@ -221,11 +258,11 @@ impl MpasSource {
     }
 
     fn grid_latitude(&self, row: usize) -> f64 {
-        -90.0 + (row as f64 + 0.5) * self.resolution_deg
+        cell_latitude(row, self.resolution_deg)
     }
 
     fn grid_longitude(&self, col: usize) -> f64 {
-        normalize_longitude(-180.0 + (col as f64 + 0.5) * self.resolution_deg)
+        cell_longitude(col, self.resolution_deg)
     }
 
     fn coordinate_source(&self) -> &dyn MeshValueSource {
@@ -296,6 +333,7 @@ impl MpasSource {
         &self,
         request: &SliceRequest,
         fixed_axes: &[(String, usize)],
+        refine: bool,
     ) -> Result<Slice2D> {
         let Some(mesh) = self.mesh_for_variable(&request.variable) else {
             return self
@@ -332,32 +370,41 @@ impl MpasSource {
         }
         let rows = bounds.row_end - bounds.row_start;
         let cols = bounds.col_end - bounds.col_start;
-        let samples = (0..rows * cols)
+        let factor = if refine {
+            unstructured::refinement_factor(rows * cols, grid_rows * grid_cols, self.resolution_deg)
+        } else {
+            1
+        };
+        let step = self.resolution_deg / factor as f64;
+        let (fine_rows, fine_cols) = (rows * factor, cols * factor);
+        let fine_row_start = bounds.row_start * factor;
+        let fine_col_start = bounds.col_start * factor;
+        let samples = (0..fine_rows * fine_cols)
             .into_par_iter()
             .map(|flat| {
-                let latitude = self.grid_latitude(bounds.row_start + flat / cols);
-                let longitude = self.grid_longitude(bounds.col_start + flat % cols);
+                let latitude = cell_latitude(fine_row_start + flat / fine_cols, step);
+                let longitude = cell_longitude(fine_col_start + flat % fine_cols, step);
                 index
                     .nearest(latitude, longitude)
                     .map_or(f64::NAN, |source| mesh_values[source])
             })
             .collect::<Vec<_>>();
-        let values = Array2::from_shape_vec((rows, cols), samples)
+        let values = Array2::from_shape_vec((fine_rows, fine_cols), samples)
             .map_err(|error| NcvError::InvalidSlice(error.to_string()))?;
-        let validity = Array2::from_shape_fn((rows, cols), |(row, col)| {
+        let validity = Array2::from_shape_fn((fine_rows, fine_cols), |(row, col)| {
             if values[(row, col)].is_finite() {
                 Validity::Finite
             } else {
                 Validity::NaN
             }
         });
-        let latitude_axis = (bounds.row_start..bounds.row_end)
-            .map(|row| self.grid_latitude(row))
+        let latitude_axis = (fine_row_start..fine_row_start + fine_rows)
+            .map(|row| cell_latitude(row, step))
             .collect();
-        let longitude_axis = (bounds.col_start..bounds.col_end)
-            .map(|col| self.grid_longitude(col))
+        let longitude_axis = (fine_col_start..fine_col_start + fine_cols)
+            .map(|col| cell_longitude(col, step))
             .collect();
-        Slice2D::new(values, validity, bounds).map(|slice| {
+        Slice2D::new_subdivided(values, validity, bounds, factor).map(|slice| {
             slice.with_coordinates(CoordinateGrid {
                 latitude: None,
                 longitude: None,
@@ -638,7 +685,7 @@ impl DataSource for MpasSource {
     }
 
     fn read_slice(&self, request: &SliceRequest) -> Result<Slice2D> {
-        self.read_window(request, &[])
+        self.read_window(request, &[], false)
     }
 
     fn read_slice_on_axes(
@@ -648,7 +695,19 @@ impl DataSource for MpasSource {
         _col_axis: Option<&str>,
         fixed_axes: &[(String, usize)],
     ) -> Result<Slice2D> {
-        self.read_window(request, fixed_axes)
+        self.read_window(request, fixed_axes, false)
+    }
+
+    /// Display reads (the interactive worker path) may refine zoomed windows.
+    fn read_slice_on_axes_cancellable(
+        &self,
+        request: &SliceRequest,
+        _row_axis: Option<&str>,
+        _col_axis: Option<&str>,
+        fixed_axes: &[(String, usize)],
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Slice2D> {
+        self.read_window(request, fixed_axes, self.zoom_refine)
     }
 
     fn time_label(&self, index: usize) -> Option<String> {
@@ -891,5 +950,200 @@ mod tests {
         );
         let latitude = -90.0 + 0.5 * unstructured::DEFAULT_INTERMEDIATE_SPACING_DEG;
         assert!((latitude + 89.875).abs() < 1e-12);
+    }
+
+    fn refine_source(refine: bool) -> Box<dyn DataSource> {
+        refine_source_at(1.0, refine)
+    }
+
+    fn refine_source_at(spacing_deg: f64, refine: bool) -> Box<dyn DataSource> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");
+        let inner = NetCdf3Source::open(&path).expect("open MPAS fixture");
+        MpasSource::from_source(&path, Box::new(inner), None, spacing_deg, refine)
+            .expect("wrap MPAS fixture")
+    }
+
+    fn display_read(source: &dyn DataSource, bounds: crate::data::slice::Bounds) -> Slice2D {
+        display_read_of(source, "temperature", bounds)
+    }
+
+    fn display_read_of(
+        source: &dyn DataSource,
+        variable: &str,
+        bounds: crate::data::slice::Bounds,
+    ) -> Slice2D {
+        let request = SliceRequest {
+            variable: variable.into(),
+            time: 0,
+            depth: 0,
+            bounds,
+        };
+        source
+            .read_slice_on_axes_cancellable(
+                &request,
+                None,
+                None,
+                &[],
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .expect("read window")
+    }
+
+    #[test]
+    fn zoom_refinement_samples_finer_cells_whose_centres_match_the_coarse_grid() {
+        // The window holds 1/9 of the 1.0-degree global grid, so the factor is 3.
+        let bounds = crate::data::slice::Bounds::new(60, 120, 120, 240).unwrap();
+        let coarse = display_read(refine_source(false).as_ref(), bounds);
+        assert_eq!(coarse.values.dim(), (60, 120));
+
+        let refined_source = refine_source(true);
+        let refined = display_read(refined_source.as_ref(), bounds);
+        assert_eq!(refined.values.dim(), (180, 360));
+        assert_eq!(refined.source_bounds, bounds);
+
+        let mut compared = 0;
+        for row in bounds.row_start..bounds.row_end {
+            for col in bounds.col_start..bounds.col_end {
+                let expected = coarse.value_at_source(row, col);
+                assert_eq!(refined.value_at_source(row, col), expected, "{row},{col}");
+                compared += usize::from(expected.is_some());
+            }
+        }
+        assert!(compared > 0, "fixture window has no finite values");
+    }
+
+    #[test]
+    fn plain_reads_stay_on_the_coarse_grid_when_refinement_is_enabled() {
+        let bounds = crate::data::slice::Bounds::new(60, 120, 120, 240).unwrap();
+        let source = refine_source(true);
+        let request = SliceRequest {
+            variable: "temperature".into(),
+            time: 0,
+            depth: 0,
+            bounds,
+        };
+        let slice = source.read_slice(&request).expect("plain read");
+        assert_eq!(slice.values.dim(), (60, 120));
+    }
+
+    #[test]
+    fn zoomed_diff_of_two_mpas_fields_on_the_same_grid_refines_both_sides() {
+        let left: Arc<dyn DataSource> = Arc::from(refine_source(true));
+        let right: Arc<dyn DataSource> = Arc::from(refine_source(true));
+        let diff = crate::data::diff::DiffSource::new(left, right);
+        let bounds = crate::data::slice::Bounds::new(60, 120, 120, 240).unwrap();
+        let slice = display_read(&diff, bounds);
+
+        assert_eq!(slice.values.dim(), (180, 360));
+        assert_eq!(slice.source_bounds, bounds);
+        let finite = slice
+            .values
+            .iter()
+            .filter(|value| value.is_finite())
+            .count();
+        assert!(finite > 0, "fixture window has no finite values");
+        assert!(
+            slice
+                .values
+                .iter()
+                .all(|value| !value.is_finite() || *value == 0.0)
+        );
+    }
+
+    #[test]
+    fn sample_latitudes_never_pass_the_poles() {
+        assert_eq!(cell_latitude(0, 0.25), -89.875);
+        assert_eq!(cell_latitude(545, 7.0 / 21.0), 90.0);
+    }
+
+    #[test]
+    fn sample_longitudes_never_wrap_past_the_antimeridian() {
+        assert_eq!(cell_longitude(0, 0.25), -179.875);
+        assert_eq!(cell_longitude(3272 * 11 + 10, 0.01), 180.0);
+    }
+
+    #[test]
+    fn refined_eastern_cell_stays_east_of_the_window_when_spacing_does_not_divide_360() {
+        // 0.11 degrees gives 3273 columns spanning 360.03 degrees, so the last column overhangs.
+        let source = refine_source_at(0.11, true);
+        let bounds = crate::data::slice::Bounds::new(800, 805, 3268, 3273).unwrap();
+        let slice = display_read(source.as_ref(), bounds);
+
+        assert_eq!(slice.subdivision(), 11);
+        let coordinates = slice.coordinates.as_ref().expect("axes");
+        let longitudes = coordinates.longitude_axis.as_ref().expect("longitude axis");
+        assert!(longitudes.iter().all(|longitude| *longitude <= 180.0));
+        assert!(longitudes.is_sorted());
+        let span = longitudes[longitudes.len() - 1] - longitudes[0];
+        assert!(span < 1.0, "window spans {span} degrees");
+
+        // Overhanging samples sit on the seam, so each row repeats one value across them.
+        let (rows, cols) = slice.values.dim();
+        for row in 0..rows {
+            let seam = (0..cols)
+                .filter(|col| longitudes[*col] == 180.0)
+                .map(|col| slice.values[(row, col)].to_bits())
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(seam.len(), 1, "row {row}");
+        }
+    }
+
+    #[test]
+    fn refined_polar_cell_stays_on_the_sphere_when_spacing_does_not_divide_180() {
+        // 7 degrees gives 26 rows spanning 182 degrees, so the last row overhangs the pole.
+        let source = refine_source_at(7.0, true);
+        let bounds = crate::data::slice::Bounds::new(25, 26, 10, 13).unwrap();
+        let slice = display_read(source.as_ref(), bounds);
+
+        assert_eq!(slice.subdivision(), 21);
+        let coordinates = slice.coordinates.as_ref().expect("axes");
+        let latitudes = coordinates.latitude_axis.as_ref().expect("latitude axis");
+        assert!(latitudes.iter().all(|latitude| *latitude <= 90.0));
+        assert!(latitudes.is_sorted());
+
+        // Samples clamped to the pole all resolve to the same mesh cell, whatever the longitude.
+        let (rows, cols) = slice.values.dim();
+        let top = (0..cols)
+            .map(|col| slice.values[(rows - 1, col)].to_bits())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(top.len(), 1);
+    }
+
+    #[test]
+    fn diff_and_formula_wrappers_keep_plain_reads_coarse() {
+        use crate::data::{
+            diff::DiffSource,
+            formula::{FormulaDefinition, FormulaSource},
+        };
+        let bounds = crate::data::slice::Bounds::new(60, 120, 120, 240).unwrap();
+        let request = |variable: &str| SliceRequest {
+            variable: variable.into(),
+            time: 0,
+            depth: 0,
+            bounds,
+        };
+
+        let diff = DiffSource::new(
+            Arc::from(refine_source(true)),
+            Arc::from(refine_source(true)),
+        );
+        let plain = diff.read_slice(&request("temperature")).unwrap();
+        assert_eq!(plain.values.dim(), (60, 120));
+        let on_axes = diff.read_slice_on_axes(&request("temperature"), None, None, &[]);
+        assert_eq!(on_axes.unwrap().values.dim(), (60, 120));
+        assert_eq!(display_read(&diff, bounds).values.dim(), (180, 360));
+
+        let base: Arc<dyn DataSource> = Arc::from(refine_source(true));
+        let definition = FormulaDefinition::parse("double = temperature * 2").unwrap();
+        let formula =
+            FormulaSource::new(Arc::clone(&base), vec![Arc::clone(&base)], &[definition]).unwrap();
+        for variable in ["temperature", "double"] {
+            let plain = formula.read_slice(&request(variable)).unwrap();
+            assert_eq!(plain.values.dim(), (60, 120), "{variable}");
+            let on_axes = formula.read_slice_on_axes(&request(variable), None, None, &[]);
+            assert_eq!(on_axes.unwrap().values.dim(), (60, 120), "{variable}");
+            let shown = display_read_of(&formula, variable, bounds);
+            assert_eq!(shown.values.dim(), (180, 360), "{variable}");
+        }
     }
 }

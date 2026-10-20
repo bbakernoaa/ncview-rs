@@ -509,6 +509,7 @@ struct Grid {
     values: Array2<f64>,
     missing: Array2<bool>,
     bounds: Bounds,
+    subdivision: usize,
     coordinates: Option<Arc<CoordinateGrid>>,
 }
 
@@ -577,10 +578,12 @@ fn eval(expr: &Expr, inputs: &dyn FormulaInputs, time: usize, depth: usize) -> R
             let missing = Zip::from(&slice.values)
                 .and(&slice.validity)
                 .map_collect(|value, validity| *validity != Validity::Finite || !value.is_finite());
+            let subdivision = slice.subdivision();
             Value::Grid(Grid {
                 values: slice.values,
                 missing,
                 bounds: slice.source_bounds,
+                subdivision,
                 coordinates: slice.coordinates.clone(),
             })
         }
@@ -716,6 +719,7 @@ fn aggregate(
                     values: Array2::from_elem(grid.values.dim(), initial),
                     missing: Array2::from_elem(grid.values.dim(), false),
                     bounds: grid.bounds,
+                    subdivision: grid.subdivision,
                     coordinates: grid.coordinates.clone(),
                 },
                 Array2::zeros(grid.values.dim()),
@@ -782,7 +786,7 @@ fn into_slice(grid: Grid) -> Result<Slice2D> {
                 *value = f64::NAN;
             }
         });
-    let slice = Slice2D::new(values, validity, grid.bounds)?;
+    let slice = Slice2D::new_subdivided(values, validity, grid.bounds, grid.subdivision)?;
     Ok(match grid.coordinates {
         Some(coordinates) => slice.with_shared_coordinates(coordinates),
         None => slice,
@@ -836,6 +840,30 @@ mod tests {
         let slice = evaluate(&parse("sqrt(x) + 1").unwrap(), &inputs, 0, 0).unwrap();
         assert_eq!(slice.values[(0, 0)], 3.0);
         assert_eq!(slice.validity[(0, 1)], Validity::Missing);
+    }
+
+    struct Refined;
+
+    impl FormulaInputs for Refined {
+        fn read(&self, _: &VarRef, _: usize, _: usize) -> Result<Slice2D> {
+            let values = Array2::from_shape_fn((2, 4), |(row, col)| (row * 4 + col) as f64);
+            let validity = Array2::from_elem((2, 4), Validity::Finite);
+            Slice2D::new_subdivided(values, validity, Bounds::new(5, 6, 7, 9)?, 2)
+        }
+
+        fn lengths(&self, _: &VarRef) -> Result<(usize, usize)> {
+            Ok((2, 1))
+        }
+    }
+
+    #[test]
+    fn refined_inputs_keep_their_subdivision_through_evaluation() {
+        for text in ["x * 2", "mean(x)"] {
+            let slice = evaluate(&parse(text).unwrap(), &Refined, 0, 0).unwrap();
+            assert_eq!(slice.values.dim(), (2, 4), "{text}");
+            assert_eq!(slice.source_bounds, Bounds::new(5, 6, 7, 9).unwrap());
+            assert_eq!(slice.subdivision(), 2, "{text}");
+        }
     }
 
     #[test]

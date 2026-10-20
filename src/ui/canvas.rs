@@ -329,16 +329,9 @@ fn render_content(
                                     land_detail,
                                 )
                             });
-                    let selected = selected_point
-                        == Some((
-                            slice.source_bounds.row_start + source_row.min(rows.saturating_sub(1)),
-                            slice.source_bounds.col_start + source_col.min(cols.saturating_sub(1)),
-                        ));
-                    let hovered = hover_point
-                        == Some((
-                            slice.source_bounds.row_start + source_row.min(rows.saturating_sub(1)),
-                            slice.source_bounds.col_start + source_col.min(cols.saturating_sub(1)),
-                        ));
+                    let source_point = slice.source_cell_of_sample(source_row, source_col);
+                    let selected = selected_point.is_some() && source_point == selected_point;
+                    let hovered = hover_point.is_some() && source_point == hover_point;
                     Span::styled(
                         if selected {
                             "◆"
@@ -407,10 +400,7 @@ fn render_selected_marker(
     let Some((selected_row, selected_col)) = selected_point else {
         return;
     };
-    let Some(row) = selected_row.checked_sub(slice.source_bounds.row_start) else {
-        return;
-    };
-    let Some(col) = selected_col.checked_sub(slice.source_bounds.col_start) else {
+    let Some((row, col)) = slice.centre_sample_for_source(selected_row, selected_col) else {
         return;
     };
     let (rows, cols) = slice.values.dim();

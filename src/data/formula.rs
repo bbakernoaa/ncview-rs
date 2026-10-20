@@ -223,6 +223,8 @@ struct SliceInputs<'a> {
     col_axis: Option<&'a str>,
     fixed_axes: &'a [(String, usize)],
     cancelled: Arc<AtomicBool>,
+    /// Plain (non-display) reads must reach the inputs' plain read methods.
+    plain: bool,
 }
 
 impl FormulaInputs for SliceInputs<'_> {
@@ -264,13 +266,17 @@ impl FormulaInputs for SliceInputs<'_> {
             }
             _ => Vec::new(),
         };
+        let request = SliceRequest {
+            variable: reference.name.clone(),
+            time,
+            depth,
+            bounds: self.bounds,
+        };
+        if self.plain {
+            return source.read_slice_on_axes(&request, self.row_axis, self.col_axis, &fixed_axes);
+        }
         source.read_slice_on_axes_cancellable(
-            &SliceRequest {
-                variable: reference.name.clone(),
-                time,
-                depth,
-                bounds: self.bounds,
-            },
+            &request,
             self.row_axis,
             self.col_axis,
             &fixed_axes,
@@ -288,18 +294,52 @@ impl FormulaInputs for SliceInputs<'_> {
     }
 }
 
+impl FormulaSource {
+    fn read_with(
+        &self,
+        request: &SliceRequest,
+        row_axis: Option<&str>,
+        col_axis: Option<&str>,
+        fixed_axes: &[(String, usize)],
+        cancelled: Arc<AtomicBool>,
+        plain: bool,
+    ) -> Result<Slice2D> {
+        let Some(formula) = self.formula(&request.variable) else {
+            return if plain {
+                self.base
+                    .read_slice_on_axes(request, row_axis, col_axis, fixed_axes)
+            } else {
+                self.base.read_slice_on_axes_cancellable(
+                    request, row_axis, col_axis, fixed_axes, cancelled,
+                )
+            };
+        };
+        let inputs = SliceInputs {
+            owner: self,
+            bounds: request.bounds,
+            row_axis,
+            col_axis,
+            fixed_axes,
+            cancelled,
+            plain,
+        };
+        formula::evaluate(&formula.expr, &inputs, request.time, request.depth)
+    }
+}
+
 impl DataSource for FormulaSource {
     fn metadata(&self) -> &DatasetMetadata {
         &self.metadata
     }
 
     fn read_slice(&self, request: &SliceRequest) -> Result<Slice2D> {
-        self.read_slice_on_axes_cancellable(
+        self.read_with(
             request,
             None,
             None,
             &[],
             Arc::new(AtomicBool::new(false)),
+            true,
         )
     }
 
@@ -322,12 +362,13 @@ impl DataSource for FormulaSource {
         col_axis: Option<&str>,
         fixed_axes: &[(String, usize)],
     ) -> Result<Slice2D> {
-        self.read_slice_on_axes_cancellable(
+        self.read_with(
             request,
             row_axis,
             col_axis,
             fixed_axes,
             Arc::new(AtomicBool::new(false)),
+            true,
         )
     }
 
@@ -339,20 +380,7 @@ impl DataSource for FormulaSource {
         fixed_axes: &[(String, usize)],
         cancelled: Arc<AtomicBool>,
     ) -> Result<Slice2D> {
-        let Some(formula) = self.formula(&request.variable) else {
-            return self.base.read_slice_on_axes_cancellable(
-                request, row_axis, col_axis, fixed_axes, cancelled,
-            );
-        };
-        let inputs = SliceInputs {
-            owner: self,
-            bounds: request.bounds,
-            row_axis,
-            col_axis,
-            fixed_axes,
-            cancelled,
-        };
-        formula::evaluate(&formula.expr, &inputs, request.time, request.depth)
+        self.read_with(request, row_axis, col_axis, fixed_axes, cancelled, false)
     }
 
     fn time_label(&self, index: usize) -> Option<String> {
