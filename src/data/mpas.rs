@@ -154,7 +154,8 @@ fn zoom_refine_enabled() -> bool {
 
 /// Centre of `row` in a regular latitude grid with `step_deg` cells.
 fn cell_latitude(row: usize, step_deg: f64) -> f64 {
-    -90.0 + (row as f64 + 0.5) * step_deg
+    // A spacing that does not divide 180 leaves the polar cell partly past the pole.
+    (-90.0 + (row as f64 + 0.5) * step_deg).min(90.0)
 }
 
 /// Centre of `col` in a regular longitude grid with `step_deg` cells.
@@ -951,15 +952,27 @@ mod tests {
     }
 
     fn refine_source(refine: bool) -> Box<dyn DataSource> {
+        refine_source_at(1.0, refine)
+    }
+
+    fn refine_source_at(spacing_deg: f64, refine: bool) -> Box<dyn DataSource> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpas-small.nc");
         let inner = NetCdf3Source::open(&path).expect("open MPAS fixture");
-        MpasSource::from_source(&path, Box::new(inner), None, 1.0, refine)
+        MpasSource::from_source(&path, Box::new(inner), None, spacing_deg, refine)
             .expect("wrap MPAS fixture")
     }
 
     fn display_read(source: &dyn DataSource, bounds: crate::data::slice::Bounds) -> Slice2D {
+        display_read_of(source, "temperature", bounds)
+    }
+
+    fn display_read_of(
+        source: &dyn DataSource,
+        variable: &str,
+        bounds: crate::data::slice::Bounds,
+    ) -> Slice2D {
         let request = SliceRequest {
-            variable: "temperature".into(),
+            variable: variable.into(),
             time: 0,
             depth: 0,
             bounds,
@@ -1034,5 +1047,70 @@ mod tests {
                 .iter()
                 .all(|value| !value.is_finite() || *value == 0.0)
         );
+    }
+
+    #[test]
+    fn sample_latitudes_never_pass_the_poles() {
+        assert_eq!(cell_latitude(0, 0.25), -89.875);
+        assert_eq!(cell_latitude(545, 7.0 / 21.0), 90.0);
+    }
+
+    #[test]
+    fn refined_polar_cell_stays_on_the_sphere_when_spacing_does_not_divide_180() {
+        // 7 degrees gives 26 rows spanning 182 degrees, so the last row overhangs the pole.
+        let source = refine_source_at(7.0, true);
+        let bounds = crate::data::slice::Bounds::new(25, 26, 10, 13).unwrap();
+        let slice = display_read(source.as_ref(), bounds);
+
+        assert_eq!(slice.subdivision(), 21);
+        let coordinates = slice.coordinates.as_ref().expect("axes");
+        let latitudes = coordinates.latitude_axis.as_ref().expect("latitude axis");
+        assert!(latitudes.iter().all(|latitude| *latitude <= 90.0));
+        assert!(latitudes.is_sorted());
+
+        // Samples clamped to the pole all resolve to the same mesh cell, whatever the longitude.
+        let (rows, cols) = slice.values.dim();
+        let top = (0..cols)
+            .map(|col| slice.values[(rows - 1, col)].to_bits())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(top.len(), 1);
+    }
+
+    #[test]
+    fn diff_and_formula_wrappers_keep_plain_reads_coarse() {
+        use crate::data::{
+            diff::DiffSource,
+            formula::{FormulaDefinition, FormulaSource},
+        };
+        let bounds = crate::data::slice::Bounds::new(60, 120, 120, 240).unwrap();
+        let request = |variable: &str| SliceRequest {
+            variable: variable.into(),
+            time: 0,
+            depth: 0,
+            bounds,
+        };
+
+        let diff = DiffSource::new(
+            Arc::from(refine_source(true)),
+            Arc::from(refine_source(true)),
+        );
+        let plain = diff.read_slice(&request("temperature")).unwrap();
+        assert_eq!(plain.values.dim(), (60, 120));
+        let on_axes = diff.read_slice_on_axes(&request("temperature"), None, None, &[]);
+        assert_eq!(on_axes.unwrap().values.dim(), (60, 120));
+        assert_eq!(display_read(&diff, bounds).values.dim(), (180, 360));
+
+        let base: Arc<dyn DataSource> = Arc::from(refine_source(true));
+        let definition = FormulaDefinition::parse("double = temperature * 2").unwrap();
+        let formula =
+            FormulaSource::new(Arc::clone(&base), vec![Arc::clone(&base)], &[definition]).unwrap();
+        for variable in ["temperature", "double"] {
+            let plain = formula.read_slice(&request(variable)).unwrap();
+            assert_eq!(plain.values.dim(), (60, 120), "{variable}");
+            let on_axes = formula.read_slice_on_axes(&request(variable), None, None, &[]);
+            assert_eq!(on_axes.unwrap().values.dim(), (60, 120), "{variable}");
+            let shown = display_read_of(&formula, variable, bounds);
+            assert_eq!(shown.values.dim(), (180, 360), "{variable}");
+        }
     }
 }

@@ -60,6 +60,49 @@ impl DiffSource {
     }
 }
 
+fn diff_slices(request: &SliceRequest, slice1: Slice2D, slice2: Slice2D) -> Result<Slice2D> {
+    if slice1.values.dim() != slice2.values.dim() {
+        return Err(NcvError::InvalidSlice(
+            "slice dimensions differ between sources in diff mode".into(),
+        ));
+    }
+
+    let (rows, cols) = slice1.values.dim();
+    let mut diff_values = Array2::zeros((rows, cols));
+    let mut diff_validity = Array2::from_elem((rows, cols), Validity::Missing);
+
+    for row in 0..rows {
+        for col in 0..cols {
+            let v1 = slice1.values[(row, col)];
+            let v2 = slice2.values[(row, col)];
+            let m1 = slice1.validity[(row, col)];
+            let m2 = slice2.validity[(row, col)];
+
+            if m1 == Validity::Finite && m2 == Validity::Finite && v1.is_finite() && v2.is_finite()
+            {
+                diff_values[(row, col)] = v1 - v2;
+                diff_validity[(row, col)] = Validity::Finite;
+            } else {
+                diff_validity[(row, col)] = Validity::Missing;
+            }
+        }
+    }
+
+    let mut diff_slice = Slice2D::new_subdivided(
+        diff_values,
+        diff_validity,
+        request.bounds,
+        slice1.subdivision(),
+    )?;
+    diff_slice.is_diff = true;
+    let coords = slice1.coordinates.or(slice2.coordinates);
+    Ok(if let Some(c) = coords {
+        diff_slice.with_shared_coordinates(c)
+    } else {
+        diff_slice
+    })
+}
+
 fn dimensions_lengths_match(
     meta1: &DatasetMetadata,
     meta2: &DatasetMetadata,
@@ -89,13 +132,9 @@ impl DataSource for DiffSource {
     }
 
     fn read_slice(&self, request: &SliceRequest) -> Result<Slice2D> {
-        self.read_slice_on_axes_cancellable(
-            request,
-            None,
-            None,
-            &[],
-            Arc::new(AtomicBool::new(false)),
-        )
+        let slice1 = self.source1.read_slice(request)?;
+        let slice2 = self.source2.read_slice(request)?;
+        diff_slices(request, slice1, slice2)
     }
 
     fn read_slice_on_axes(
@@ -105,13 +144,13 @@ impl DataSource for DiffSource {
         col_axis: Option<&str>,
         fixed_axes: &[(String, usize)],
     ) -> Result<Slice2D> {
-        self.read_slice_on_axes_cancellable(
-            request,
-            row_axis,
-            col_axis,
-            fixed_axes,
-            Arc::new(AtomicBool::new(false)),
-        )
+        let slice1 = self
+            .source1
+            .read_slice_on_axes(request, row_axis, col_axis, fixed_axes)?;
+        let slice2 = self
+            .source2
+            .read_slice_on_axes(request, row_axis, col_axis, fixed_axes)?;
+        diff_slices(request, slice1, slice2)
     }
 
     fn read_slice_on_axes_cancellable(
@@ -132,50 +171,7 @@ impl DataSource for DiffSource {
         let slice2 = self
             .source2
             .read_slice_on_axes_cancellable(request, row_axis, col_axis, fixed_axes, cancelled)?;
-
-        if slice1.values.dim() != slice2.values.dim() {
-            return Err(NcvError::InvalidSlice(
-                "slice dimensions differ between sources in diff mode".into(),
-            ));
-        }
-
-        let (rows, cols) = slice1.values.dim();
-        let mut diff_values = Array2::zeros((rows, cols));
-        let mut diff_validity = Array2::from_elem((rows, cols), Validity::Missing);
-
-        for row in 0..rows {
-            for col in 0..cols {
-                let v1 = slice1.values[(row, col)];
-                let v2 = slice2.values[(row, col)];
-                let m1 = slice1.validity[(row, col)];
-                let m2 = slice2.validity[(row, col)];
-
-                if m1 == Validity::Finite
-                    && m2 == Validity::Finite
-                    && v1.is_finite()
-                    && v2.is_finite()
-                {
-                    diff_values[(row, col)] = v1 - v2;
-                    diff_validity[(row, col)] = Validity::Finite;
-                } else {
-                    diff_validity[(row, col)] = Validity::Missing;
-                }
-            }
-        }
-
-        let mut diff_slice = Slice2D::new_subdivided(
-            diff_values,
-            diff_validity,
-            request.bounds,
-            slice1.subdivision(),
-        )?;
-        diff_slice.is_diff = true;
-        let coords = slice1.coordinates.or(slice2.coordinates);
-        Ok(if let Some(c) = coords {
-            diff_slice.with_shared_coordinates(c)
-        } else {
-            diff_slice
-        })
+        diff_slices(request, slice1, slice2)
     }
 
     fn time_label(&self, index: usize) -> Option<String> {
