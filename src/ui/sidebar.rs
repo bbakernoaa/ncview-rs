@@ -157,7 +157,7 @@ pub struct SidebarBoxes {
 pub fn sidebar_boxes(area: Rect, show_level: bool) -> SidebarBoxes {
     use ratatui::layout::{Constraint, Direction, Layout};
     let file = Constraint::Length(5);
-    let controls = Constraint::Length(6);
+    let controls = Constraint::Length(7);
     let variables = Constraint::Length(13);
     let dimensions = Constraint::Length(7);
     let level = if show_level {
@@ -468,6 +468,7 @@ fn render_controls_box(frame: &mut Frame, area: Rect) {
             Span::raw(" "),
             button("[z]SCALE"),
         ]),
+        Line::from(vec![button("[p] PLOT"), Span::raw(" click map")]),
     ];
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
