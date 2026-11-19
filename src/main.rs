@@ -2120,7 +2120,7 @@ fn translate_sidebar_position(
             _ => None,
         };
     }
-    // Controls box: four action rows, each split into thirds.
+    // Controls box: four action rows split into thirds, then the plot action.
     if y >= boxes.controls.y && y < boxes.controls.bottom() {
         return match y.saturating_sub(boxes.controls.y) {
             1 => Some(match column {
@@ -2143,6 +2143,7 @@ fn translate_sidebar_position(
                 1 => Command::IncreasePlaybackSpeed,
                 _ => Command::ToggleColorScaleScope,
             }),
+            5 if column == 0 => Some(Command::OpenPlot),
             _ => None,
         };
     }
