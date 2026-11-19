@@ -26,6 +26,25 @@ coordinate variables (which use zero-based cell indices), and the committed curv
 generated arrays use ascending latitude/longitude axes; unit tests also cover descending coordinate
 vectors and invalid ranges directly.
 
+## FMS/UFS Multi-Level Fixture
+
+`fms-vlen-dimlist.nc4` reproduces the operational UFS/FV3 history layout (e.g. `atmf024.nc`):
+FMS `cartesian_axis` coordinates (`grid_xt`, `grid_yt`, `pfull`, `phalf`, `time`), a
+`tmp(time, pfull, grid_yt, grid_xt)` field with values `level * 100 + row * 4 + col`, and a
+`DIMENSION_LIST` written in the vlen-of-object-references encoding the low-level reader cannot
+decode. Variables therefore report phony raw dimension names while `_Netcdf4Coordinates` and
+`_Netcdf4Dimid` remain valid; axis roles must be recovered from the coordinate variables.
+`phalf` carries only `cartesian_axis` (no `units`/`positive`) to pin the FMS convention path.
+The regression tests live in `tests/fms_multilevel.rs`. Regenerate with a netCDF4-python env:
+
+```sh
+python tools/generate_fms_vlen_fixture.py
+```
+
+The generator creates `time` last: with this netcdf-c layout the reader currently drops one
+mid-file dataset from group enumeration, and keeping the small coordinate last preserves a
+faithful reproduction (all variables enumerated, canonical ids resolvable, phony raw names).
+
 ## Raw-Dimension Display Fixture
 
 Feature 007 builds deterministic synthetic NetCDF-4 fixtures in temporary directories rather than
@@ -57,3 +76,4 @@ Generated fixture hashes (SHA-256):
 - `corrupt.nc`: `8141db4372deed39e7986ae7cbe7faef02e34c55f73b886a01750abb5dd3442c`
 - `coards-float32.nc4`: `40f0517505fd85e4e30300ee9dae9b59c71086f2ea4db1c7552c6ca87313f197`
 - `mpas-small.nc`: `32ed2fc02d393a146a939d43e1ba167d7f486e12981a7e7b0fc6307dbfb88ac6`
+- `fms-vlen-dimlist.nc4`: `759a8ca14bf7e429140aab682cf886df8f88bb38656fd4e229cc757e2079396f`

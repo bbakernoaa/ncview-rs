@@ -291,40 +291,75 @@ fn draw_graticule(pixmap: &mut Pixmap, extent: Extent, colors: MapOverlayColors)
     }
 }
 
+/// Unwrap a ring's longitudes into a continuous sequence anchored near the
+/// extent center. Natural Earth rings use the [-180, 180] seam; a raw edge
+/// from +180 to -180 must stay a short edge, not a world-spanning chord.
+/// The unwrapped ring may extend past the extent window; callers draw the
+/// ±360° copies whose bounding boxes intersect the window so both sides of
+/// a seam are filled.
+fn unwrapped_ring(polygon: &[(f64, f64)], extent: Extent) -> Vec<(f64, f64)> {
+    let center = 0.5 * (extent.min_lon + extent.max_lon);
+    let mut ring = Vec::with_capacity(polygon.len() + 2);
+    let mut anchor = center;
+    let mut min_lon = f64::INFINITY;
+    let mut max_lon = f64::NEG_INFINITY;
+    let mut lat_sum = 0.0;
+    for &(lon, lat) in polygon {
+        let lon = lon - 360.0 * ((lon - anchor) / 360.0).round();
+        ring.push((lon, lat));
+        anchor = lon;
+        min_lon = min_lon.min(lon);
+        max_lon = max_lon.max(lon);
+        lat_sum += lat;
+    }
+    // Globe-spanning rings (Antarctica in the Natural Earth topology) close
+    // with a seam jump instead of an explicit polar edge; spherical winders
+    // like d3 fill the polar cap, but a planar fill would only paint the
+    // coastal band. Route the closure via the pole so the cap is filled.
+    if max_lon - min_lon >= 359.9
+        && let Some(&first) = ring.first()
+        && let Some(&last) = ring.last()
+    {
+        let pole = if lat_sum < 0.0 { -90.0 } else { 90.0 };
+        ring.push((last.0, pole));
+        ring.push((first.0, pole));
+    }
+    ring
+}
+
+/// Longitude offsets whose shifted copy of an unwrapped ring can intersect
+/// the extent window.
+fn visible_shifts(ring: &[(f64, f64)], extent: Extent) -> Vec<f64> {
+    let mut min_lon = f64::INFINITY;
+    let mut max_lon = f64::NEG_INFINITY;
+    for &(lon, _) in ring {
+        min_lon = min_lon.min(lon);
+        max_lon = max_lon.max(lon);
+    }
+    [-360.0, 0.0, 360.0]
+        .into_iter()
+        .filter(|shift| min_lon + shift <= extent.max_lon && max_lon + shift >= extent.min_lon)
+        .collect()
+}
+
 fn polygon_intersects_extent(polygon: &[(f64, f64)], extent: Extent) -> bool {
     if polygon.len() < 3 {
         return false;
     }
     let mut p_min_lat = f64::INFINITY;
     let mut p_max_lat = f64::NEG_INFINITY;
-    let mut p_min_lon = f64::INFINITY;
-    let mut p_max_lon = f64::NEG_INFINITY;
-
-    for &(raw_lon, lat) in polygon {
+    for &(_, lat) in polygon {
         p_min_lat = p_min_lat.min(lat);
         p_max_lat = p_max_lat.max(lat);
-        let lon = display_longitude(raw_lon, extent.zero_to_360);
-        p_min_lon = p_min_lon.min(lon);
-        p_max_lon = p_max_lon.max(lon);
     }
-
     if p_max_lat < extent.min_lat || p_min_lat > extent.max_lat {
         return false;
     }
-
     if (extent.max_lon - extent.min_lon) >= 350.0 {
         return true;
     }
-
-    if (p_max_lon - p_min_lon) > 180.0 {
-        return true;
-    }
-
-    if p_max_lon < extent.min_lon || p_min_lon > extent.max_lon {
-        return false;
-    }
-
-    true
+    let ring = unwrapped_ring(polygon, extent);
+    !visible_shifts(&ring, extent).is_empty()
 }
 
 fn draw_polygon(
@@ -338,36 +373,11 @@ fn draw_polygon(
     }
     let width = pixmap.width() as f32;
     let height = pixmap.height() as f32;
-    let mut path = PathBuilder::new();
-    let mut started = false;
-    let mut previous_raw_lon: Option<f64> = None;
-    for &(raw_lon, lat) in polygon {
-        let lon = display_longitude(raw_lon, extent.zero_to_360);
-        if let Some(previous) = previous_raw_lon
-            && (lon - previous).abs() > 180.0
-        {
-            if started {
-                path.close();
-            }
-            let (x, y) = project(lon, lat, extent, width, height);
-            path.move_to(x, y);
-            started = true;
-            previous_raw_lon = Some(lon);
-            continue;
-        }
-        let (x, y) = project(lon, lat, extent, width, height);
-        if !started {
-            path.move_to(x, y);
-            started = true;
-        } else {
-            path.line_to(x, y);
-        }
-        previous_raw_lon = Some(lon);
-    }
-    if started {
-        path.close();
-    }
-    let Some(path) = path.finish() else { return };
+    // Unwrap the ring continuously, then draw every ±360° copy that reaches
+    // the extent window. Splitting on displayed-longitude jumps instead
+    // would close subpaths with straight chords and smear land across the
+    // antimeridian (image center in 0–360 mode).
+    let ring = unwrapped_ring(polygon, extent);
     let mut paint = Paint::default();
     paint.set_color(Color::from_rgba8(
         colors.land[0],
@@ -375,13 +385,6 @@ fn draw_polygon(
         colors.land[2],
         255,
     ));
-    pixmap.fill_path(
-        &path,
-        &paint,
-        FillRule::EvenOdd,
-        Transform::identity(),
-        None,
-    );
     let mut coast = Paint::default();
     coast.set_color(Color::from_rgba8(
         colors.coast[0],
@@ -393,32 +396,32 @@ fn draw_polygon(
         width: 0.8,
         ..Stroke::default()
     };
-    pixmap.stroke_path(&path, &coast, &stroke, Transform::identity(), None);
-}
-
-fn normalize_longitude(longitude: f64) -> f64 {
-    let mut longitude = longitude;
-    while longitude < -180.0 {
-        longitude += 360.0;
-    }
-    while longitude > 180.0 {
-        longitude -= 360.0;
-    }
-    longitude
-}
-
-fn display_longitude(longitude: f64, zero_to_360: bool) -> f64 {
-    let longitude = normalize_longitude(longitude);
-    if zero_to_360 && longitude < 0.0 {
-        longitude + 360.0
-    } else {
-        longitude
+    for shift in visible_shifts(&ring, extent) {
+        let mut path = PathBuilder::new();
+        for (index, &(lon, lat)) in ring.iter().enumerate() {
+            let (x, y) = project(lon + shift, lat, extent, width, height);
+            if index == 0 {
+                path.move_to(x, y);
+            } else {
+                path.line_to(x, y);
+            }
+        }
+        path.close();
+        let Some(path) = path.finish() else { continue };
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::EvenOdd,
+            Transform::identity(),
+            None,
+        );
+        pixmap.stroke_path(&path, &coast, &stroke, Transform::identity(), None);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Extent, display_longitude, extent, render};
+    use super::{Extent, extent, render};
     use crate::data::slice::CoordinateGrid;
     use crate::render::colors::Palette;
     use crate::render::landmask::Detail;
@@ -457,6 +460,116 @@ mod tests {
         assert_ne!(image.get_pixel(200, 90).0, [15, 22, 36]); // 20°E, 0°N
     }
 
+    fn global_zero_to_360_grid() -> CoordinateGrid {
+        CoordinateGrid {
+            latitude: None,
+            longitude: None,
+            latitude_axis: Some((-89..=89).map(f64::from).collect()),
+            longitude_axis: Some((0..360).map(f64::from).collect()),
+        }
+    }
+
+    #[test]
+    fn zero_to_360_backdrop_keeps_antarctica_across_the_antimeridian() {
+        // A 0–360 global grid puts the antimeridian at the image center.
+        // Antarctica spans every longitude, so land must be continuous there.
+        let image = render(360, 180, Some(&global_zero_to_360_grid()), Detail::Global);
+        let ocean = [15, 22, 36];
+        // Latitude ~-81.6 (row 172): land away from the Ross Sea sector.
+        for x in [40, 100, 260, 330] {
+            assert_ne!(
+                image.get_pixel(x, 172).0,
+                ocean,
+                "Antarctica missing at x={x} (lon {x}°)"
+            );
+        }
+        // The Ross Sea stays ocean north of the ice-shelf front.
+        assert_eq!(image.get_pixel(175, 172).0, ocean);
+        // Latitude ~-86.5 (row 177): the polar cap must be filled on both
+        // sides of the antimeridian (image center), not cut off by the
+        // ring's seam-closing chord.
+        for x in [178, 180, 182] {
+            assert_ne!(
+                image.get_pixel(x, 177).0,
+                ocean,
+                "polar cap missing at x={x} (lon {x}°)"
+            );
+        }
+        // The equatorial Pacific at the antimeridian stays ocean: no chord
+        // smears from seam-split rings may reach it. Sample beside the 180°
+        // graticule line, which legitimately tints the exact center column.
+        assert_eq!(image.get_pixel(181, 84).0, ocean);
+        assert_ne!(image.get_pixel(180, 84).0, [232, 238, 244]);
+    }
+
+    #[test]
+    fn seam_crossing_ring_fills_on_both_edges_of_a_zero_to_360_backdrop() {
+        // A ring crossing the prime meridian (raw -10..10) must fill along
+        // both the 360° and 0° image edges in 0–360 mode, not collapse into
+        // chord-closed degenerate subpaths.
+        let extent = Extent {
+            min_lon: 0.0,
+            max_lon: 360.0,
+            min_lat: -90.0,
+            max_lat: 90.0,
+            zero_to_360: true,
+        };
+        let colors = Palette::Viridis.map_overlay_colors();
+        let mut pixmap = tiny_skia::Pixmap::new(360, 180).unwrap();
+        pixmap.fill(tiny_skia::Color::from_rgba8(15, 22, 36, 255));
+        let ring = [
+            (-10.0, -10.0),
+            (10.0, -10.0),
+            (10.0, 10.0),
+            (-10.0, 10.0),
+            (-10.0, -10.0),
+        ];
+        super::draw_polygon(&mut pixmap, &ring, extent, colors);
+        let pixel = |x: u32, y: u32| {
+            let index = (y as usize * 360 + x as usize) * 4;
+            let data = pixmap.data();
+            [data[index], data[index + 1], data[index + 2]]
+        };
+        let ocean = [15, 22, 36];
+        assert_ne!(pixel(355, 90), ocean, "land missing near the 360° edge");
+        assert_ne!(pixel(5, 90), ocean, "land missing near the 0° edge");
+        assert_eq!(pixel(180, 90), ocean, "chord smear at the antimeridian");
+    }
+
+    #[test]
+    fn antimeridian_crossing_ring_fills_across_the_center_of_a_zero_to_360_backdrop() {
+        // A ring crossing 180° (raw 179..-179) must fill continuously across
+        // the image center in 0–360 mode.
+        let extent = Extent {
+            min_lon: 0.0,
+            max_lon: 360.0,
+            min_lat: -90.0,
+            max_lat: 90.0,
+            zero_to_360: true,
+        };
+        let colors = Palette::Viridis.map_overlay_colors();
+        let mut pixmap = tiny_skia::Pixmap::new(360, 180).unwrap();
+        pixmap.fill(tiny_skia::Color::from_rgba8(15, 22, 36, 255));
+        let ring = [
+            (179.0, -1.0),
+            (-179.0, -1.0),
+            (-179.0, 1.0),
+            (179.0, 1.0),
+            (179.0, -1.0),
+        ];
+        super::draw_polygon(&mut pixmap, &ring, extent, colors);
+        let pixel = |x: u32, y: u32| {
+            let index = (y as usize * 360 + x as usize) * 4;
+            let data = pixmap.data();
+            [data[index], data[index + 1], data[index + 2]]
+        };
+        let ocean = [15, 22, 36];
+        for x in [179, 180, 181] {
+            assert_ne!(pixel(x, 90), ocean, "land missing at x={x}");
+        }
+        assert_eq!(pixel(90, 90), ocean);
+    }
+
     #[test]
     fn zero_to_360_extent_keeps_backdrop_aligned_with_source_columns() {
         let coordinates = CoordinateGrid {
@@ -479,8 +592,6 @@ mod tests {
         assert_eq!(actual.min_lon, expected.min_lon);
         assert_eq!(actual.max_lon, expected.max_lon);
         assert!(actual.zero_to_360);
-        assert_eq!(display_longitude(-90.0, true), 270.0);
-        assert_eq!(display_longitude(90.0, true), 90.0);
         assert_eq!(Palette::Viridis.map_overlay_colors().land, [232, 238, 244]);
     }
 }
