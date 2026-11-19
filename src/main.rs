@@ -4447,6 +4447,21 @@ mod sidebar_hit_tests {
     }
 
     #[test]
+    fn click_point_plot_control_opens_plot_chooser() {
+        let state = state_with_levels();
+        let boxes = ncview_rs::ui::sidebar::sidebar_boxes(SIDEBAR, true);
+        assert_eq!(
+            translate_sidebar_position(
+                boxes.controls.x + 2,
+                boxes.controls.y + 5,
+                SIDEBAR,
+                &state.view,
+            ),
+            Some(Command::OpenPlot)
+        );
+    }
+
+    #[test]
     fn click_in_the_variables_box_opens_the_browser() {
         let state = state_with_levels();
         let boxes = ncview_rs::ui::sidebar::sidebar_boxes(SIDEBAR, true);
