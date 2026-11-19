@@ -10,6 +10,7 @@ tags: [formats, netcdf, grib2, kerchunk, hdf5, compatibility, platforms]
 
 | Input | Forms | Notes |
 | --- | --- | --- |
+| NetCDF-3 | Local files with CDF magic | Gridded slices use the final two dimensions as spatial axes; named time and depth dimensions are supported. MPAS meshes use a separate reader. |
 | NetCDF-4 (HDF5) | `.nc`, `.nc4`, `.hdf5`-magic NetCDF-4 | Local and remote; subgroups appear as qualified names (`physics/temperature`) |
 | GRIB2 | `.grib`, `.grib2`, `.grb`, `.grb2`, GRIB-magic detection | Local and remote; remote objects use `.idx` sidecars or bounded range reads |
 | Kerchunk / VirtualiZarr reference manifests | `.json` | Virtual datasets describing byte ranges; never copies or modifies source data |
@@ -19,7 +20,6 @@ tags: [formats, netcdf, grib2, kerchunk, hdf5, compatibility, platforms]
 
 | Input | Behavior |
 | --- | --- |
-| NetCDF-3 | Rejected **before terminal entry** with an actionable diagnostic |
 | Arbitrary HDF5 (non-NetCDF-4) | Rejected with an actionable diagnostic |
 | Large unindexed remote GRIB2 | Refused rather than silently downloaded in full |
 
@@ -51,8 +51,9 @@ NetCDF/HDF5 runtime dependency.
 ## Data safety
 
 All datasets are opened **read-only**. Source files are never modified.
-Missing, fill, NaN, and infinity values are preserved and masked honestly —
-see [Data fidelity](../explanation/data-fidelity.md).
+For gridded NetCDF-3 and supported NetCDF-4 inputs, fill, missing, valid-range,
+scale and offset attributes are applied when reading slices. See
+[Data fidelity](../explanation/data-fidelity.md).
 
 ## Related
 
