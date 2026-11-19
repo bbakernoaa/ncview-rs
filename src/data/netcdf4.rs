@@ -125,8 +125,15 @@ impl NetCdf4Source {
                 continue;
             }
             let length = usize::try_from(variable.shape[0]).unwrap_or(usize::MAX);
-            if let Some(raw_name) = variable.dim_names().first()
-                && let Some(dimension) = dimensions.iter_mut().find(|d| d.name == *raw_name)
+            // With a vlen-of-references DIMENSION_LIST the raw name is phony
+            // even though this variable is the dimension scale of its
+            // namesake dimension (FMS/UFS history files). Fall back to the
+            // scale's own canonical name so its axis role still propagates.
+            let scale_name = match variable.dim_names().first().copied() {
+                Some(raw_name) if !raw_name.starts_with("phony_dim_") => raw_name,
+                _ => variable.name.as_str(),
+            };
+            if let Some(dimension) = dimensions.iter_mut().find(|d| d.name == scale_name)
                 && dimension.role == AxisRole::Other
             {
                 dimension.role = role;
@@ -850,7 +857,9 @@ impl NetCdf4Source {
 
     fn vertical_label(&self, variable_name: &str, index: usize) -> Option<String> {
         let variable = self.root.variable(variable_name)?;
-        let dimension_names = variable.dim_names();
+        // Raw DIMENSION_LIST names may be phony (vlen-of-references encoding);
+        // match coordinates against the canonical dimension names instead.
+        let dimension_names = self.canonical_dimension_names_for(variable);
         let declared = self.root.coordinates_of(variable_name).unwrap_or_default();
         let coordinate = declared
             .iter()
@@ -884,7 +893,7 @@ impl NetCdf4Source {
         let dimension_name = dimension_names
             .iter()
             .find(|name| coordinate.name.eq_ignore_ascii_case(name))
-            .copied()
+            .map(String::as_str)
             .unwrap_or(coordinate.name.as_str());
         let description = attribute_text(coordinate, "long_name")
             .or_else(|| attribute_text(coordinate, "standard_name"))
@@ -954,14 +963,7 @@ impl NetCdf4Source {
                 longitude: None,
             };
         };
-        let aliases = coordinate_dimension_aliases(&self.root);
-        let names = canonical_dimension_names_with_ids(
-            variable,
-            &self.metadata.dimensions,
-            &aliases,
-            &self.dimension_names_by_id,
-            read_integer_attribute(&self.file, variable, "_Netcdf4Coordinates"),
-        );
+        let names = self.canonical_dimension_names_for(variable);
         let (row_axis, col_axis) = spatial_axes(
             variable,
             &self.root,
@@ -998,6 +1000,19 @@ impl NetCdf4Source {
 }
 
 impl NetCdf4Source {
+    /// Canonical dimension names for a root-group variable, recovering
+    /// declared names from `_Netcdf4Coordinates` ids when DIMENSION_LIST
+    /// cannot be decoded (phony raw names).
+    fn canonical_dimension_names_for(&self, variable: &oxinetcdf::NcVariable) -> Vec<String> {
+        canonical_dimension_names_with_ids(
+            variable,
+            &self.metadata.dimensions,
+            &coordinate_dimension_aliases(&self.root),
+            &self.dimension_names_by_id,
+            read_integer_attribute(&self.file, variable, "_Netcdf4Coordinates"),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn find_coordinate_value(
         &self,
@@ -1510,8 +1525,11 @@ fn packed_attributes(variable: &oxinetcdf::NcVariable) -> PackedAttributes {
 /// latitude `y`, or use generated/phony dimension names. Units are especially
 /// useful for coordinate variables (`degrees_east`, `degrees_west`, etc.).
 fn axis_role(variable: &oxinetcdf::NcVariable) -> AxisRole {
+    // FMS/UFS files declare the axis with `cartesian_axis` instead of the
+    // CF/COARDS `axis` attribute.
     if let Some(axis) = variable
         .attr("axis")
+        .or_else(|| variable.attr("cartesian_axis"))
         .and_then(|attribute| attribute.as_text().ok())
         .and_then(|text| text.trim().chars().next())
     {
@@ -1579,7 +1597,7 @@ fn attribute_text(variable: &oxinetcdf::NcVariable, name: &str) -> Option<String
 }
 
 fn has_coordinate_metadata(variable: &oxinetcdf::NcVariable) -> bool {
-    ["axis", "standard_name", "units"]
+    ["axis", "cartesian_axis", "standard_name", "units"]
         .iter()
         .any(|name| variable.attr(name).is_some())
 }
