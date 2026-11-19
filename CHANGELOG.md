@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Versions follow
 Conventional Commit messages.
 
 
+## [0.5.24](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.23...v0.5.24) - 2026-11-19
+
+### Fixed
+
+- recover FMS/UFS axis roles from phony-dimension files and unwrap… ([#77](https://github.com/bbakernoaa/ncview-rs/pull/77))
+
 ## [0.5.23](https://github.com/bbakernoaa/ncview-rs/compare/v0.5.22...v0.5.23) - 2026-10-20
 
 ### Added
