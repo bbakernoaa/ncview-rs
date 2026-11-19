@@ -7,7 +7,7 @@ use std::{
 use ndarray::Array2;
 use netcdf_reader::{NcAttrValue, NcFile, NcSliceInfo, NcSliceInfoElem, NcType};
 
-use super::slice::{Slice2D, SliceRequest, Validity};
+use super::slice::{PackedAttributes, Slice2D, SliceRequest, classify_packed};
 use super::{
     AxisRole, DataSource, DatasetFormat, DatasetMetadata, Dimension, PointCoordinates, Variable,
 };
@@ -167,47 +167,105 @@ impl DataSource for NetCdf3Source {
                 variable: request.variable.clone(),
                 reason: "variable not found".into(),
             })?;
-        if variable.dimensions.len() != 2 {
+        if variable.dimensions.len() < 2 {
             return Err(NcvError::UnsupportedVariable {
                 variable: request.variable.clone(),
-                reason: "NetCDF-3 source currently supports 2-D variables; mesh variables use the MPAS flat-value path".into(),
+                reason: "a plottable variable needs at least two dimensions".into(),
             });
         }
-        let rows = self
-            .metadata
-            .dimensions
+        let reader = self.reader.lock().map_err(|_| NcvError::Adapter {
+            path: self.path.clone(),
+            reason: "NetCDF-3 reader lock was poisoned".into(),
+        })?;
+        let variables = reader.variables().map_err(|error| NcvError::Adapter {
+            path: self.path.clone(),
+            reason: error.to_string(),
+        })?;
+        let selected = variables
             .iter()
-            .find(|dimension| dimension.name == variable.dimensions[0])
-            .map(|dimension| dimension.length)
-            .unwrap_or(0);
-        let cols = self
-            .metadata
-            .dimensions
-            .iter()
-            .find(|dimension| dimension.name == variable.dimensions[1])
-            .map(|dimension| dimension.length)
-            .unwrap_or(0);
+            .find(|candidate| candidate.name == request.variable)
+            .ok_or_else(|| NcvError::UnsupportedVariable {
+                variable: request.variable.clone(),
+                reason: "variable not found".into(),
+            })?;
+        let rank = selected.dimensions.len();
+        let rows = selected.dimensions[rank - 2].size;
+        let cols = selected.dimensions[rank - 1].size;
         let bounds = request.bounds;
-        if bounds.row_end > rows || bounds.col_end > cols {
+        if bounds.row_end as u64 > rows || bounds.col_end as u64 > cols {
             return Err(NcvError::InvalidSlice(
                 "slice bounds exceed variable shape".into(),
             ));
         }
-        let source_values = self.read_variable_values(&request.variable)?;
-        if source_values.len() != rows.saturating_mul(cols) {
-            return Err(NcvError::Adapter {
-                path: self.path.clone(),
-                reason: format!(
-                    "variable returned {} values, expected {}",
-                    source_values.len(),
-                    rows * cols
-                ),
-            });
+        let mut selections = Vec::with_capacity(rank);
+        for (index, dimension) in selected.dimensions.iter().enumerate() {
+            let selection = if index == rank - 2 {
+                NcSliceInfoElem::Slice {
+                    start: bounds.row_start as u64,
+                    end: bounds.row_end as u64,
+                    step: 1,
+                }
+            } else if index == rank - 1 {
+                NcSliceInfoElem::Slice {
+                    start: bounds.col_start as u64,
+                    end: bounds.col_end as u64,
+                    step: 1,
+                }
+            } else {
+                let index_value = match role_for_name(&dimension.name) {
+                    AxisRole::Time => request.time,
+                    AxisRole::Depth => request.depth,
+                    _ if dimension.size == 1 => 0,
+                    _ => {
+                        return Err(NcvError::UnsupportedVariable {
+                            variable: request.variable.clone(),
+                            reason: format!("cannot select dimension {}", dimension.name),
+                        });
+                    }
+                };
+                if index_value as u64 >= dimension.size {
+                    return Err(NcvError::InvalidSlice(format!(
+                        "index exceeds dimension {}",
+                        dimension.name
+                    )));
+                }
+                NcSliceInfoElem::Index(index_value as u64)
+            };
+            selections.push(selection);
         }
-        let values = Array2::from_shape_fn(bounds.shape(), |(row, col)| {
-            source_values[(bounds.row_start + row) * cols + bounds.col_start + col]
-        });
-        let validity = Array2::from_shape_fn(bounds.shape(), |(_, _)| Validity::Finite);
+        let raw = read_selected_f64(
+            &reader,
+            &request.variable,
+            &selected.dtype,
+            &NcSliceInfo { selections },
+        )?;
+        let attr = |name: &str| {
+            selected
+                .attributes
+                .iter()
+                .find(|item| item.name == name)
+                .and_then(|item| item.value.as_f64())
+        };
+        let valid_range = selected
+            .attributes
+            .iter()
+            .find(|item| item.name == "valid_range")
+            .and_then(|item| item.value.as_f64_vec());
+        let packed = PackedAttributes {
+            fill: attr("_FillValue"),
+            missing: attr("missing_value"),
+            valid_min: attr("valid_min")
+                .or_else(|| valid_range.as_ref().and_then(|v| v.first().copied())),
+            valid_max: attr("valid_max")
+                .or_else(|| valid_range.as_ref().and_then(|v| v.get(1).copied())),
+            scale_factor: attr("scale_factor"),
+            add_offset: attr("add_offset"),
+        };
+        let (values, validity) = classify_packed(&raw, packed);
+        let values = Array2::from_shape_vec(bounds.shape(), values)
+            .map_err(|error| NcvError::InvalidSlice(error.to_string()))?;
+        let validity = Array2::from_shape_vec(bounds.shape(), validity)
+            .map_err(|error| NcvError::InvalidSlice(error.to_string()))?;
         Slice2D::new(values, validity, bounds)
     }
 
