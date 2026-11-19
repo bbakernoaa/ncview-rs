@@ -855,6 +855,13 @@ mod tests {
         render_sidebar_with(level, &empty_metadata(), None)
     }
 
+    #[test]
+    fn controls_explain_how_to_plot_a_selected_point() {
+        let rendered = render_sidebar(None);
+        assert!(rendered.contains("[p] PLOT"));
+        assert!(rendered.contains("click map"));
+    }
+
     /// Render the sidebar into a string with custom metadata and an optional
     /// loaded slice, so tests can assert on the Dimensions and Scale boxes.
     fn render_sidebar_with(
