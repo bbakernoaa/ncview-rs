@@ -18,6 +18,76 @@ fn assert_values(slice: &data::slice::Slice2D, expected: &[f64]) {
 }
 
 #[test]
+#[ignore = "requires public MPAS-A diagnostic sample"]
+fn mpas_atmosphere_diagnostics_match_netcdf_c() {
+    let path = std::env::var("MPAS_DIAG_SAMPLE").expect("MPAS_DIAG_SAMPLE is required");
+    let source = data::open(Path::new(&path)).expect("open the MPAS-A diagnostic file");
+    let metadata = source.metadata();
+    assert!(metadata.dimensions.iter().any(|dimension| {
+        dimension.name == "nIsoLevelsT"
+            && dimension.length == 5
+            && dimension.role == AxisRole::Depth
+    }));
+    assert_eq!(
+        source.time_label(0).as_deref(),
+        Some("2023-10-26T13:00:00Z")
+    );
+
+    // netCDF-C read the fields and cell coordinates. A brute-force spherical
+    // nearest-neighbor search selected the six cells in this quarter-degree window.
+    let bounds = Bounds::new(515, 517, 339, 342).unwrap();
+    for (variable, depth, expected) in [
+        (
+            "t2m",
+            0,
+            [
+                291.995_419_456_440_35,
+                291.889_895_102_234_4,
+                292.150_448_266_915_8,
+                292.031_013_430_886_7,
+                292.126_775_298_090_9,
+                292.489_749_760_049_6,
+            ],
+        ),
+        (
+            "t_isobaric",
+            0,
+            [
+                237.716_452_371_126_2,
+                238.634_002_616_694_12,
+                238.724_723_171_934_47,
+                237.648_575_061_598_65,
+                238.245_963_663_713_92,
+                238.397_651_282_714_83,
+            ],
+        ),
+        (
+            "t_isobaric",
+            2,
+            [
+                254.537_340_852_408_02,
+                254.526_130_510_491_07,
+                254.048_167_111_749_56,
+                254.510_905_209_516_58,
+                254.290_344_752_725_8,
+                253.918_667_552_310_86,
+            ],
+        ),
+    ] {
+        let slice = source
+            .read_slice(&SliceRequest {
+                variable: variable.into(),
+                time: 0,
+                depth,
+                bounds,
+            })
+            .unwrap_or_else(|error| panic!("read {variable} at depth {depth}: {error}"));
+        assert_eq!(slice.values.dim(), (2, 3));
+        assert_values(&slice, &expected);
+    }
+}
+
+#[test]
 #[ignore = "requires public ERA5 sample"]
 fn era5_member_time_and_pressure_match_netcdf_c() {
     let path = std::env::var("ERA5_SAMPLE").expect("ERA5_SAMPLE is required");

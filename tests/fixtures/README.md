@@ -80,6 +80,20 @@ The ERA5 check verifies the original dimension names and reads a packed temperat
 nonzero member, time, and pressure-level index. It covers HDF5 object headers that retain stale
 metadata inside padding records.
 
+The MPAS-A check uses Angela's [public diagnostic sample](https://doi.org/10.5281/zenodo.11401287)
+(CC BY 4.0), an 860 MB CDF-5 file. The publisher appended `latCell` and `lonCell` from the matching
+1,024,002-cell mesh. The check verifies `xtime` and compares 2 m temperature and two isobaric
+temperature slices with netCDF-C values selected by an independent spherical nearest-neighbor
+search. Run it on demand from the repository root:
+
+```sh
+sample=/tmp/diag.2023-10-26_13.00.00.nc
+curl -fL --retry 2 'https://zenodo.org/records/11401287/files/diag.2023-10-26_13.00.00.nc?download=1' -o "$sample"
+echo "b4efcf0a2ca12af4aa7ce34ee761706752400439cfb3c78f2fef7838e000d6d4  $sample" | sha256sum -c &&
+  MPAS_DIAG_SAMPLE="$sample" NCVIEW_UG_INTERMEDIATE_SPACING_DEG=0.25 \
+  cargo test --locked --test model_samples_live mpas_atmosphere_diagnostics -- --ignored
+```
+
 Generated fixture hashes (SHA-256):
 
 - `regular.nc4`: `9759f4bc44bc326c93dc0f8aeefda44f945a2673f207d7696f61c901d5fbcd48`
