@@ -9,11 +9,8 @@ use std::path::Path;
 
 fn assert_values(slice: &data::slice::Slice2D, expected: &[f64]) {
     assert_eq!(slice.values.len(), expected.len());
-    for ((value, validity), expected) in slice
-        .values
-        .iter()
-        .zip(slice.validity.iter())
-        .zip(expected)
+    for ((value, validity), expected) in
+        slice.values.iter().zip(slice.validity.iter()).zip(expected)
     {
         assert_eq!(*validity, Validity::Finite);
         assert!((value - expected).abs() < 1.0e-5, "{value} != {expected}");
@@ -25,6 +22,11 @@ fn assert_values(slice: &data::slice::Slice2D, expected: &[f64]) {
 fn era5_member_time_and_pressure_match_netcdf_c() {
     let path = std::env::var("ERA5_SAMPLE").expect("ERA5_SAMPLE is required");
     let source = data::open(Path::new(&path)).unwrap();
+    eprintln!("ERA5 dimensions: {:?}", source.metadata().dimensions);
+    eprintln!(
+        "ERA5 temperature: {:?}",
+        source.metadata().variables.iter().find(|v| v.name == "t")
+    );
     let slice = source
         .read_slice_on_axes(
             &SliceRequest {
@@ -103,10 +105,9 @@ fn wrf_mass_and_staggered_wind_slices_match_netcdf_c() {
 #[ignore = "requires NCEP NAM GRIB2 message and ecCodes reference"]
 fn ncep_nam_grib2_range_matches_eccodes() {
     let path = std::env::var("NAM_SAMPLE").expect("NAM_SAMPLE is required");
-    let expected = std::fs::read_to_string(
-        std::env::var("NAM_REFERENCE").expect("NAM_REFERENCE is required"),
-    )
-    .unwrap();
+    let expected =
+        std::fs::read_to_string(std::env::var("NAM_REFERENCE").expect("NAM_REFERENCE is required"))
+            .unwrap();
     let reference = expected
         .split_whitespace()
         .map(|value| value.parse::<f64>().unwrap())
@@ -128,11 +129,26 @@ fn ncep_nam_grib2_range_matches_eccodes() {
             variable: variable.name.clone(),
             time: 0,
             depth: 0,
-            bounds: Bounds::new(0, length(AxisRole::Latitude), 0, length(AxisRole::Longitude))
-                .unwrap(),
+            bounds: Bounds::new(
+                0,
+                length(AxisRole::Latitude),
+                0,
+                length(AxisRole::Longitude),
+            )
+            .unwrap(),
         })
         .unwrap();
     let stats = slice.statistics.unwrap();
-    assert!((stats.min - reference[0]).abs() < 1.0e-4);
-    assert!((stats.max - reference[1]).abs() < 1.0e-4);
+    assert!(
+        (stats.min - reference[0]).abs() < 1.0e-4,
+        "ncv min {} != ecCodes {}",
+        stats.min,
+        reference[0]
+    );
+    assert!(
+        (stats.max - reference[1]).abs() < 1.0e-4,
+        "ncv max {} != ecCodes {}",
+        stats.max,
+        reference[1]
+    );
 }
