@@ -1,0 +1,18 @@
+name: ERA5 compatibility validation
+on:
+  push:
+    branches: [codex/era5-validation]
+permissions:
+  contents: read
+jobs:
+  era5:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          shared-key: era5-validation
+      - name: Test real ERA5 data
+        run: |
+          curl -fsSL --max-time 60 https://raw.githubusercontent.com/ecmwf/cfgrib/48de3e8d09b3623749174467a5ed042018fc3e18/tests/sample-data/era5-levels-members.nc -o /tmp/era5.nc
+          ERA5_SAMPLE=/tmp/era5.nc cargo test --locked --test model_samples_live era5_member -- --ignored --nocapture

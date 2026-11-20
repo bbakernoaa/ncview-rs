@@ -22,6 +22,17 @@ fn assert_values(slice: &data::slice::Slice2D, expected: &[f64]) {
 fn era5_member_time_and_pressure_match_netcdf_c() {
     let path = std::env::var("ERA5_SAMPLE").expect("ERA5_SAMPLE is required");
     let source = data::open(Path::new(&path)).unwrap();
+    let file = oxinetcdf::NcFile::open(Path::new(&path)).unwrap();
+    eprintln!("Links: {:?}", file.h5().dataset_names());
+    for name in ["time", "longitude", "isobaricInhPa", "t"] {
+        eprintln!(
+            "{name}: metadata {:?}, attributes {:?}",
+            file.h5().dataset_metadata(name).map(|data| data.shape),
+            file.h5()
+                .attr_views(name)
+                .map(|attrs| attrs.iter().map(|attr| attr.name().to_owned()).collect::<Vec<_>>())
+        );
+    }
     eprintln!("ERA5 dimensions: {:?}", source.metadata().dimensions);
     eprintln!(
         "ERA5 temperature: {:?}",
