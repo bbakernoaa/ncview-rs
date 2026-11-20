@@ -27,10 +27,16 @@ jobs:
           echo '418469c01a9f2c09b1d1b2463593836a4cee7a3fafa4908998126dab06ea6251  /tmp/wrf.nc' | sha256sum -c
           grib_copy -w count=1 /tmp/nam.grib2 /tmp/nam-one.grib2
           grib_get_data -F '%.17g' /tmp/nam-one.grib2 | awk 'NR > 1 { v = $3 + 0; if (NR == 2 || v < min) min = v; if (NR == 2 || v > max) max = v } END { printf "%.17g %.17g\n", min, max }' > /tmp/nam-reference.txt
-      - name: Check model slices
+      - name: Check WRF slices
         env:
-          ERA5_SAMPLE: /tmp/era5.nc
           WRF_SAMPLE: /tmp/wrf.nc
+        run: cargo test --locked --test model_samples_live wrf_mass -- --ignored --nocapture
+      - name: Check NCEP NAM GRIB2
+        env:
           NAM_SAMPLE: /tmp/nam-one.grib2
           NAM_REFERENCE: /tmp/nam-reference.txt
-        run: cargo test --locked --test model_samples_live -- --ignored --nocapture
+        run: cargo test --locked --test model_samples_live ncep_nam -- --ignored --nocapture
+      - name: Check ERA5 ensemble dimensions (known failure)
+        env:
+          ERA5_SAMPLE: /tmp/era5.nc
+        run: cargo test --locked --test model_samples_live era5_member -- --ignored --nocapture

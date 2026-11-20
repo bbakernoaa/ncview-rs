@@ -72,8 +72,8 @@ the NetCDF-4 fixture generator.
 The `Public model sample checks` workflow downloads pinned ERA5, NCEP NAM GRIB2, and WRF samples;
 ordinary tests do not download these files. The ERA5 sample exercises ensemble member, time, and
 pressure axes; the WRF sample covers mass-grid temperature and staggered U wind. The NAM field's
-decoded extrema are compared against ecCodes after rounding its reference values to the decoder's
-`f32` precision. ERA5 and WRF reference values were independently read with netCDF-C. Downloads
+decoded extrema are compared against ecCodes within one `f32` epsilon at each value's magnitude.
+ERA5 and WRF reference values were independently read with netCDF-C. Downloads
 are verified by SHA-256 in the workflow. The WRF download is approximately 55 MB.
 
 The ERA5 test currently fails: the NetCDF-4 reader exposes several axes as `phony_dim_*` and
