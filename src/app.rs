@@ -47,6 +47,7 @@ pub enum Command {
     },
     CyclePalette,
     TogglePaletteReverse,
+    ToggleVerticalFlip,
     OpenPalettePicker,
     MovePalettePicker(isize),
     TogglePalettePickerReverse,
@@ -172,6 +173,7 @@ pub struct ViewModel {
     pub bounds_generation: Generation,
     pub loading: LoadingState,
     pub slice: Option<Slice2D>,
+    pub flip_vertical: bool,
     pub decoded_bytes: usize,
     pub decoded_limit: usize,
     pub collection_diagnostics: Vec<String>,
@@ -444,6 +446,7 @@ impl Default for ViewModel {
             bounds_generation: Generation(0),
             loading: LoadingState::Idle,
             slice: None,
+            flip_vertical: false,
             decoded_bytes: 0,
             decoded_limit: DEFAULT_DECODED_WORKING_SET_LIMIT,
             collection_diagnostics: Vec::new(),
@@ -589,7 +592,8 @@ impl AppState {
         true
     }
 
-    pub fn set_slice(&mut self, slice: Slice2D) {
+    pub fn set_slice(&mut self, mut slice: Slice2D) {
+        slice.flip_vertical = self.view.flip_vertical;
         self.view.decoded_bytes = slice.memory_bytes();
         self.view.slice = Some(slice);
     }
@@ -621,6 +625,7 @@ impl AppState {
             | Command::UpdateVariableQuery(_)) => self.reduce_navigation(command),
             command @ (Command::CyclePalette
             | Command::TogglePaletteReverse
+            | Command::ToggleVerticalFlip
             | Command::CycleImageFilter
             | Command::ExportCurrent
             | Command::AutomaticLimits
@@ -1000,6 +1005,19 @@ impl AppState {
             }
             Command::TogglePaletteReverse => {
                 self.view.palette = self.view.palette.clone().toggle_reversed();
+                None
+            }
+            Command::ToggleVerticalFlip => {
+                self.view.flip_vertical = !self.view.flip_vertical;
+                if let Some(slice) = self.view.slice.as_mut() {
+                    slice.flip_vertical = self.view.flip_vertical;
+                }
+                self.view.hover_point = None;
+                self.view.status = if self.view.flip_vertical {
+                    "vertical display flipped".into()
+                } else {
+                    "vertical display restored".into()
+                };
                 None
             }
             Command::CycleImageFilter => None,
@@ -2452,6 +2470,7 @@ mod raw_dimension_navigation_tests {
             statistics: None,
             coordinates: None,
             is_diff: false,
+            flip_vertical: false,
         };
         state.set_slice(previous);
         state.reduce(Command::SelectVariableAt(0));

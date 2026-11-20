@@ -225,10 +225,15 @@ mod tests {
             }
         }
         let index = SphereIndex::build(&lat, &lon);
-        for (latitude, longitude) in [(0.0, 5.0), (-89.9, 0.0), (89.9, 179.0), (45.0, 355.0)] {
+        for (case, latitude, longitude) in [
+            ("equator", 0.0, 5.0),
+            ("near the south pole", -89.9, 0.0),
+            ("near the north pole", 89.9, 179.0),
+            ("wrapped longitude", 45.0, 355.0),
+        ] {
             assert!(
                 index.nearest(latitude, longitude).is_some(),
-                "({latitude}, {longitude})"
+                "global mesh should cover the {case} test point"
             );
         }
     }

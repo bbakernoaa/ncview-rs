@@ -233,6 +233,7 @@ fn normal_command(key: KeyEvent) -> Option<Command> {
         KeyCode::Char('\'') => Some(Command::MoveFixedDimension(1)),
         KeyCode::Char('c') => Some(Command::OpenPalettePicker),
         KeyCode::Char('v') => Some(Command::TogglePaletteReverse),
+        KeyCode::Char('F') => Some(Command::ToggleVerticalFlip),
         KeyCode::Char('i') => Some(Command::CycleImageFilter),
         KeyCode::Char('e') => Some(Command::ExportCurrent),
         KeyCode::Char('a') => Some(Command::AutomaticLimits),

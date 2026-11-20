@@ -377,7 +377,8 @@ fn parse_v2_block(
 
     // --- Message scan ---
     let mut pos = msg_start;
-    while pos + 4 <= msg_end && pos + 4 <= file_data.len() {
+    let hdr_size = if track_creation_order { 6 } else { 4 };
+    while pos + hdr_size <= msg_end && pos + hdr_size <= file_data.len() {
         let msg_type = file_data[pos]; // 1-byte type
         let msg_size = {
             let hi = *file_data.get(pos + 2).ok_or_else(|| {
@@ -389,21 +390,17 @@ fn parse_v2_block(
             u16::from_le_bytes([lo, hi]) as usize
         };
         // pos+3 = message flags (1 byte)
-        let hdr_size: usize = if track_creation_order { 6 } else { 4 };
-
         let data_start = pos + hdr_size;
         let data_end = data_start + msg_size;
 
-        if data_end > file_data.len() {
-            // Truncated — stop gracefully (may be reading past checksum in OCHK)
+        if data_end > msg_end || data_end > file_data.len() {
             break;
         }
 
         if msg_type == MSG_NIL_V2 {
             // NIL is padding, not necessarily the end of the block.  HDF5
-            // writers may place another continuation message after a NIL
-            // record, so advance by its header and keep scanning.
-            pos += hdr_size;
+            // writers may leave stale metadata inside the padding body.
+            pos = data_end;
             continue;
         }
 
@@ -495,27 +492,24 @@ fn parse_v2_ochk_block(
 
     let mut pos = base4; // skip OCHK signature
 
-    while pos + 4 <= msg_area_end {
+    // Continuations inherit the creation-order flag from the owning OHDR.
+    let hdr_size = if track_creation_order { 6 } else { 4 };
+    while pos + hdr_size <= msg_area_end {
         let msg_type = file_data[pos];
         let lo = file_data[pos + 1];
         let hi = file_data[pos + 2];
         let msg_size = u16::from_le_bytes([lo, hi]) as usize;
-        // Continuation blocks inherit the creation-order flag from the owning
-        // OHDR. When set, each message has a two-byte creation-order field;
-        // starting four bytes in that case shifts datatype bodies by two bytes.
-        let hdr_size: usize = if track_creation_order { 6 } else { 4 };
-
         let data_start = pos + hdr_size;
         let data_end = data_start + msg_size;
 
-        if data_end > file_data.len() || data_end > msg_area_end + msg_size {
+        if data_end > msg_area_end {
             break;
         }
 
         if msg_type == MSG_NIL_V2 {
             // NIL records can precede a later continuation in the same
-            // chunk; treat them as padding and continue scanning.
-            pos += hdr_size;
+            // chunk. Skip the entire record before continuing.
+            pos = data_end;
             continue;
         }
 
@@ -781,6 +775,48 @@ mod tests {
         assert!(!msgs.is_empty());
         assert_eq!(msgs[0].msg_type, 0x0008);
         assert_eq!(msgs[0].data, vec![0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn test_v2_nil_skips_stale_messages_and_resumes_after_padding() {
+        // A NIL body retains an obsolete dataspace message. Only the
+        // following live attribute belongs to the object header.
+        let records = [0x00, 5, 0, 0, 0x01, 1, 0, 0, 0xff, 0x0c, 1, 0, 0, 42];
+        let mut data = b"OHDR\x02\x00".to_vec();
+        data.push(records.len() as u8);
+        data.extend_from_slice(&records);
+        data.extend_from_slice(&[0; 4]);
+
+        let messages = parse_messages(&data, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].msg_type, 0x000c);
+        assert_eq!(messages[0].data, [42]);
+    }
+
+    #[test]
+    fn test_v2_continuation_nil_skips_stale_messages() {
+        let records = [
+            0x00, 7, 0, 0, 0, 0, 0x01, 1, 0, 0, 0, 0, 0xff, 0x0c, 1, 0, 0, 0, 0, 42,
+        ];
+        let mut data = b"OCHK".to_vec();
+        data.extend_from_slice(&records);
+        data.extend_from_slice(&[0; 4]);
+        let mut messages = Vec::new();
+        parse_v2_ochk_block(
+            &data,
+            0,
+            data.len() as u64,
+            &mut messages,
+            u64::MAX,
+            &mut None,
+            true,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].msg_type, 0x000c);
+        assert_eq!(messages[0].data, [42]);
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub fn help_text() -> String {
   Shift+arrows   pan the zoomed map\n\
   c             choose colormap with preview\n\
   v             reverse colormap\n\
+  F             flip display vertically\n\
   i             cycle interpolation (set NCVIEW_SCIENTIFIC_RENDERING=0 to unlock)\n\
   e             export current slice (PNG + SVG + JSON)\n\
   =             formula editor: derive variables, e.g. O3[1]-O3[2], mean(T)\n\
