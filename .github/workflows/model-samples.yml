@@ -37,7 +37,7 @@ jobs:
           NAM_SAMPLE: /tmp/nam-one.grib2
           NAM_REFERENCE: /tmp/nam-reference.txt
         run: cargo test --locked --test model_samples_live ncep_nam -- --ignored --nocapture
-      - name: Check ERA5 ensemble dimensions (known failure)
+      - name: Check ERA5 ensemble dimensions
         env:
           ERA5_SAMPLE: /tmp/era5.nc
         run: cargo test --locked --test model_samples_live era5_member -- --ignored --nocapture

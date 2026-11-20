@@ -22,10 +22,15 @@ fn assert_values(slice: &data::slice::Slice2D, expected: &[f64]) {
 fn era5_member_time_and_pressure_match_netcdf_c() {
     let path = std::env::var("ERA5_SAMPLE").expect("ERA5_SAMPLE is required");
     let source = data::open(Path::new(&path)).unwrap();
-    eprintln!("ERA5 dimensions: {:?}", source.metadata().dimensions);
-    eprintln!(
-        "ERA5 temperature: {:?}",
-        source.metadata().variables.iter().find(|v| v.name == "t")
+    let temperature = source
+        .metadata()
+        .variables
+        .iter()
+        .find(|variable| variable.name == "t")
+        .unwrap();
+    assert_eq!(
+        temperature.dimensions,
+        ["number", "time", "isobaricInhPa", "latitude", "longitude"]
     );
     let slice = source
         .read_slice_on_axes(
