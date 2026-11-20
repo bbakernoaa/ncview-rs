@@ -76,9 +76,9 @@ decoded extrema are compared against ecCodes within one `f32` epsilon at each va
 ERA5 and WRF reference values were independently read with netCDF-C. Downloads
 are verified by SHA-256 in the workflow. The WRF download is approximately 55 MB.
 
-The ERA5 test currently fails: the NetCDF-4 reader exposes several axes as `phony_dim_*` and
-cannot reliably select the requested member and pressure level. This is a known compatibility gap;
-the optional check deliberately reports it rather than substituting guessed dimension names.
+The ERA5 check verifies the original dimension names and reads a packed temperature slice at a
+nonzero member, time, and pressure-level index. It covers HDF5 object headers that retain stale
+metadata inside padding records.
 
 Generated fixture hashes (SHA-256):
 

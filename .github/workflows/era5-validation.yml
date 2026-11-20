@@ -11,8 +11,36 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: stable
           shared-key: era5-validation
-      - name: Test real ERA5 data
+      - run: cargo test --manifest-path vendor/oxih5-format/Cargo.toml --lib header::tests
+      - name: Install ecCodes
         run: |
-          curl -fsSL --max-time 60 https://raw.githubusercontent.com/ecmwf/cfgrib/48de3e8d09b3623749174467a5ed042018fc3e18/tests/sample-data/era5-levels-members.nc -o /tmp/era5.nc
-          ERA5_SAMPLE=/tmp/era5.nc cargo test --locked --test model_samples_live era5_member -- --ignored --nocapture
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libeccodes-tools
+      - name: Download and verify pinned model samples
+        run: |
+          set -euo pipefail
+          cfgrib=https://raw.githubusercontent.com/ecmwf/cfgrib/48de3e8d09b3623749174467a5ed042018fc3e18
+          wrf=https://raw.githubusercontent.com/xarray-contrib/xwrf-data/7a6100a48ee1b39a3fce3465e4da9e2c2a53cf6c
+          curl -fL --retry 2 "$cfgrib/tests/sample-data/era5-levels-members.nc" -o /tmp/era5.nc
+          curl -fL --retry 2 "$cfgrib/nam.t00z.awp21100.tm00.grib2" -o /tmp/nam.grib2
+          curl -fL --retry 2 "$wrf/data/wrfout_d01_2099-10-01_00%3A00%3A00.nc" -o /tmp/wrf.nc
+          echo 'db82b7db1d50a113b5d9e1d252678f5e5b769d3fb1b31eaa258fdc2e2431aee9  /tmp/era5.nc' | sha256sum -c
+          echo '986ee0edfb54dd33a5216f147635edb0b9ca2a6aab58cb29dbba152fa75f7e98  /tmp/nam.grib2' | sha256sum -c
+          echo '418469c01a9f2c09b1d1b2463593836a4cee7a3fafa4908998126dab06ea6251  /tmp/wrf.nc' | sha256sum -c
+          grib_copy -w count=1 /tmp/nam.grib2 /tmp/nam-one.grib2
+          grib_get_data -F '%.17g' /tmp/nam-one.grib2 | awk 'NR > 1 { v = $3 + 0; if (NR == 2 || v < min) min = v; if (NR == 2 || v > max) max = v } END { printf "%.17g %.17g\n", min, max }' > /tmp/nam-reference.txt
+      - name: Check WRF slices
+        env:
+          WRF_SAMPLE: /tmp/wrf.nc
+        run: cargo test --locked --test model_samples_live wrf_mass -- --ignored --nocapture
+      - name: Check NCEP NAM GRIB2
+        env:
+          NAM_SAMPLE: /tmp/nam-one.grib2
+          NAM_REFERENCE: /tmp/nam-reference.txt
+        run: cargo test --locked --test model_samples_live ncep_nam -- --ignored --nocapture
+      - name: Check ERA5 ensemble dimensions
+        env:
+          ERA5_SAMPLE: /tmp/era5.nc
+        run: cargo test --locked --test model_samples_live era5_member -- --ignored --nocapture

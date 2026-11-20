@@ -778,6 +778,48 @@ mod tests {
     }
 
     #[test]
+    fn test_v2_nil_skips_stale_messages_and_resumes_after_padding() {
+        // A NIL body retains an obsolete dataspace message. Only the
+        // following live attribute belongs to the object header.
+        let records = [0x00, 5, 0, 0, 0x01, 1, 0, 0, 0xff, 0x0c, 1, 0, 0, 42];
+        let mut data = b"OHDR\x02\x00".to_vec();
+        data.push(records.len() as u8);
+        data.extend_from_slice(&records);
+        data.extend_from_slice(&[0; 4]);
+
+        let messages = parse_messages(&data, 0).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].msg_type, 0x000c);
+        assert_eq!(messages[0].data, [42]);
+    }
+
+    #[test]
+    fn test_v2_continuation_nil_skips_stale_messages() {
+        let records = [
+            0x00, 7, 0, 0, 0, 0, 0x01, 1, 0, 0, 0, 0, 0xff, 0x0c, 1, 0, 0, 0, 0, 42,
+        ];
+        let mut data = b"OCHK".to_vec();
+        data.extend_from_slice(&records);
+        data.extend_from_slice(&[0; 4]);
+        let mut messages = Vec::new();
+        parse_v2_ochk_block(
+            &data,
+            0,
+            data.len() as u64,
+            &mut messages,
+            u64::MAX,
+            &mut None,
+            true,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].msg_type, 0x000c);
+        assert_eq!(messages[0].data, [42]);
+    }
+
+    #[test]
     fn test_parse_messages_v2_with_ochk_continuation() {
         // Build an OHDR that contains a continuation message pointing to an OCHK block.
         // OCHK contains one attribute message.
