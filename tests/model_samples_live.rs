@@ -139,14 +139,18 @@ fn ncep_nam_grib2_range_matches_eccodes() {
         })
         .unwrap();
     let stats = slice.statistics.unwrap();
+    // The GRIB decoder supplies f32 values; round the ecCodes reference to
+    // the same representation before comparing extrema.
+    let expected_min = f64::from(reference[0] as f32);
+    let expected_max = f64::from(reference[1] as f32);
     assert!(
-        (stats.min - reference[0]).abs() < 1.0e-4,
+        (stats.min - expected_min).abs() < 1.0e-4,
         "ncv min {} != ecCodes {}",
         stats.min,
         reference[0]
     );
     assert!(
-        (stats.max - reference[1]).abs() < 1.0e-4,
+        (stats.max - expected_max).abs() < 1.0e-4,
         "ncv max {} != ecCodes {}",
         stats.max,
         reference[1]

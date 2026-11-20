@@ -67,6 +67,19 @@ The committed MPAS fixture is generated once and checked in because the current 
 is intentionally read-only. The fixture is covered by the normal test suite and is not rewritten by
 the NetCDF-4 fixture generator.
 
+## Optional public model samples
+
+The `Public model sample checks` workflow downloads pinned ERA5, NCEP NAM GRIB2, and WRF samples;
+ordinary tests do not download these files. The ERA5 sample exercises ensemble member, time, and
+pressure axes; the WRF sample covers mass-grid temperature and staggered U wind. The NAM field's
+decoded extrema are compared against ecCodes after rounding its reference values to the decoder's
+`f32` precision. ERA5 and WRF reference values were independently read with netCDF-C. Downloads
+are verified by SHA-256 in the workflow. The WRF download is approximately 55 MB.
+
+The ERA5 test currently fails: the NetCDF-4 reader exposes several axes as `phony_dim_*` and
+cannot reliably select the requested member and pressure level. This is a known compatibility gap;
+the optional check deliberately reports it rather than substituting guessed dimension names.
+
 Generated fixture hashes (SHA-256):
 
 - `regular.nc4`: `9759f4bc44bc326c93dc0f8aeefda44f945a2673f207d7696f61c901d5fbcd48`
