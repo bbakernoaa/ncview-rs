@@ -17,7 +17,7 @@ jobs:
           sudo apt-get install -y -qq netcdf-bin python3-scipy
           curl --fail --location --retry 2 --max-time 120 -o /tmp/modele.nc https://data.giss.nasa.gov/modelE/greenland-smb/data/ANN.0002-0011.E2-control.nc
           ncdump -k /tmp/modele.nc
-          /usr/bin/python3 -c 'from scipy.io import netcdf_file; f=netcdf_file("/tmp/modele.nc",mmap=False); v=f.variables["FRMP"]; a=v[:].ravel(); missing=float(v.missing_value); out=open("/tmp/giss-reference.txt","w"); out.writelines(f"{float(x):.17g} {int(float(x)==missing)}\\n" for x in a); out.close(); f.close()'
+          /usr/bin/python3 -c 'from scipy.io import netcdf_file; f=netcdf_file("/tmp/modele.nc",mmap=False); v=f.variables["FRMP"]; a=v[:].ravel(); missing=float(v.missing_value); out=open("/tmp/giss-reference.txt","w"); out.writelines(f"{float(x):.17g} {int(float(x)==missing)}\n" for x in a); out.close(); f.close()'
       - name: Compare viewer with SciPy
         env:
           GISS_SAMPLE: /tmp/modele.nc
