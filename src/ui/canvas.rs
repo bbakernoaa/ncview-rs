@@ -239,6 +239,7 @@ fn render_content(
             show_land_borders,
             scale,
             selected_point,
+            slice.flip_vertical,
         );
         let image_area = graphics.drawable_area(inner);
         if graphics.render_with_key(frame, inner, render_key, || {
@@ -282,6 +283,11 @@ fn render_content(
         .is_some_and(|grid| grid.latitude_increases_with_source_row());
     let lines = (0..height)
         .map(|screen_row| {
+            let screen_row = if slice.flip_vertical {
+                height - 1 - screen_row
+            } else {
+                screen_row
+            };
             let source_row = slice.coordinates.as_ref().map_or_else(
                 || screen_row * rows / height,
                 |grid| {
@@ -376,6 +382,7 @@ fn map_render_key(
     show_land_borders: bool,
     scale: ScaleMode,
     _selected_point: Option<(usize, usize)>,
+    flip_vertical: bool,
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     generation.hash(&mut hasher);
@@ -388,6 +395,7 @@ fn map_render_key(
     hash_limits(&mut hasher, filter);
     show_land_borders.hash(&mut hasher);
     scale.hash(&mut hasher);
+    flip_vertical.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -422,6 +430,11 @@ fn render_selected_marker(
             )
         },
     );
+    let display_row = if slice.flip_vertical {
+        usize::from(area.height).saturating_sub(1 + display_row)
+    } else {
+        display_row
+    };
     let display_col = col.saturating_mul(usize::from(area.width)) / cols;
     if display_row >= usize::from(area.height) || display_col >= usize::from(area.width) {
         return;
@@ -514,6 +527,7 @@ mod tests {
                 false,
                 ScaleMode::Linear,
                 selected_point,
+                false,
             )
         };
 

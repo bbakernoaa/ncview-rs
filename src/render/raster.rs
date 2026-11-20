@@ -72,6 +72,9 @@ pub fn rgb_raster_with_limits(
             }
         }
     }
+    if slice.flip_vertical {
+        image::imageops::flip_vertical_in_place(&mut image);
+    }
     image
 }
 
@@ -236,6 +239,9 @@ fn rasterize(
     }
     if let Some(point) = hover_point {
         mark_point(&mut image, slice, point, [255, 255, 255]);
+    }
+    if slice.flip_vertical {
+        image::imageops::flip_vertical_in_place(&mut image);
     }
     image
 }

@@ -2048,13 +2048,15 @@ fn translate_mouse_release(
             current.col_end.saturating_sub(current.col_start),
         )
     {
+        let rows = if slice.flip_vertical { -rows } else { rows };
         return Command::Pan { rows, cols };
     }
     let (rows, cols) = slice.source_bounds.shape();
-    let flip_rows = slice
-        .coordinates
-        .as_ref()
-        .is_some_and(|grid| grid.latitude_increases_with_source_row());
+    let flip_rows = slice.flip_vertical
+        ^ slice
+            .coordinates
+            .as_ref()
+            .is_some_and(|grid| grid.latitude_increases_with_source_row());
     if let Some(bounds) = drag.bounds_with_row_flip(canvas, rows, cols, flip_rows) {
         return Command::Zoom(Bounds {
             row_start: slice.source_bounds.row_start + bounds.row_start,
@@ -2498,10 +2500,11 @@ fn map_point_at(
             drawable.height.min(u16::try_from(rows).unwrap_or(u16::MAX)),
         )
     };
-    let flip_rows = slice
-        .coordinates
-        .as_ref()
-        .is_some_and(|grid| grid.latitude_increases_with_source_row());
+    let flip_rows = slice.flip_vertical
+        ^ slice
+            .coordinates
+            .as_ref()
+            .is_some_and(|grid| grid.latitude_increases_with_source_row());
     let (row, col) =
         screen_to_source_with_row_flip(x, y, drawable, slice.source_bounds, flip_rows)?;
     let value = slice.value_at_source(row, col);
@@ -4370,7 +4373,9 @@ mod file_switch_timeline_tests {
 
 #[cfg(test)]
 mod sidebar_hit_tests {
-    use super::{level_geometry, translate_scroll, translate_sidebar_position};
+    use super::{
+        level_geometry, map_drawable, map_point_at, translate_scroll, translate_sidebar_position,
+    };
     use ncview_rs::app::{AppState, Command};
     use ratatui::layout::Rect;
 
@@ -4383,6 +4388,34 @@ mod sidebar_hit_tests {
         state.view.depth_length = 12;
         state.view.level_labels = (0..12).map(|i| format!("L{i}")).collect();
         state
+    }
+
+    #[test]
+    fn flipped_display_maps_clicks_to_the_corresponding_source_row() {
+        use ncview_rs::data::slice::{Bounds, Slice2D, Validity};
+        let mut state = AppState::default();
+        let slice = Slice2D::new(
+            ndarray::arr2(&[[1.0, 2.0], [3.0, 4.0]]),
+            ndarray::Array2::from_elem((2, 2), Validity::Finite),
+            Bounds::new(0, 2, 0, 2).unwrap(),
+        )
+        .unwrap();
+        state.set_slice(slice);
+        let area = Rect::new(0, 0, 100, 50);
+        let canvas = map_drawable(area, &state.view, None).unwrap();
+        assert_eq!(
+            map_point_at(canvas.x, canvas.y, area, &state.view, None)
+                .unwrap()
+                .0,
+            0
+        );
+        state.reduce(Command::ToggleVerticalFlip);
+        assert_eq!(
+            map_point_at(canvas.x, canvas.y, area, &state.view, None)
+                .unwrap()
+                .0,
+            1
+        );
     }
 
     #[test]

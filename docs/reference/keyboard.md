@@ -26,6 +26,7 @@ Every interactive control, in one table. This mirrors the in-app help (`?`).
 | `Shift`+arrows | pan the zoomed map |
 | `c` | open colormap chooser with a focused preview |
 | `v` | reverse the active colormap; in the chooser, reverse the focused preview |
+| `F` | flip the displayed map vertically |
 | `i` | cycle interpolation (set `NCVIEW_SCIENTIFIC_RENDERING=0` to unlock) |
 | `e` | export current slice (PNG + SVG + JSON) |
 | `=` | formula editor — derive variables such as `O3[1]-O3[2]` or `mean(T)` |

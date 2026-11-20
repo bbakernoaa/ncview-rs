@@ -1109,6 +1109,7 @@ mod tests {
             }),
             coordinates: None,
             is_diff: false,
+            flip_vertical: false,
         };
         let rendered = render_sidebar_with(None, &empty_metadata(), Some(&slice));
         // Each statistic is labelled on its own line rather than packed onto

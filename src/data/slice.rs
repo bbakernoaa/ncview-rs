@@ -227,6 +227,8 @@ pub struct Slice2D {
     pub statistics: Option<Statistics>,
     pub coordinates: Option<Arc<CoordinateGrid>>,
     pub is_diff: bool,
+    /// Reverses the displayed rows without changing source values or indices.
+    pub flip_vertical: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -348,6 +350,7 @@ impl Slice2D {
             statistics,
             coordinates: None,
             is_diff: false,
+            flip_vertical: false,
         })
     }
 
